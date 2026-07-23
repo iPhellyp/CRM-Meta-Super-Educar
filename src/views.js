@@ -16,7 +16,11 @@ function esc(value) {
     .replaceAll("'", '&#039;');
 }
 
-function layout(title, body, { logged = true } = {}) {
+function csrfField(csrfToken) {
+  return `<input type="hidden" name="_csrf" value="${esc(csrfToken)}">`;
+}
+
+function layout(title, body, { logged = true, csrfToken = '' } = {}) {
   return `<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -26,19 +30,20 @@ function layout(title, body, { logged = true } = {}) {
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-  ${logged ? `<header><strong>CRM Meta · Super Educar</strong><nav><a href="/">Leads</a><a href="/events">Eventos Meta</a><form method="post" action="/logout"><button class="link">Sair</button></form></nav></header>` : ''}
+  ${logged ? `<header><strong>CRM Meta · Super Educar</strong><nav><a href="/">Leads</a><a href="/events">Eventos Meta</a><form method="post" action="/logout">${csrfField(csrfToken)}<button class="link">Sair</button></form></nav></header>` : ''}
   <main>${body}</main>
 </body>
 </html>`;
 }
 
-export function loginView(error = '') {
+export function loginView(error = '', csrfToken = '') {
   return layout('Entrar', `
     <section class="login-card">
       <h1>CRM Meta</h1>
       <p>Bridge de leads qualificados e matrículas.</p>
       ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
       <form method="post" action="/login" class="stack">
+        ${csrfField(csrfToken)}
         <label>E-mail<input name="email" type="email" required autocomplete="username"></label>
         <label>Senha<input name="password" type="password" required autocomplete="current-password"></label>
         <button type="submit">Entrar</button>
@@ -50,7 +55,7 @@ function stat(label, value) {
   return `<div class="stat"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
 }
 
-function stageActions(lead) {
+function stageActions(lead, csrfToken) {
   const stages = [
     ['CONTACTED', 'Atendimento'],
     ['QUALIFIED', 'Qualificar'],
@@ -60,6 +65,7 @@ function stageActions(lead) {
   ];
   return stages.map(([stage, label]) => `
     <form method="post" action="/leads/${lead.id}/stage">
+      ${csrfField(csrfToken)}
       <input type="hidden" name="stage" value="${stage}">
       <button class="small ${stage === 'MATRICULATED' ? 'success' : stage === 'LOST' ? 'danger' : ''}" ${lead.stage === stage ? 'disabled' : ''}>${label}</button>
     </form>`).join('');
@@ -72,6 +78,7 @@ export function dashboardView({
   message = '',
   error = '',
   operationStartAt = null,
+  csrfToken = '',
 }) {
   const rows = leads.map((lead) => `
     <tr>
@@ -79,7 +86,7 @@ export function dashboardView({
       <td>${esc(lead.course || '—')}<small>${esc(lead.city || '')}</small></td>
       <td><span class="badge ${esc(lead.stage.toLowerCase())}">${esc(stageLabels[lead.stage] || lead.stage)}</span><small>${esc(lead.source)}</small></td>
       <td>${lead.meta_lead_id ? `<span class="ok">✓ atribuído</span><small>${esc(lead.meta_lead_id)}</small>` : '<span class="muted">sem lead_id</span>'}</td>
-      <td><div class="actions">${stageActions(lead)}</div></td>
+      <td><div class="actions">${stageActions(lead, csrfToken)}</div></td>
     </tr>`).join('');
 
   return layout('Leads', `
@@ -96,18 +103,18 @@ export function dashboardView({
     </section>
 
     <section class="stats">
-      ${stat('Total', counts.total)}${stat('Novos', counts.new)}${stat('Qualificados', counts.qualified)}${stat('Oportunidades', counts.opportunity)}${stat('Matriculados', counts.matriculated)}${stat('Com Meta ID', counts.attributed)}
+      ${stat('Total', counts.total)}${stat('Novos', counts.new)}${stat('Qualificados', counts.qualified)}${stat('Oportunidades', counts.opportunity)}${stat('Matriculados', counts.matriculated)}${stat('Perdidos', counts.lost)}${stat('Taxa de qualificação', `${counts.qualificationRate}%`)}${stat('Taxa de matrícula', `${counts.matriculationRate}%`)}${stat('Eventos pendentes', counts.metaPending)}${stat('Eventos em nova tentativa', counts.metaRetry)}${stat('Eventos com falha', counts.metaFailed)}
     </section>
 
     <section class="panel">
       <h2>Novo lead manual</h2>
       <form method="post" action="/leads" class="grid-form">
+        ${csrfField(csrfToken)}
         <label>Nome<input name="name" required></label>
         <label>Telefone<input name="phone"></label>
         <label>E-mail<input name="email" type="email"></label>
         <label>Curso<input name="course"></label>
         <label>Cidade<input name="city"></label>
-        <label>Meta leadgen_id<input name="metaLeadId" inputmode="numeric"></label>
         <button type="submit">Adicionar lead</button>
       </form>
     </section>
@@ -125,7 +132,7 @@ export function dashboardView({
         <tbody>${rows || '<tr><td colspan="5" class="empty">Nenhum lead ainda.</td></tr>'}</tbody>
       </table></div>
     </section>
-  `);
+  `, { csrfToken });
 }
 
 function statusClass(status) {
@@ -136,10 +143,10 @@ function statusClass(status) {
   return 'new';
 }
 
-export function eventsView({ events, jobs, message = '', error = '' }) {
+export function eventsView({ events, jobs, message = '', error = '', csrfToken = '' }) {
   const rows = events.map((event) => `
     <tr>
-      <td><strong>${esc(event.event_name)}</strong><small>${esc(event.event_id)}</small></td>
+      <td><strong>${esc(event.event_name)}</strong><small>${event.event_id.endsWith(':test') ? 'TESTE' : 'PRODUÇÃO'} · ${esc(event.event_id)}</small></td>
       <td>${esc(event.lead_name)}<small>${esc(event.meta_lead_id || 'sem lead_id')}</small></td>
       <td><span class="badge ${statusClass(event.status)}">${esc(event.status)}</span><small>${esc(event.attempts)} tentativa(s)</small></td>
       <td>${event.sent_at ? esc(new Date(event.sent_at).toLocaleString('pt-BR')) : '—'}${event.last_error ? `<small class="error-text">${esc(event.last_error)}</small>` : ''}</td>
@@ -149,7 +156,7 @@ export function eventsView({ events, jobs, message = '', error = '' }) {
     <tr>
       <td>
         <strong>${job.job_type === 'LEAD_IMPORT' ? 'Importação de lead' : esc(job.event_name || 'Conversão')}</strong>
-        <small>${esc(job.meta_lead_id || job.id)}</small>
+        <small>${job.event_id ? `${job.event_id.endsWith(':test') ? 'TESTE' : 'PRODUÇÃO'} · ` : ''}${esc(job.meta_lead_id || job.id)}</small>
       </td>
       <td>${esc(job.lead_name || '—')}<small>${esc(new Date(job.created_at).toLocaleString('pt-BR'))}</small></td>
       <td>
@@ -160,6 +167,7 @@ export function eventsView({ events, jobs, message = '', error = '' }) {
         ${job.last_error ? `<small class="error-text">${esc(job.last_error)}</small>` : '—'}
         ${job.status === 'FAILED' ? `
           <form method="post" action="/jobs/${job.id}/retry" class="retry-form">
+            ${csrfField(csrfToken)}
             <button type="submit" class="small">Reenviar</button>
           </form>` : ''}
       </td>
@@ -180,5 +188,5 @@ export function eventsView({ events, jobs, message = '', error = '' }) {
       <thead><tr><th>Evento</th><th>Lead</th><th>Status</th><th>Envio/erro</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="4" class="empty">Nenhum evento enviado.</td></tr>'}</tbody>
     </table></div></section>
-  `);
+  `, { csrfToken });
 }

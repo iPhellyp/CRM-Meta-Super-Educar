@@ -12,6 +12,18 @@ Serviço enxuto e separado do SR Gestão para:
 
 Este é um bridge operacional, não um CRM completo. Ele não inclui WhatsApp, IA, múltiplos vendedores, importação de listas antigas, automações avançadas ou integração com o SR Gestão.
 
+## Limitações conhecidas desta versão
+
+- WhatsApp;
+- integração automática com o SR Gestão;
+- Ads Insights API;
+- gastos, CPM, CTR e CPC no CRM;
+- Pixel para website;
+- Conversions API para Web;
+- listas antigas;
+- importação CSV;
+- automações comerciais avançadas.
+
 ## Como o fluxo funciona
 
 1. A Meta envia o webhook para `POST /webhooks/meta/leadgen`.
@@ -35,9 +47,10 @@ APP_URL=https://crm.supereducarbrasil.com.br
 
 POSTGRES_PASSWORD=
 DATABASE_URL=postgresql://crm_meta:SENHA@postgres:5432/crm_meta
+DATABASE_SSL=false
 
 ADMIN_EMAIL=
-ADMIN_PASSWORD=
+ADMIN_PASSWORD_HASH=
 SESSION_SECRET=
 COOKIE_SECURE=true
 OPERATION_START_AT=2026-07-23T00:00:00-03:00
@@ -58,6 +71,34 @@ DEFAULT_TENANT_ID=super-educar
 `OPERATION_START_AT` deve ser uma data ISO 8601 com fuso. A tela principal e seus indicadores mostram, por padrão, apenas leads criados a partir dela. Leads anteriores continuam armazenados sem alteração.
 
 Em produção HTTPS, `COOKIE_SECURE=true` é obrigatório. Use `COOKIE_SECURE=false` apenas no acesso local por `http://localhost`.
+
+### Gerar o hash da senha administrativa
+
+A senha não é armazenada nem comparada em texto puro. Gere um hash `scrypt` localmente e copie somente a saída para `ADMIN_PASSWORD_HASH`.
+
+PowerShell:
+
+```powershell
+$securePassword = Read-Host "Senha administrativa" -AsSecureString
+$env:CRM_PASSWORD_TO_HASH = [Net.NetworkCredential]::new("", $securePassword).Password
+node -e "const c=require('node:crypto');const s=c.randomBytes(16);const h=c.scryptSync(process.env.CRM_PASSWORD_TO_HASH,s,32,{N:16384,r:8,p:1,maxmem:67108864});console.log(['scrypt',16384,8,1,s.toString('hex'),h.toString('hex')].join(String.fromCharCode(36)))"
+Remove-Item Env:CRM_PASSWORD_TO_HASH
+```
+
+Linux:
+
+```bash
+read -rsp "Senha administrativa: " CRM_PASSWORD_TO_HASH
+export CRM_PASSWORD_TO_HASH
+node -e "const c=require('node:crypto');const s=c.randomBytes(16);const h=c.scryptSync(process.env.CRM_PASSWORD_TO_HASH,s,32,{N:16384,r:8,p:1,maxmem:67108864});console.log(['scrypt',16384,8,1,s.toString('hex'),h.toString('hex')].join(String.fromCharCode(36)))"
+unset CRM_PASSWORD_TO_HASH
+```
+
+No `.env`, coloque o hash entre aspas simples para preservar os caracteres `$`:
+
+```env
+ADMIN_PASSWORD_HASH='scrypt$16384$8$1$SAL_HEX$HASH_HEX'
+```
 
 ## PowerShell local / Windows
 
@@ -188,7 +229,7 @@ docker compose logs app
 docker compose logs worker
 ```
 
-O `/health` informa app, banco, heartbeat do worker, configuração Meta e quantidades de jobs pendentes e com erro. Ele mostra apenas presença/ausência de configuração, nunca tokens ou senhas.
+O `/health` público retorna apenas `{"ok":true}` quando app e banco respondem. O healthcheck separado do worker valida a atualidade do heartbeat sem expor detalhes.
 
 ### 2. Teste integrado com a Meta
 
@@ -213,6 +254,7 @@ Os testes integrados exigem credenciais reais de um aplicativo, Página e datase
 - Um evento já marcado como `SENT` não é enviado novamente.
 - O mesmo `event_id` também permite deduplicação pela Meta caso o worker caia após a aceitação remota e antes da confirmação local.
 - Cada mudança de etapa grava etapa anterior, nova etapa, data e origem.
+- Leads sem o `leadgen_id` original podem ser operados no painel, mas não geram conversões atribuídas à Meta.
 
 ## Eventos enviados
 
@@ -227,6 +269,7 @@ Este fluxo é server-side e envia eventos diretamente ao dataset pela Conversion
 ## Segurança
 
 - Nunca registre ou versione `.env`, tokens, App Secret ou senhas.
+- Use somente `ADMIN_PASSWORD_HASH`; `ADMIN_PASSWORD` em texto puro não é aceito.
 - Use HTTPS e `COOKIE_SECURE=true` em produção.
 - Restrinja o acesso ao painel e monitore `/health` e os logs do worker.
 - Faça backup do PostgreSQL antes de qualquer manutenção operacional.

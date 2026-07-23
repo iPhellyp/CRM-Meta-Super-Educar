@@ -11,7 +11,7 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 }
 
 $envContent = Get-Content ".env" -Raw
-if ($envContent -match "troque_esta_senha") {
+if ($envContent -match "troque_esta_senha|gere-um-hash-scrypt|troque-por-uma-chave") {
   Write-Host "Edite .env e troque senhas/tokens antes de continuar." -ForegroundColor Yellow
   notepad ".env"
   exit 0

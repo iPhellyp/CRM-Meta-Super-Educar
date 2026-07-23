@@ -23,6 +23,16 @@ function tenantId() {
   return process.env.DEFAULT_TENANT_ID || DEFAULT_TENANT_ID;
 }
 
+export function validateDatabaseConfig() {
+  const errors = [];
+  if (!String(process.env.DATABASE_URL || '').trim()) errors.push('DATABASE_URL');
+  if (!['true', 'false'].includes(process.env.DATABASE_SSL || '')) {
+    errors.push('DATABASE_SSL=true ou false');
+  }
+  if (!String(process.env.DEFAULT_TENANT_ID || '').trim()) errors.push('DEFAULT_TENANT_ID');
+  if (errors.length) throw new Error(`Configuração do banco inválida: ${errors.join(', ')}`);
+}
+
 export function operationStartAt() {
   const value = process.env.OPERATION_START_AT;
   if (!value) return null;
@@ -56,8 +66,8 @@ export async function healthcheck() {
 }
 
 export async function listLeads({ stage, search, limit = 200, createdAfter = operationStartAt() } = {}) {
-  const values = [];
-  const where = [];
+  const values = [tenantId()];
+  const where = ['tenant_id = $1'];
 
   if (stage) {
     values.push(stage);
@@ -71,21 +81,16 @@ export async function listLeads({ stage, search, limit = 200, createdAfter = ope
 
   if (createdAfter) {
     values.push(createdAfter);
-    where.push(`created_at >= $${values.length}`);
+    where.push(`COALESCE(received_at, created_at) >= $${values.length}`);
   }
 
   values.push(limit);
   const result = await pool.query(
     `SELECT * FROM leads ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-     ORDER BY created_at DESC LIMIT $${values.length}`,
+     ORDER BY COALESCE(received_at, created_at) DESC LIMIT $${values.length}`,
     values,
   );
   return result.rows;
-}
-
-export async function getLead(id) {
-  const result = await pool.query('SELECT * FROM leads WHERE id = $1', [id]);
-  return result.rows[0] ?? null;
 }
 
 export async function upsertLead(input) {
@@ -95,19 +100,23 @@ export async function upsertLead(input) {
     const result = await pool.query(
       `INSERT INTO leads (
         tenant_id, name, email, phone, course, city, source, stage,
-        meta_lead_id, meta_form_id, meta_ad_id, meta_adset_id, meta_campaign_id, raw_meta
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        meta_lead_id, meta_page_id, meta_form_id, meta_ad_id, meta_adset_id,
+        meta_campaign_id, meta_created_at, received_at, raw_meta
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
       ON CONFLICT (tenant_id, meta_lead_id) WHERE meta_lead_id IS NOT NULL
       DO UPDATE SET
-        name = COALESCE(EXCLUDED.name, leads.name),
-        email = COALESCE(EXCLUDED.email, leads.email),
-        phone = COALESCE(EXCLUDED.phone, leads.phone),
-        course = COALESCE(EXCLUDED.course, leads.course),
-        city = COALESCE(EXCLUDED.city, leads.city),
+        name = COALESCE(NULLIF(EXCLUDED.name, ''), leads.name),
+        email = COALESCE(NULLIF(EXCLUDED.email, ''), leads.email),
+        phone = COALESCE(NULLIF(EXCLUDED.phone, ''), leads.phone),
+        course = COALESCE(NULLIF(EXCLUDED.course, ''), leads.course),
+        city = COALESCE(NULLIF(EXCLUDED.city, ''), leads.city),
+        meta_page_id = COALESCE(NULLIF(EXCLUDED.meta_page_id, ''), leads.meta_page_id),
         meta_form_id = COALESCE(EXCLUDED.meta_form_id, leads.meta_form_id),
         meta_ad_id = COALESCE(EXCLUDED.meta_ad_id, leads.meta_ad_id),
         meta_adset_id = COALESCE(EXCLUDED.meta_adset_id, leads.meta_adset_id),
         meta_campaign_id = COALESCE(EXCLUDED.meta_campaign_id, leads.meta_campaign_id),
+        meta_created_at = COALESCE(EXCLUDED.meta_created_at, leads.meta_created_at),
+        received_at = COALESCE(leads.received_at, EXCLUDED.received_at),
         raw_meta = COALESCE(EXCLUDED.raw_meta, leads.raw_meta),
         updated_at = now()
       RETURNING *`,
@@ -121,10 +130,13 @@ export async function upsertLead(input) {
         input.source || 'META_INSTANT_FORM',
         input.stage || 'NEW',
         String(input.metaLeadId),
+        input.metaPageId ? String(input.metaPageId) : null,
         input.metaFormId || null,
         input.metaAdId || null,
         input.metaAdsetId || null,
         input.metaCampaignId || null,
+        input.metaCreatedAt || null,
+        input.receivedAt || new Date(),
         input.rawMeta || null,
       ],
     );
@@ -179,14 +191,18 @@ async function enqueueConversionJob(client, event) {
 }
 
 export async function moveLeadStage(id, stage, {
-  origin = 'PANEL',
+  origin = 'MANUAL',
+  changedBy = null,
   eventName = null,
   mode = 'live',
 } = {}) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const current = await client.query('SELECT * FROM leads WHERE id = $1 FOR UPDATE', [id]);
+    const current = await client.query(
+      'SELECT * FROM leads WHERE id = $1 AND tenant_id = $2 FOR UPDATE',
+      [id, tenantId()],
+    );
     if (current.rowCount === 0) {
       await client.query('ROLLBACK');
       return null;
@@ -194,13 +210,16 @@ export async function moveLeadStage(id, stage, {
 
     const previousLead = current.rows[0];
     const timestampColumn = {
+      CONTACTED: 'first_contact_at',
       QUALIFIED: 'qualified_at',
       OPPORTUNITY: 'opportunity_at',
-      MATRICULATED: 'matriculated_at',
+      MATRICULATED: 'converted_at',
       LOST: 'lost_at',
     }[stage];
     const setTimestamp = timestampColumn
-      ? `, ${timestampColumn} = COALESCE(${timestampColumn}, now())`
+      ? `, ${timestampColumn} = COALESCE(${timestampColumn}, now())${
+        stage === 'MATRICULATED' ? ', matriculated_at = COALESCE(matriculated_at, now())' : ''
+      }`
       : '';
 
     let lead = previousLead;
@@ -212,42 +231,33 @@ export async function moveLeadStage(id, stage, {
       );
       lead = updated.rows[0];
       await client.query(
-        `INSERT INTO lead_stage_history (lead_id, previous_stage, new_stage, origin)
-         VALUES ($1, $2, $3, $4)`,
-        [id, previousLead.stage, stage, origin],
+        `INSERT INTO lead_stage_history (
+           lead_id, previous_stage, new_stage, origin, changed_by
+         ) VALUES ($1, $2, $3, $4, $5)`,
+        [id, previousLead.stage, stage, origin, changedBy],
       );
     }
 
     let event = null;
     let jobCreated = false;
-    if (eventName) {
+    if (eventName && lead.meta_lead_id) {
       event = await createOrGetMetaEvent(client, {
         lead,
         eventName,
-        eventTime: new Date(),
+        eventTime: timestampColumn ? lead[timestampColumn] : new Date(),
         mode,
       });
       jobCreated = await enqueueConversionJob(client, event);
     }
 
     await client.query('COMMIT');
-    return { lead, event, jobCreated, stageChanged: previousLead.stage !== stage };
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
-export async function queueMetaConversionEvent({ lead, eventName, eventTime = new Date(), mode }) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const event = await createOrGetMetaEvent(client, { lead, eventName, eventTime, mode });
-    const jobCreated = await enqueueConversionJob(client, event);
-    await client.query('COMMIT');
-    return { event, jobCreated };
+    return {
+      lead,
+      event,
+      jobCreated,
+      stageChanged: previousLead.stage !== stage,
+      attributed: Boolean(lead.meta_lead_id),
+    };
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
@@ -257,15 +267,25 @@ export async function queueMetaConversionEvent({ lead, eventName, eventTime = ne
 }
 
 export async function enqueueLeadgenJobs(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { accepted: 0, duplicates: 0 };
+  }
   const jobs = [];
   for (const entry of payload.entry || []) {
     for (const change of entry.changes || []) {
       if (change.field !== 'leadgen') continue;
       const value = change.value || {};
-      if (!value.leadgen_id) continue;
+      if (!/^\d{1,100}$/.test(String(value.leadgen_id || ''))) continue;
       jobs.push({
         metaLeadId: String(value.leadgen_id),
-        webhookValue: value,
+        receivedAt: new Date().toISOString(),
+        webhookValue: {
+          leadgen_id: String(value.leadgen_id),
+          page_id: value.page_id ? String(value.page_id) : entry.id ? String(entry.id) : null,
+          form_id: value.form_id ? String(value.form_id) : null,
+          ad_id: value.ad_id ? String(value.ad_id) : null,
+          created_time: value.created_time ?? null,
+        },
       });
     }
   }
@@ -298,13 +318,13 @@ export async function enqueueLeadgenJobs(payload) {
 }
 
 export async function getDashboardCounts({ createdAfter = operationStartAt() } = {}) {
-  const values = [];
-  const where = [];
+  const values = [tenantId()];
+  const where = ['tenant_id = $1'];
   if (createdAfter) {
     values.push(createdAfter);
-    where.push(`created_at >= $${values.length}`);
+    where.push(`COALESCE(received_at, created_at) >= $${values.length}`);
   }
-  const result = await pool.query(`
+  const [result, queue] = await Promise.all([pool.query(`
     SELECT
       count(*)::int AS total,
       count(*) FILTER (WHERE stage = 'NEW')::int AS new,
@@ -315,8 +335,17 @@ export async function getDashboardCounts({ createdAfter = operationStartAt() } =
       count(*) FILTER (WHERE meta_lead_id IS NOT NULL)::int AS attributed
     FROM leads
     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-  `, values);
-  return result.rows[0];
+  `, values), getQueueHealth()]);
+  const counts = result.rows[0];
+  const qualifiedJourney = counts.qualified + counts.opportunity + counts.matriculated;
+  return {
+    ...counts,
+    qualificationRate: counts.total ? Math.round((qualifiedJourney / counts.total) * 1000) / 10 : 0,
+    matriculationRate: counts.total ? Math.round((counts.matriculated / counts.total) * 1000) / 10 : 0,
+    metaPending: queue.pending,
+    metaRetry: queue.retry,
+    metaFailed: queue.failed,
+  };
 }
 
 export async function claimNextJob() {
@@ -375,8 +404,8 @@ export async function getMetaEventContext(id) {
     `SELECT e.*, l.name, l.email, l.phone, l.meta_lead_id
      FROM meta_conversion_events e
      JOIN leads l ON l.id = e.lead_id
-     WHERE e.id = $1`,
-    [id],
+     WHERE e.id = $1 AND e.tenant_id = $2 AND l.tenant_id = $2`,
+    [id, tenantId()],
   );
   return result.rows[0] ?? null;
 }
@@ -414,8 +443,9 @@ export async function listRecentMetaEvents(limit = 50) {
     `SELECT e.*, l.name AS lead_name, l.meta_lead_id
      FROM meta_conversion_events e
      JOIN leads l ON l.id = e.lead_id
-     ORDER BY e.created_at DESC LIMIT $1`,
-    [limit],
+     WHERE e.tenant_id = $1 AND l.tenant_id = $1
+     ORDER BY e.created_at DESC LIMIT $2`,
+    [tenantId(), limit],
   );
   return result.rows;
 }
@@ -425,7 +455,7 @@ export async function listRecentJobs(limit = 50) {
     `SELECT j.id, j.job_type, j.status, j.attempts, j.last_error, j.next_attempt_at,
             j.completed_at, j.created_at, j.updated_at,
             COALESCE(j.payload->>'metaLeadId', l.meta_lead_id) AS meta_lead_id,
-            e.event_name, l.name AS lead_name
+            e.event_name, e.event_id, l.name AS lead_name
      FROM meta_jobs j
      LEFT JOIN meta_conversion_events e
        ON e.id = CASE
@@ -433,8 +463,9 @@ export async function listRecentJobs(limit = 50) {
          ELSE NULL
        END
      LEFT JOIN leads l ON l.id = e.lead_id
-     ORDER BY j.created_at DESC LIMIT $1`,
-    [limit],
+     WHERE j.tenant_id = $1
+     ORDER BY j.created_at DESC LIMIT $2`,
+    [tenantId(), limit],
   );
   return result.rows;
 }
@@ -444,8 +475,8 @@ export async function retryFailedJob(id) {
   try {
     await client.query('BEGIN');
     const selected = await client.query(
-      'SELECT * FROM meta_jobs WHERE id = $1 FOR UPDATE',
-      [id],
+      'SELECT * FROM meta_jobs WHERE id = $1 AND tenant_id = $2 FOR UPDATE',
+      [id, tenantId()],
     );
     const job = selected.rows[0];
     if (!job || job.status !== 'FAILED') {
@@ -455,7 +486,7 @@ export async function retryFailedJob(id) {
 
     await client.query(
       `UPDATE meta_jobs
-       SET status = 'RETRY', last_error = NULL,
+       SET status = 'RETRY', attempts = 0, last_error = NULL,
            next_attempt_at = now(), locked_at = NULL, completed_at = NULL, updated_at = now()
        WHERE id = $1`,
       [id],
@@ -463,7 +494,7 @@ export async function retryFailedJob(id) {
     if (job.job_type === 'CONVERSION' && job.payload?.eventId) {
       await client.query(
         `UPDATE meta_conversion_events
-         SET status = 'RETRY', last_error = NULL, updated_at = now()
+         SET status = 'RETRY', attempts = 0, last_error = NULL, updated_at = now()
          WHERE id = $1 AND status = 'FAILED'`,
         [job.payload.eventId],
       );
@@ -492,10 +523,12 @@ export async function recordWorkerHeartbeat({ started = false } = {}) {
 export async function getQueueHealth() {
   const result = await pool.query(`
     SELECT
-      count(*) FILTER (WHERE status IN ('PENDING', 'RETRY', 'PROCESSING'))::int AS pending,
+      count(*) FILTER (WHERE status = 'PENDING')::int AS pending,
+      count(*) FILTER (WHERE status = 'PROCESSING')::int AS processing,
+      count(*) FILTER (WHERE status = 'RETRY')::int AS retry,
       count(*) FILTER (WHERE status = 'FAILED')::int AS failed
-    FROM meta_jobs
-  `);
+    FROM meta_jobs WHERE tenant_id = $1
+  `, [tenantId()]);
   return result.rows[0];
 }
 

@@ -3,8 +3,9 @@ WORKDIR /app
 ENV NODE_ENV=production
 COPY package*.json ./
 RUN npm install --omit=dev
-COPY src ./src
-COPY sql ./sql
-COPY public ./public
+COPY --chown=node:node src ./src
+COPY --chown=node:node sql ./sql
+COPY --chown=node:node public ./public
+USER node
 EXPOSE 3000
 CMD ["node", "src/server.js"]

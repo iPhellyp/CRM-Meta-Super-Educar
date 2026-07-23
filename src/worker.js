@@ -10,8 +10,14 @@ import {
   markMetaEventSent,
   migrate,
   recordWorkerHeartbeat,
+  validateDatabaseConfig,
 } from './db.js';
-import { importLeadgenId, isTemporaryMetaError, sendMetaConversion } from './meta.js';
+import {
+  importLeadgenId,
+  isTemporaryMetaError,
+  sendMetaConversion,
+  validateMetaConfig,
+} from './meta.js';
 
 const MAX_ATTEMPTS = 6;
 const IDLE_DELAY_MS = 2_000;
@@ -30,7 +36,12 @@ function retryAt(attempts) {
 
 async function processJob(job) {
   if (job.job_type === 'LEAD_IMPORT') {
-    await importLeadgenId(job.payload.metaLeadId, job.payload.webhookValue);
+    await importLeadgenId(
+      job.payload.metaLeadId,
+      job.payload.webhookValue,
+      job.payload.receivedAt,
+      job.tenant_id,
+    );
     await completeJob(job.id);
     return;
   }
@@ -77,6 +88,8 @@ async function heartbeatIfNeeded() {
 }
 
 async function run() {
+  validateDatabaseConfig();
+  validateMetaConfig();
   await migrate();
   await recordWorkerHeartbeat({ started: true });
   lastHeartbeatAt = Date.now();
@@ -84,6 +97,7 @@ async function run() {
 
   while (!stopping) {
     await heartbeatIfNeeded();
+    if (stopping) break;
     const job = await claimNextJob();
     if (!job) {
       await delay(IDLE_DELAY_MS);
@@ -91,6 +105,9 @@ async function run() {
     }
 
     try {
+      if (job.attempts > MAX_ATTEMPTS) {
+        throw new Error('Limite de tentativas excedido');
+      }
       await processJob(job);
       console.log(JSON.stringify({
         level: 'info',
@@ -120,7 +137,6 @@ try {
     level: 'error',
     msg: 'Worker interrompido por erro fatal',
     error: String(error),
-    stack: error?.stack,
   }));
   process.exitCode = 1;
 } finally {

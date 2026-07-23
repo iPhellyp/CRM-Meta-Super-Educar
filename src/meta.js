@@ -21,6 +21,45 @@ function graphVersion() {
   return process.env.META_GRAPH_VERSION || 'v25.0';
 }
 
+export function validateMetaConfig() {
+  const errors = [];
+  const version = process.env.META_GRAPH_VERSION;
+  const testMode = process.env.META_TEST_MODE;
+  if (!['development', 'test', 'production'].includes(process.env.NODE_ENV || '')) {
+    errors.push('NODE_ENV');
+  }
+  const production = process.env.NODE_ENV === 'production';
+  if ((production || version) && !/^v\d+\.\d+$/.test(version || '')) {
+    errors.push('META_GRAPH_VERSION');
+  }
+  if ((production || testMode) && !['true', 'false'].includes(testMode || '')) {
+    errors.push('META_TEST_MODE=true ou false');
+  }
+  for (const key of [
+    'META_DATASET_ID',
+    'META_CAPI_ACCESS_TOKEN',
+    'META_PAGE_ACCESS_TOKEN',
+    'META_APP_SECRET',
+    'META_WEBHOOK_VERIFY_TOKEN',
+    'META_LEAD_EVENT_SOURCE',
+  ]) {
+    if (production && !String(process.env[key] || '').trim()) errors.push(key);
+  }
+  if (
+    production &&
+    process.env.META_DATASET_ID &&
+    !/^\d+$/.test(process.env.META_DATASET_ID)
+  ) {
+    errors.push('META_DATASET_ID numérico');
+  }
+  if (testMode === 'true' && !/^[A-Za-z0-9_-]{4,100}$/.test(process.env.META_TEST_EVENT_CODE || '')) {
+    errors.push('META_TEST_EVENT_CODE válido');
+  }
+  if (errors.length) {
+    throw new Error(`Configuração Meta inválida: ${errors.join(', ')}`);
+  }
+}
+
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
@@ -71,13 +110,15 @@ async function graphRequest(path, { fields, method = 'GET', body, token } = {}) 
   if (!token) throw new MetaGraphError('Token da Meta não configurado');
   const url = new URL(`https://graph.facebook.com/${graphVersion()}/${path}`);
   if (fields) url.searchParams.set('fields', fields);
-  url.searchParams.set('access_token', token);
 
   let response;
   try {
     response = await fetch(url, {
       method,
-      headers: body ? { 'content-type': 'application/json' } : undefined,
+      headers: {
+        authorization: `Bearer ${token}`,
+        ...(body ? { 'content-type': 'application/json' } : {}),
+      },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(method === 'GET' ? 15_000 : 20_000),
     });
@@ -102,8 +143,8 @@ export function getStageEventName(stage) {
   return STAGE_EVENT[stage] || null;
 }
 
-export function currentMetaMode({ forceTest = false } = {}) {
-  return forceTest || process.env.META_TEST_MODE === 'true' ? 'test' : 'live';
+export function currentMetaMode() {
+  return process.env.META_TEST_MODE === 'true' ? 'test' : 'live';
 }
 
 export function metaConfigStatus() {
@@ -155,7 +196,21 @@ function firstValue(data, keys) {
   return '';
 }
 
-export async function importLeadgenId(metaLeadId, webhookValue = {}) {
+function metaCreatedAt(primary, fallback) {
+  const raw = primary || fallback;
+  if (!raw) return null;
+  const date = /^\d+$/.test(String(raw))
+    ? new Date(Number(raw) * 1000)
+    : new Date(raw);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+export async function importLeadgenId(
+  metaLeadId,
+  webhookValue = {},
+  receivedAt = null,
+  tenantId = null,
+) {
   const leadPayload = await graphRequest(String(metaLeadId), {
     fields: 'id,created_time,ad_id,form_id,field_data',
     token: process.env.META_PAGE_ACCESS_TOKEN,
@@ -170,6 +225,7 @@ export async function importLeadgenId(metaLeadId, webhookValue = {}) {
         token: process.env.META_PAGE_ACCESS_TOKEN,
       });
     } catch (error) {
+      if (error?.temporary === true) throw error;
       console.warn(JSON.stringify({
         level: 'warn',
         msg: 'Não foi possível buscar atribuição opcional do anúncio',
@@ -185,6 +241,7 @@ export async function importLeadgenId(metaLeadId, webhookValue = {}) {
   const city = firstValue(fields, ['city', 'cidade']);
 
   return upsertLead({
+    tenantId,
     name,
     email,
     phone,
@@ -192,6 +249,7 @@ export async function importLeadgenId(metaLeadId, webhookValue = {}) {
     city,
     source: 'META_INSTANT_FORM',
     metaLeadId: String(metaLeadId),
+    metaPageId: webhookValue.page_id ? String(webhookValue.page_id) : null,
     metaFormId: leadPayload.form_id
       ? String(leadPayload.form_id)
       : webhookValue.form_id
@@ -204,7 +262,22 @@ export async function importLeadgenId(metaLeadId, webhookValue = {}) {
         : null,
     metaAdsetId: adPayload.adset_id ? String(adPayload.adset_id) : null,
     metaCampaignId: adPayload.campaign_id ? String(adPayload.campaign_id) : null,
-    rawMeta: { lead: leadPayload, ad: adPayload, webhook: webhookValue },
+    metaCreatedAt: metaCreatedAt(leadPayload.created_time, webhookValue.created_time),
+    receivedAt,
+    rawMeta: {
+      lead: {
+        id: leadPayload.id ? String(leadPayload.id) : String(metaLeadId),
+        created_time: leadPayload.created_time || null,
+        form_id: leadPayload.form_id ? String(leadPayload.form_id) : null,
+        ad_id: leadPayload.ad_id ? String(leadPayload.ad_id) : null,
+      },
+      ad: {
+        id: adPayload.id ? String(adPayload.id) : null,
+        adset_id: adPayload.adset_id ? String(adPayload.adset_id) : null,
+        campaign_id: adPayload.campaign_id ? String(adPayload.campaign_id) : null,
+      },
+      webhook: webhookValue,
+    },
   });
 }
 
@@ -225,16 +298,24 @@ export async function sendMetaConversion(event) {
     throw new MetaGraphError('META_DATASET_ID ou META_CAPI_ACCESS_TOKEN não configurado');
   }
 
+  if (!event.meta_lead_id) {
+    throw new MetaGraphError('Lead sem atribuição Meta; conversão não será enviada');
+  }
+
   const testMode = event.event_id.endsWith(':test');
+  const configuredTestMode = process.env.META_TEST_MODE === 'true';
+  if (testMode !== configuredTestMode) {
+    throw new MetaGraphError(
+      testMode
+        ? 'Evento de teste bloqueado porque o ambiente está em produção'
+        : 'Evento de produção bloqueado porque o ambiente está em modo teste',
+    );
+  }
   if (testMode && !process.env.META_TEST_EVENT_CODE) {
     throw new MetaGraphError('Evento de teste pendente, mas META_TEST_EVENT_CODE está vazio');
   }
 
   const userData = buildUserData(event);
-  if (!userData.lead_id && !userData.em && !userData.ph) {
-    throw new MetaGraphError('Lead sem metaLeadId, email ou telefone para correspondência');
-  }
-
   const body = {
     data: [
       {

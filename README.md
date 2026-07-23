@@ -1,0 +1,233 @@
+# CRM Meta Super Educar — Bridge operacional
+
+Serviço enxuto e separado do SR Gestão para:
+
+- receber leads de Formulários Instantâneos da Meta;
+- importar os dados do lead pela Graph API;
+- controlar as etapas operacionais básicas;
+- enviar `Marketing Qualified Lead`, `Sales Opportunity` e `Converted` pela Conversions API;
+- manter fila persistente, tentativas e histórico de movimentações.
+
+## Limite deste projeto
+
+Este é um bridge operacional, não um CRM completo. Ele não inclui WhatsApp, IA, múltiplos vendedores, importação de listas antigas, automações avançadas ou integração com o SR Gestão.
+
+## Como o fluxo funciona
+
+1. A Meta envia o webhook para `POST /webhooks/meta/leadgen`.
+2. O app valida obrigatoriamente `X-Hub-Signature-256` com `META_APP_SECRET`.
+3. O payload é registrado no PostgreSQL com status `PENDING`.
+4. O app devolve HTTP 200 depois da persistência, sem chamar a Graph API.
+5. O worker importa o lead e conclui o job somente após sucesso.
+6. Falhas temporárias usam backoff automático e podem terminar em `FAILED`.
+7. Mudanças para qualificado, oportunidade ou matriculado criam um job de conversão para o worker.
+
+Os estados da fila são `PENDING`, `PROCESSING`, `COMPLETED`, `RETRY` e `FAILED`. O painel **Eventos Meta** permite reenfileirar somente jobs `FAILED`.
+
+## Variáveis de ambiente
+
+Crie o `.env` a partir do exemplo e nunca envie esse arquivo ao repositório:
+
+```env
+NODE_ENV=production
+PORT=3000
+APP_URL=https://crm.supereducarbrasil.com.br
+
+POSTGRES_PASSWORD=
+DATABASE_URL=postgresql://crm_meta:SENHA@postgres:5432/crm_meta
+
+ADMIN_EMAIL=
+ADMIN_PASSWORD=
+SESSION_SECRET=
+COOKIE_SECURE=true
+OPERATION_START_AT=2026-07-23T00:00:00-03:00
+
+META_GRAPH_VERSION=v25.0
+META_DATASET_ID=
+META_CAPI_ACCESS_TOKEN=
+META_PAGE_ACCESS_TOKEN=
+META_APP_SECRET=
+META_WEBHOOK_VERIFY_TOKEN=
+META_LEAD_EVENT_SOURCE=Super Educar CRM
+META_TEST_MODE=true
+META_TEST_EVENT_CODE=
+
+DEFAULT_TENANT_ID=super-educar
+```
+
+`OPERATION_START_AT` deve ser uma data ISO 8601 com fuso. A tela principal e seus indicadores mostram, por padrão, apenas leads criados a partir dela. Leads anteriores continuam armazenados sem alteração.
+
+Em produção HTTPS, `COOKIE_SECURE=true` é obrigatório. Use `COOKIE_SECURE=false` apenas no acesso local por `http://localhost`.
+
+## PowerShell local / Windows
+
+### Opção recomendada: Docker Desktop
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+No `.env` local, use:
+
+```env
+NODE_ENV=development
+APP_URL=http://localhost:3000
+COOKIE_SECURE=false
+```
+
+Depois:
+
+```powershell
+docker compose config
+docker compose up --build
+```
+
+O Compose inicia PostgreSQL, app e worker. Abra `http://localhost:3000`.
+
+### Executar app e worker separadamente
+
+Com um PostgreSQL acessível por `DATABASE_URL`, instale as dependências:
+
+```powershell
+npm install
+npm run check
+```
+
+Em um terminal:
+
+```powershell
+npm run dev
+```
+
+Em outro terminal:
+
+```powershell
+npm run dev:worker
+```
+
+Sem modo watch, os comandos equivalentes são:
+
+```powershell
+npm run start
+npm run worker
+```
+
+## VPS / Linux via SSH — Docker Swarm + Traefik
+
+Execute estes comandos somente na sessão SSH da VPS, não no PowerShell local:
+
+```bash
+mkdir -p /root/crm-meta
+cd /root/crm-meta
+cp .env.example .env
+nano .env
+```
+
+Antes do deploy, confirme no `.env`:
+
+```env
+NODE_ENV=production
+APP_URL=https://crm.supereducarbrasil.com.br
+COOKIE_SECURE=true
+META_TEST_MODE=false
+META_TEST_EVENT_CODE=
+```
+
+Valide a configuração sem iniciar serviços:
+
+```bash
+docker compose -f docker-stack.yml config
+```
+
+Quando a janela de produção estiver autorizada:
+
+```bash
+chmod +x deploy-vps.sh
+./deploy-vps.sh
+```
+
+Verificação operacional:
+
+```bash
+docker service ls | grep crm-meta
+docker service logs -f crm-meta_app
+docker service logs -f crm-meta_worker
+docker service logs -f crm-meta_postgres
+```
+
+O domínio esperado é `https://crm.supereducarbrasil.com.br`. Confirme previamente o DNS, o certificado do Traefik e a existência da rede externa `iPHnet`.
+
+## Configurar o webhook na Meta
+
+Callback:
+
+```text
+https://crm.supereducarbrasil.com.br/webhooks/meta/leadgen
+```
+
+Use em **Verify token** o mesmo valor de `META_WEBHOOK_VERIFY_TOKEN`, assine o campo `leadgen` e associe a Página ao aplicativo.
+
+`META_APP_SECRET` é obrigatório no recebimento: sem ele, ou sem uma assinatura HMAC válida, o POST retorna HTTP 401.
+
+## Testar antes de produção
+
+### 1. Verificações locais sem chamadas externas
+
+```powershell
+npm run check
+docker compose config
+```
+
+Depois de iniciar o ambiente local, confira:
+
+```powershell
+Invoke-RestMethod http://localhost:3000/health
+docker compose ps
+docker compose logs app
+docker compose logs worker
+```
+
+O `/health` informa app, banco, heartbeat do worker, configuração Meta e quantidades de jobs pendentes e com erro. Ele mostra apenas presença/ausência de configuração, nunca tokens ou senhas.
+
+### 2. Teste integrado com a Meta
+
+1. No Gerenciador de Eventos, abra **Testar eventos** e copie o código.
+2. Defina `META_TEST_MODE=true` e `META_TEST_EVENT_CODE`.
+3. Reinicie app e worker para carregar as variáveis.
+4. Gere um lead de teste no Formulário Instantâneo.
+5. Confirme no painel que o job de importação chegou a `COMPLETED`.
+6. Confirme que o lead apareceu com o `leadgen_id`.
+7. Marque como **Qualificado**, **Oportunidade** e **Matriculado**, conferindo cada evento de teste.
+8. Simule e corrija uma falha de credencial em ambiente de teste; confirme o status `FAILED` e a ação **Reenviar**.
+9. Antes da produção, remova o código de teste, defina `META_TEST_MODE=false` e mantenha `COOKIE_SECURE=true`.
+
+Os testes integrados exigem credenciais reais de um aplicativo, Página e dataset Meta de teste/homologação.
+
+## Idempotência e histórico
+
+- A restrição única `(tenant_id, meta_lead_id)` impede dois leads para o mesmo `leadgen_id`.
+- Cada importação tem uma chave única `leadgen:<leadgen_id>`.
+- Cada conversão usa um `event_id` determinístico por lead, evento e modo.
+- Eventos `test` e `live` têm IDs e jobs distintos.
+- Um evento já marcado como `SENT` não é enviado novamente.
+- O mesmo `event_id` também permite deduplicação pela Meta caso o worker caia após a aceitação remota e antes da confirmação local.
+- Cada mudança de etapa grava etapa anterior, nova etapa, data e origem.
+
+## Eventos enviados
+
+| Etapa | Evento Meta |
+|---|---|
+| `QUALIFIED` | `Marketing Qualified Lead` |
+| `OPPORTUNITY` | `Sales Opportunity` |
+| `MATRICULATED` | `Converted` |
+
+Este fluxo é server-side e envia eventos diretamente ao dataset pela Conversions API. Para Formulários Instantâneos, preserva o `leadgen_id` original para correspondência.
+
+## Segurança
+
+- Nunca registre ou versione `.env`, tokens, App Secret ou senhas.
+- Use HTTPS e `COOKIE_SECURE=true` em produção.
+- Restrinja o acesso ao painel e monitore `/health` e os logs do worker.
+- Faça backup do PostgreSQL antes de qualquer manutenção operacional.
+- As alterações de esquema deste projeto são aditivas e executadas na inicialização.

@@ -1,0 +1,121 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: crm_meta
+      POSTGRES_USER: crm_meta
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - crm_meta_postgres:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crm_meta -d crm_meta"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+        window: 60s
+
+  app:
+    image: crm-meta-super-educar:latest
+    command: npm run start
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      APP_URL: ${APP_URL}
+      DATABASE_URL: postgresql://crm_meta:${POSTGRES_PASSWORD}@postgres:5432/crm_meta
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      SESSION_SECRET: ${SESSION_SECRET}
+      COOKIE_SECURE: ${COOKIE_SECURE}
+      META_GRAPH_VERSION: ${META_GRAPH_VERSION}
+      META_DATASET_ID: ${META_DATASET_ID}
+      META_CAPI_ACCESS_TOKEN: ${META_CAPI_ACCESS_TOKEN}
+      META_PAGE_ACCESS_TOKEN: ${META_PAGE_ACCESS_TOKEN}
+      META_APP_SECRET: ${META_APP_SECRET}
+      META_WEBHOOK_VERIFY_TOKEN: ${META_WEBHOOK_VERIFY_TOKEN}
+      META_LEAD_EVENT_SOURCE: ${META_LEAD_EVENT_SOURCE}
+      META_TEST_MODE: ${META_TEST_MODE}
+      META_TEST_EVENT_CODE: ${META_TEST_EVENT_CODE}
+      DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID}
+      OPERATION_START_AT: ${OPERATION_START_AT}
+    networks:
+      - internal
+      - iPHnet
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+        window: 60s
+      update_config:
+        parallelism: 1
+        order: start-first
+        failure_action: rollback
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=iPHnet
+        - traefik.http.routers.crm-meta.rule=Host(`crm.supereducarbrasil.com.br`)
+        - traefik.http.routers.crm-meta.entrypoints=websecure
+        - traefik.http.routers.crm-meta.tls.certresolver=letsencryptresolver
+        - traefik.http.services.crm-meta.loadbalancer.server.port=3000
+
+  worker:
+    image: crm-meta-super-educar:latest
+    command: npm run worker
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://crm_meta:${POSTGRES_PASSWORD}@postgres:5432/crm_meta
+      META_GRAPH_VERSION: ${META_GRAPH_VERSION}
+      META_DATASET_ID: ${META_DATASET_ID}
+      META_CAPI_ACCESS_TOKEN: ${META_CAPI_ACCESS_TOKEN}
+      META_PAGE_ACCESS_TOKEN: ${META_PAGE_ACCESS_TOKEN}
+      META_APP_SECRET: ${META_APP_SECRET}
+      META_WEBHOOK_VERIFY_TOKEN: ${META_WEBHOOK_VERIFY_TOKEN}
+      META_LEAD_EVENT_SOURCE: ${META_LEAD_EVENT_SOURCE}
+      META_TEST_MODE: ${META_TEST_MODE}
+      META_TEST_EVENT_CODE: ${META_TEST_EVENT_CODE}
+      DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID}
+      OPERATION_START_AT: ${OPERATION_START_AT}
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "node", "src/worker-health.js"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+        window: 60s
+      update_config:
+        parallelism: 1
+        order: start-first
+        failure_action: rollback
+
+volumes:
+  crm_meta_postgres:
+
+networks:
+  internal:
+    driver: overlay
+  iPHnet:
+    external: true

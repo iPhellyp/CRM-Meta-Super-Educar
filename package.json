@@ -1,0 +1,26 @@
+{
+  "name": "crm-meta-super-educar-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "dev:worker": "node --watch src/worker.js",
+    "start": "node src/server.js",
+    "worker": "node src/worker.js",
+    "check": "node --check src/server.js && node --check src/worker.js && node --check src/worker-health.js && node --check src/db.js && node --check src/meta.js && node --check src/auth.js && node --check src/views.js"
+  },
+  "dependencies": {
+    "compression": "^1.8.1",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.16.3",
+    "zod": "^4.0.14"
+  }
+}

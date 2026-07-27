@@ -17,9 +17,14 @@ import {
   getLeadById,
   getWa2ContactLinkById,
   getWa2InstanceLocalById,
+  getWa2LabelBindingById,
+  getWa2LabelJobCounts,
+  getWa2LabelSyncStatusForLead,
   healthcheck,
   listLeads,
   listWa2InstancesLocal,
+  listWa2LabelBindings,
+  listWa2LabelJobs,
   listRecentJobs,
   listRecentMetaEvents,
   migrate,
@@ -27,12 +32,16 @@ import {
   operationStartAt,
   replaceWa2ContactLink,
   retryFailedJob,
+  retryFailedWa2LabelJob,
   setDefaultWa2Instance,
+  setWa2LabelBindingEnabled,
   unlinkWa2ContactLink,
   upsertLead,
   upsertVerifiedWa2Instance,
+  upsertWa2LabelBinding,
   validateDatabaseConfig,
   verifyWa2ContactLink,
+  verifyWa2LabelBinding,
 } from './db.js';
 import {
   clearSession,
@@ -65,6 +74,8 @@ import {
   wa2DashboardView,
   wa2InstanceView,
   wa2LinkConfirmView,
+  wa2LabelBindingsView,
+  wa2LabelJobsView,
   wa2QrView,
 } from './views.js';
 import {
@@ -76,6 +87,7 @@ import {
   getWa2InstanceQr,
   getWa2InstanceStatus,
   listWa2Instances,
+  listWa2Labels,
   syncWa2Instance,
   validateWa2InstanceId,
   wa2ConfigStatus,
@@ -86,6 +98,7 @@ import {
   wa2ResolutionTokenIsValid,
 } from './wa2-link-token.js';
 import { validateWa2ConfirmationState } from './wa2-link-rules.js';
+import { isWa2LabelStage } from './wa2-label-sync.js';
 
 const app = express();
 const loginAttempts = new Map();
@@ -331,6 +344,163 @@ app.post('/wa2/local-instances/:id/disable', async (req, res) => {
   }
 });
 
+app.get('/wa2/labels', async (req, res) => {
+  const requestedInstanceId = String(req.query.instanceId || '');
+  const parsedInstanceId = requestedInstanceId
+    ? z.string().uuid().safeParse(requestedInstanceId)
+    : null;
+  if (parsedInstanceId && !parsedInstanceId.success) {
+    return redirectWith(res, '/wa2/labels', 'error', 'Instância local inválida.');
+  }
+  const instanceId = parsedInstanceId?.data || null;
+  try {
+    const [instances, bindings] = await Promise.all([
+      listWa2InstancesLocal(),
+      listWa2LabelBindings(instanceId),
+    ]);
+    const selectedInstance = instanceId
+      ? instances.find((instance) => instance.id === instanceId) || null
+      : null;
+    let labels = [];
+    let remoteError = '';
+    if (instanceId && !selectedInstance) {
+      return redirectWith(res, '/wa2/labels', 'error', 'Instância local não encontrada.');
+    }
+    if (selectedInstance) {
+      try {
+        labels = await listWa2Labels(selectedInstance.remote_instance_id);
+      } catch (error) {
+        remoteError = wa2UnavailableMessage(error);
+      }
+    }
+    return res.send(wa2LabelBindingsView({
+      instances,
+      selectedInstance,
+      labels,
+      bindings,
+      message: req.query.message || '',
+      error: req.query.error || remoteError,
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  } catch (error) {
+    return redirectWith(res, '/wa2', 'error', wa2LinkErrorMessage(error));
+  }
+});
+
+app.post('/wa2/labels/bindings', async (req, res) => {
+  const parsedInstanceId = z.string().uuid().safeParse(req.body.instanceId);
+  const stage = String(req.body.stage || '');
+  const remoteLabelId = String(req.body.remoteLabelId || '');
+  if (!parsedInstanceId.success || !isWa2LabelStage(stage) || !remoteLabelId) {
+    return redirectWith(res, '/wa2/labels', 'error', 'Binding de etiqueta inválido.');
+  }
+  const path = `/wa2/labels?instanceId=${encodeURIComponent(parsedInstanceId.data)}`;
+  try {
+    const instance = await getWa2InstanceLocalById(parsedInstanceId.data);
+    if (!instance?.enabled) {
+      throw new Wa2DataError('Instância local está desabilitada', 'WA2_INSTANCE_DISABLED');
+    }
+    const labels = await listWa2Labels(instance.remote_instance_id);
+    const remoteLabel = labels.find((label) => label.id === remoteLabelId);
+    if (!remoteLabel) {
+      return redirectWith(res, path, 'error', 'Etiqueta não foi confirmada no WA2.');
+    }
+    await upsertWa2LabelBinding({
+      instanceId: instance.id,
+      stage,
+      remoteLabelId: remoteLabel.id,
+      remoteLabelName: remoteLabel.name,
+    });
+    return redirectWith(res, path, 'message', 'Binding validado e salvo.');
+  } catch (error) {
+    return redirectWith(res, path, 'error', wa2LinkErrorMessage(error));
+  }
+});
+
+app.post('/wa2/label-bindings/:id/:action', async (req, res) => {
+  const parsedId = z.string().uuid().safeParse(req.params.id);
+  const action = String(req.params.action || '');
+  if (!parsedId.success || !['enable', 'disable', 'verify'].includes(action)) {
+    return redirectWith(res, '/wa2/labels', 'error', 'Ação de binding inválida.');
+  }
+  try {
+    const binding = await getWa2LabelBindingById(parsedId.data);
+    if (!binding) {
+      return redirectWith(res, '/wa2/labels', 'error', 'Binding não encontrado.');
+    }
+    const path = `/wa2/labels?instanceId=${encodeURIComponent(binding.wa2_instance_id)}`;
+    if (action === 'disable') {
+      await setWa2LabelBindingEnabled(binding.id, false);
+      return redirectWith(res, path, 'message', 'Binding desabilitado.');
+    }
+    if (!binding.instance_enabled) {
+      throw new Wa2DataError('Instância local está desabilitada', 'WA2_INSTANCE_DISABLED');
+    }
+    const labels = await listWa2Labels(binding.remote_instance_id);
+    const remoteLabel = labels.find((label) => label.id === binding.remote_label_id);
+    if (!remoteLabel) {
+      return redirectWith(res, path, 'error', 'Etiqueta não existe mais no WA2.');
+    }
+    const verified = await verifyWa2LabelBinding(binding.id, remoteLabel);
+    if (verified.length === 0) {
+      throw new Wa2DataError(
+        'O binding mudou durante a verificação',
+        'WA2_LABEL_BINDING_CHANGED',
+      );
+    }
+    if (action === 'enable') await setWa2LabelBindingEnabled(binding.id, true);
+    return redirectWith(
+      res,
+      path,
+      'message',
+      action === 'enable' ? 'Binding verificado e habilitado.' : 'Binding verificado.',
+    );
+  } catch (error) {
+    return redirectWith(res, '/wa2/labels', 'error', wa2LinkErrorMessage(error));
+  }
+});
+
+app.get('/wa2/label-jobs', async (req, res) => {
+  try {
+    const [jobs, counts] = await Promise.all([
+      listWa2LabelJobs(),
+      getWa2LabelJobCounts(),
+    ]);
+    return res.send(wa2LabelJobsView({
+      jobs,
+      counts,
+      message: req.query.message || '',
+      error: req.query.error || '',
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  } catch (error) {
+    return redirectWith(res, '/wa2', 'error', wa2LinkErrorMessage(error));
+  }
+});
+
+app.post('/wa2/label-jobs/:id/retry', async (req, res) => {
+  try {
+    const id = z.string().uuid().parse(req.params.id);
+    const retried = await retryFailedWa2LabelJob(id);
+    if (!retried) {
+      return redirectWith(
+        res,
+        '/wa2/label-jobs',
+        'error',
+        'Somente jobs FAILED com tentativas disponíveis podem ser reenviados.',
+      );
+    }
+    return redirectWith(
+      res,
+      '/wa2/label-jobs',
+      'message',
+      'Job WA2 reenfileirado sem apagar o histórico de tentativas.',
+    );
+  } catch {
+    return redirectWith(res, '/wa2/label-jobs', 'error', 'Não foi possível reenviar o job.');
+  }
+});
+
 app.get('/wa2/instances/:id', async (req, res) => {
   try {
     const instanceId = validateWa2InstanceId(req.params.id);
@@ -522,10 +692,12 @@ app.get('/leads/:id/wa2', async (req, res) => {
       getActiveWa2ContactLinkForLead(parsedId.data),
     ]);
     if (!lead) return redirectWith(res, '/', 'error', 'Lead não encontrado.');
+    const labelSync = await getWa2LabelSyncStatusForLead(lead.id, lead.stage);
     return res.send(leadWa2View({
       lead,
       instances,
       links,
+      labelSync,
       message: req.query.message || '',
       error: req.query.error || '',
       csrfToken: issueCsrfToken(req, res),
@@ -786,6 +958,22 @@ function metaResultSuffix(eventName, result) {
   return result.jobCreated ? ' Evento Meta enfileirado.' : ' Evento Meta já está na fila.';
 }
 
+function wa2LabelResultSuffix(result) {
+  const sync = result.wa2LabelSync;
+  if (!sync) return '';
+  if (sync.scheduled > 0) {
+    return ` ${sync.scheduled} sincronização(ões) de etiqueta WA2 agendada(s).`;
+  }
+  const messages = {
+    NO_ACTIVE_LINK: ' Etiqueta WA2 não agendada: lead sem vínculo ativo.',
+    NO_ENABLED_BINDING: ' Etiqueta WA2 não agendada: binding ausente ou desabilitado.',
+    LABEL_UNCHANGED: ' Etiqueta WA2 já representa a mesma etapa; nenhuma mutação agendada.',
+    STAGE_NOT_MAPPED: ' Etapa sem sincronização automática de etiqueta WA2.',
+    DUPLICATE: ' Sincronização de etiqueta WA2 já registrada.',
+  };
+  return messages[sync.reason] || '';
+}
+
 app.post('/leads/:id/stage', async (req, res) => {
   const parsedId = z.string().uuid().safeParse(req.params.id);
   if (!parsedId.success) return redirectWith(res, '/', 'error', 'Lead inválido.');
@@ -805,7 +993,13 @@ app.post('/leads/:id/stage', async (req, res) => {
       return redirectWith(res, '/', 'error', 'Transição de etapa não permitida.');
     }
     const suffix = metaResultSuffix(eventName, result);
-    redirectWith(res, '/', 'message', `Lead movido para ${STAGE_LABELS[stage]}.${suffix}`);
+    const wa2Suffix = wa2LabelResultSuffix(result);
+    redirectWith(
+      res,
+      '/',
+      'message',
+      `Lead movido para ${STAGE_LABELS[stage]}.${suffix}${wa2Suffix}`,
+    );
   } catch {
     redirectWith(res, '/', 'error', 'Não foi possível mover o lead.');
   }
@@ -848,7 +1042,13 @@ app.post('/leads/:id/matriculate', async (req, res) => {
       return redirectWith(res, '/', 'error', 'Transição para matrícula não permitida.');
     }
     const suffix = metaResultSuffix(eventName, result);
-    return redirectWith(res, '/', 'message', `Lead movido para ${STAGE_LABELS.MATRICULATED}.${suffix}`);
+    const wa2Suffix = wa2LabelResultSuffix(result);
+    return redirectWith(
+      res,
+      '/',
+      'message',
+      `Lead movido para ${STAGE_LABELS.MATRICULATED}.${suffix}${wa2Suffix}`,
+    );
   } catch {
     return redirectWith(res, '/', 'error', 'Não foi possível concluir a matrícula.');
   }

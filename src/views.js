@@ -5,6 +5,10 @@ import {
   getStageBadgeClass,
 } from './funnel.js';
 import { getWhatsAppUrl } from './phone.js';
+import {
+  WA2_LABEL_STAGES,
+  getWa2StageLabelName,
+} from './wa2-label-sync.js';
 
 function esc(value) {
   return String(value ?? '')
@@ -29,7 +33,7 @@ function layout(title, body, { logged = true, csrfToken = '' } = {}) {
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-  ${logged ? `<header><strong>CRM Meta · Super Educar</strong><nav><a href="/">Leads</a><a href="/events">Eventos Meta</a><a href="/wa2">WA2</a><form method="post" action="/logout">${csrfField(csrfToken)}<button class="link">Sair</button></form></nav></header>` : ''}
+  ${logged ? `<header><strong>CRM Meta · Super Educar</strong><nav><a href="/">Leads</a><a href="/events">Eventos Meta</a><a href="/wa2">WA2</a><a href="/wa2/labels">Etiquetas WA2</a><a href="/wa2/label-jobs">Jobs WA2</a><form method="post" action="/logout">${csrfField(csrfToken)}<button class="link">Sair</button></form></nav></header>` : ''}
   <main>${body}</main>
 </body>
 </html>`;
@@ -216,10 +220,10 @@ export function matriculationConfirmView({ lead, csrfToken = '' }) {
 }
 
 function statusClass(status) {
-  if (['SENT', 'COMPLETED'].includes(status)) return 'matriculated';
+  if (['SENT', 'COMPLETED', 'DONE'].includes(status)) return 'matriculated';
   if (status === 'FAILED') return 'lost';
   if (status === 'RETRY') return 'contacted';
-  if (status === 'PROCESSING') return 'opportunity';
+  if (['PROCESSING', 'RUNNING'].includes(status)) return 'opportunity';
   return 'new';
 }
 
@@ -356,6 +360,10 @@ export function wa2DashboardView({
         ${configStatus.errors.length ? `<small>${esc(configStatus.errors.join('. '))}</small>` : ''}
       </div>
     </section>
+    <div class="actions">
+      <a class="button-link" href="/wa2/labels">Configurar etiquetas CRM</a>
+      <a class="button-link" href="/wa2/label-jobs">Acompanhar jobs de etiquetas</a>
+    </div>
     <section class="panel">
       <div class="panel-title"><h2>Instâncias</h2><span>${instances.length} exibidas</span></div>
       <div class="table-wrap"><table>
@@ -368,6 +376,153 @@ export function wa2DashboardView({
       <div class="table-wrap"><table>
         <thead><tr><th>Instância</th><th>Função</th><th>Estado local</th><th>Principal</th><th>Ações</th></tr></thead>
         <tbody>${localRows || '<tr><td colspan="5" class="empty">Nenhuma instância validada no CRM.</td></tr>'}</tbody>
+      </table></div>
+    </section>
+  `, { csrfToken });
+}
+
+export function wa2LabelBindingsView({
+  instances = [],
+  selectedInstance = null,
+  labels = [],
+  bindings = [],
+  message = '',
+  error = '',
+  csrfToken = '',
+}) {
+  const bindingByStage = new Map(bindings.map((binding) => [binding.stage, binding]));
+  const instanceOptions = instances.map((instance) => `
+    <option value="${esc(instance.id)}"${selectedInstance?.id === instance.id ? ' selected' : ''}>
+      ${detailValue(instance.name || instance.remote_instance_id)}${instance.enabled ? '' : ' · desabilitada'}
+    </option>`).join('');
+  const incomplete = selectedInstance
+    ? WA2_LABEL_STAGES.filter((stage) => !bindingByStage.get(stage)?.enabled).length
+    : 0;
+  const stageRows = selectedInstance
+    ? WA2_LABEL_STAGES.map((stage) => {
+      const expectedName = getWa2StageLabelName(stage);
+      const binding = bindingByStage.get(stage) || null;
+      const suggestion = labels.find((label) => label.name === expectedName) || null;
+      const selectedLabelId = binding?.remote_label_id || suggestion?.id || '';
+      const labelOptions = labels.map((label) => `
+        <option value="${esc(label.id)}"${selectedLabelId === label.id ? ' selected' : ''}>
+          ${esc(label.name)} · ${esc(label.id)}
+        </option>`).join('');
+      return `
+        <tr>
+          <td><strong>${esc(stage)}</strong><small>${esc(expectedName)}</small></td>
+          <td>
+            ${binding
+              ? `${detailValue(binding.remote_label_name)}<small>${esc(binding.remote_label_id)}</small>`
+              : '<span class="muted">Não configurado</span>'}
+          </td>
+          <td>
+            ${binding
+              ? `<span class="badge ${binding.enabled ? 'matriculated' : 'new'}">${binding.enabled ? 'ATIVO' : 'DESABILITADO'}</span>
+                 <small>Verificado: ${detailValue(binding.last_verified_at)}</small>`
+              : suggestion
+                ? '<span class="ok">Correspondência exata sugerida</span>'
+                : '<span class="error-text">Sem correspondência exata</span>'}
+          </td>
+          <td>
+            ${labels.length ? `
+              <form method="post" action="/wa2/labels/bindings" class="stack compact-form">
+                ${csrfField(csrfToken)}
+                <input type="hidden" name="instanceId" value="${esc(selectedInstance.id)}">
+                <input type="hidden" name="stage" value="${esc(stage)}">
+                <select name="remoteLabelId" required>
+                  <option value="">Selecione uma etiqueta</option>
+                  ${labelOptions}
+                </select>
+                <button class="small">Validar e salvar</button>
+              </form>` : '<span class="muted">Etiquetas WA2 indisponíveis</span>'}
+            ${binding ? `
+              <div class="actions">
+                <form method="post" action="/wa2/label-bindings/${esc(binding.id)}/verify">
+                  ${csrfField(csrfToken)}
+                  <button class="small">Verificar ID</button>
+                </form>
+                <form method="post" action="/wa2/label-bindings/${esc(binding.id)}/${binding.enabled ? 'disable' : 'enable'}">
+                  ${csrfField(csrfToken)}
+                  <button class="small ${binding.enabled ? 'danger' : ''}">${binding.enabled ? 'Desabilitar' : 'Habilitar'}</button>
+                </form>
+              </div>` : ''}
+          </td>
+        </tr>`;
+    }).join('')
+    : '';
+
+  return layout('Etiquetas WA2', `
+    ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
+    ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+    <section class="hero">
+      <div><h1>Etapas CRM → etiquetas WA2</h1><p>Os IDs remotos são confirmados no servidor antes de serem salvos.</p></div>
+      ${selectedInstance ? `<div class="meta-box ${incomplete ? 'pending' : 'ready'}"><strong>${incomplete} binding(s) incompleto(s)</strong><span>${detailValue(selectedInstance.name || selectedInstance.remote_instance_id)}</span></div>` : ''}
+    </section>
+    <section class="panel">
+      <form method="get" action="/wa2/labels" class="stack compact-form">
+        <label>Instância local
+          <select name="instanceId" required>
+            <option value="">Selecione</option>
+            ${instanceOptions}
+          </select>
+        </label>
+        <button>Carregar etiquetas</button>
+      </form>
+    </section>
+    ${selectedInstance ? `
+      <section class="panel">
+        <div class="panel-title"><h2>Bindings oficiais</h2><span>${bindings.length} salvos</span></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Etapa/nome oficial</th><th>Binding atual</th><th>Estado</th><th>Configuração</th></tr></thead>
+          <tbody>${stageRows}</tbody>
+        </table></div>
+      </section>` : '<section class="panel empty">Selecione uma instância para configurar os bindings.</section>'}
+  `, { csrfToken });
+}
+
+export function wa2LabelJobsView({
+  jobs = [],
+  counts = {},
+  message = '',
+  error = '',
+  csrfToken = '',
+}) {
+  const rows = jobs.map((job) => `
+    <tr>
+      <td><strong>${esc(job.lead_name)}</strong><small>${esc(job.id)}</small></td>
+      <td>${detailValue(job.target_stage)}<small>${detailValue(job.target_remote_label_id)}</small></td>
+      <td>${detailValue(job.instance_name || job.remote_instance_id)}<small>${detailValue(job.created_at)}</small></td>
+      <td>
+        <span class="badge ${statusClass(job.status)}">${esc(job.status)}</span>
+        ${job.stale ? '<small class="error-text">RUNNING abandonado</small>' : ''}
+        <small>${esc(job.attempts)}/${esc(job.max_attempts)} tentativa(s)</small>
+        ${job.status === 'PENDING' ? `<small>Próxima: ${detailValue(job.available_at)}</small>` : ''}
+      </td>
+      <td>
+        ${job.last_error_code ? `<small class="error-text">${esc(job.last_error_code)} · ${esc(job.last_error_message || '')}</small>` : '—'}
+        ${job.status === 'FAILED' && job.attempts < 10 ? `
+          <form method="post" action="/wa2/label-jobs/${esc(job.id)}/retry" class="retry-form">
+            ${csrfField(csrfToken)}
+            <button class="small">Reenviar</button>
+          </form>` : ''}
+      </td>
+    </tr>`).join('');
+  return layout('Jobs de etiquetas WA2', `
+    ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
+    ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+    <section class="hero"><div><h1>Fila de etiquetas WA2</h1><p>Processamento, retries e falhas da sincronização CRM → WA2.</p></div></section>
+    <section class="stats">
+      ${stat('PENDING', counts.pending || 0)}
+      ${stat('RUNNING', counts.running || 0)}
+      ${stat('DONE', counts.done || 0)}
+      ${stat('FAILED', counts.failed || 0)}
+      ${stat('Travados', counts.stale || 0)}
+    </section>
+    <section class="panel">
+      <div class="table-wrap"><table>
+        <thead><tr><th>Lead/job</th><th>Etapa/etiqueta</th><th>Instância/data</th><th>Status</th><th>Erro/ação</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="5" class="empty">Nenhum job de etiqueta registrado.</td></tr>'}</tbody>
       </table></div>
     </section>
   `, { csrfToken });
@@ -455,6 +610,7 @@ export function leadWa2View({
   lead,
   instances,
   links,
+  labelSync = [],
   message = '',
   error = '',
   csrfToken = '',
@@ -483,6 +639,23 @@ export function leadWa2View({
     </tr>`).join('');
   const instanceOptions = instances.map((instance) =>
     `<option value="${esc(instance.id)}">${detailValue(instance.name || instance.remote_instance_id)}${instance.is_default ? ' · padrão' : ''}</option>`).join('');
+  const labelSyncRows = labelSync.map((sync) => `
+    <tr>
+      <td>${detailValue(sync.instance_name)}</td>
+      <td>
+        ${sync.binding_id
+          ? `${detailValue(sync.remote_label_name)}<small>${detailValue(sync.remote_label_id)}</small>`
+          : '<span class="error-text">Etapa sem binding configurado</span>'}
+      </td>
+      <td>
+        ${sync.job_id
+          ? `<span class="badge ${statusClass(sync.job_status)}">${detailValue(sync.job_status)}</span><small>${detailValue(sync.job_attempts)} tentativa(s)</small>`
+          : '<span class="muted">Nenhum job registrado</span>'}
+      </td>
+      <td>${sync.last_error_code
+        ? `<small class="error-text">${esc(sync.last_error_code)} · ${esc(sync.last_error_message || '')}</small>`
+        : '—'}</td>
+    </tr>`).join('');
 
   return layout('Vínculo WA2', `
     ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
@@ -512,6 +685,13 @@ export function leadWa2View({
       <div class="table-wrap"><table>
         <thead><tr><th>Instância</th><th>Contato remoto</th><th>Chat/JID</th><th>Última verificação</th><th>Ações</th></tr></thead>
         <tbody>${linkRows || '<tr><td colspan="5" class="empty">Nenhum vínculo ativo.</td></tr>'}</tbody>
+      </table></div>
+    </section>
+    <section class="panel">
+      <div class="panel-title"><h2>Sincronização da etapa atual</h2><span>${labelSync.length} instância(s)</span></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Instância</th><th>Binding</th><th>Último job</th><th>Erro</th></tr></thead>
+        <tbody>${labelSyncRows || '<tr><td colspan="4" class="empty">Sem vínculo WA2 ativo para observar.</td></tr>'}</tbody>
       </table></div>
     </section>
     <a href="/">Voltar aos leads</a>

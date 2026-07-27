@@ -9,6 +9,10 @@ import {
   assertNoActiveWa2LinkConflict,
   validateWa2LinkParents,
 } from './wa2-link-rules.js';
+import {
+  isWa2LabelStage,
+  stagesSharingWa2Label,
+} from './wa2-label-sync.js';
 
 const { Pool } = pg;
 const DEFAULT_TENANT_ID = 'super-educar';
@@ -388,6 +392,150 @@ export async function disableWa2Instance(id, { clearDefault = false } = {}) {
   }
 }
 
+export async function listWa2LabelBindings(instanceId = null) {
+  const values = [tenantId()];
+  let instanceFilter = '';
+  if (instanceId) {
+    values.push(instanceId);
+    instanceFilter = `AND binding.wa2_instance_id = $${values.length}`;
+  }
+  const result = await pool.query(
+    `SELECT binding.*, instance.name AS instance_name,
+            instance.remote_instance_id, instance.enabled AS instance_enabled
+     FROM wa2_label_bindings binding
+     JOIN wa2_instances instance
+       ON instance.id = binding.wa2_instance_id
+      AND instance.tenant_id = binding.tenant_id
+     WHERE binding.tenant_id = $1 ${instanceFilter}
+     ORDER BY instance.is_default DESC, instance.name NULLS LAST, binding.stage`,
+    values,
+  );
+  return result.rows;
+}
+
+export async function getWa2LabelBindingById(id) {
+  const result = await pool.query(
+    `SELECT binding.*, instance.remote_instance_id,
+            instance.enabled AS instance_enabled
+     FROM wa2_label_bindings binding
+     JOIN wa2_instances instance
+       ON instance.id = binding.wa2_instance_id
+      AND instance.tenant_id = binding.tenant_id
+     WHERE binding.id = $1 AND binding.tenant_id = $2`,
+    [id, tenantId()],
+  );
+  return result.rows[0] || null;
+}
+
+export async function upsertWa2LabelBinding({
+  instanceId,
+  stage,
+  remoteLabelId,
+  remoteLabelName,
+}) {
+  if (!isWa2LabelStage(stage)) {
+    throw new Wa2DataError('Etapa de etiqueta inválida', 'WA2_LABEL_STAGE_INVALID');
+  }
+  const stages = stagesSharingWa2Label(stage);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const instanceResult = await client.query(
+      `SELECT * FROM wa2_instances
+       WHERE id = $1 AND tenant_id = $2 AND enabled = true
+       FOR UPDATE`,
+      [instanceId, tenantId()],
+    );
+    if (!instanceResult.rows[0]) {
+      throw new Wa2DataError(
+        'Instância local não encontrada ou desabilitada',
+        'WA2_INSTANCE_DISABLED',
+      );
+    }
+    const saved = [];
+    for (const bindingStage of stages) {
+      const result = await client.query(
+        `INSERT INTO wa2_label_bindings (
+           tenant_id, wa2_instance_id, stage, remote_label_id,
+           remote_label_name, enabled, last_verified_at
+         ) VALUES ($1, $2, $3, $4, $5, true, now())
+         ON CONFLICT (tenant_id, wa2_instance_id, stage) DO UPDATE SET
+           remote_label_id = EXCLUDED.remote_label_id,
+           remote_label_name = EXCLUDED.remote_label_name,
+           enabled = true,
+           last_verified_at = now(),
+           updated_at = now()
+         RETURNING *`,
+        [tenantId(), instanceId, bindingStage, remoteLabelId, remoteLabelName],
+      );
+      saved.push(result.rows[0]);
+    }
+    await client.query('COMMIT');
+    return saved;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function setWa2LabelBindingEnabled(id, enabled) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const selected = await client.query(
+      `SELECT * FROM wa2_label_bindings
+       WHERE id = $1 AND tenant_id = $2
+       FOR UPDATE`,
+      [id, tenantId()],
+    );
+    const binding = selected.rows[0];
+    if (!binding) {
+      await client.query('ROLLBACK');
+      return [];
+    }
+    const stages = stagesSharingWa2Label(binding.stage);
+    const result = await client.query(
+      `UPDATE wa2_label_bindings
+       SET enabled = $4, updated_at = now()
+       WHERE tenant_id = $1 AND wa2_instance_id = $2
+         AND stage = ANY($3::text[])
+       RETURNING *`,
+      [tenantId(), binding.wa2_instance_id, stages, enabled === true],
+    );
+    await client.query('COMMIT');
+    return result.rows;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function verifyWa2LabelBinding(id, remoteLabel) {
+  const binding = await getWa2LabelBindingById(id);
+  if (!binding || binding.remote_label_id !== remoteLabel.id) return [];
+  const stages = stagesSharingWa2Label(binding.stage);
+  const result = await pool.query(
+    `UPDATE wa2_label_bindings
+     SET remote_label_name = $4, last_verified_at = now(), updated_at = now()
+     WHERE tenant_id = $1 AND wa2_instance_id = $2
+       AND stage = ANY($3::text[])
+       AND remote_label_id = $5
+     RETURNING *`,
+    [
+      tenantId(),
+      binding.wa2_instance_id,
+      stages,
+      remoteLabel.name,
+      remoteLabel.id,
+    ],
+  );
+  return result.rows;
+}
+
 export async function getActiveWa2ContactLinkForLead(leadId, instanceId = null) {
   const values = [tenantId(), leadId];
   let instanceFilter = '';
@@ -727,6 +875,83 @@ async function enqueueConversionJob(client, event) {
   return result.rowCount === 1;
 }
 
+async function enqueueWa2LabelJobs(
+  client,
+  { lead, previousStage, stageHistoryId },
+) {
+  if (!isWa2LabelStage(lead.stage)) {
+    return { scheduled: 0, reason: 'STAGE_NOT_MAPPED' };
+  }
+  const candidates = await client.query(
+    `SELECT link.id AS contact_link_id, link.wa2_instance_id,
+            target.remote_label_id AS target_remote_label_id,
+            previous.remote_label_id AS previous_remote_label_id
+     FROM wa2_contact_links link
+     JOIN wa2_instances instance
+       ON instance.id = link.wa2_instance_id
+      AND instance.tenant_id = link.tenant_id
+      AND instance.enabled = true
+     LEFT JOIN wa2_label_bindings target
+       ON target.tenant_id = link.tenant_id
+      AND target.wa2_instance_id = link.wa2_instance_id
+      AND target.stage = $3
+      AND target.enabled = true
+     LEFT JOIN wa2_label_bindings previous
+       ON previous.tenant_id = link.tenant_id
+      AND previous.wa2_instance_id = link.wa2_instance_id
+      AND previous.stage = $4
+      AND previous.enabled = true
+     WHERE link.tenant_id = $1
+       AND link.lead_id = $2
+       AND link.unlinked_at IS NULL
+     FOR UPDATE OF link`,
+    [lead.tenant_id, lead.id, lead.stage, previousStage],
+  );
+  if (candidates.rowCount === 0) {
+    return { scheduled: 0, reason: 'NO_ACTIVE_LINK' };
+  }
+  const configured = candidates.rows.filter((row) => row.target_remote_label_id);
+  if (configured.length === 0) {
+    return { scheduled: 0, reason: 'NO_ENABLED_BINDING' };
+  }
+  let scheduled = 0;
+  let unchanged = 0;
+  for (const candidate of configured) {
+    if (candidate.previous_remote_label_id === candidate.target_remote_label_id) {
+      unchanged += 1;
+      continue;
+    }
+    const inserted = await client.query(
+      `INSERT INTO wa2_label_jobs (
+         tenant_id, lead_id, wa2_instance_id, wa2_contact_link_id,
+         stage_history_id, target_stage, target_remote_label_id
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (
+         tenant_id, stage_history_id, wa2_instance_id, wa2_contact_link_id
+       ) DO NOTHING
+       RETURNING id`,
+      [
+        lead.tenant_id,
+        lead.id,
+        candidate.wa2_instance_id,
+        candidate.contact_link_id,
+        stageHistoryId,
+        lead.stage,
+        candidate.target_remote_label_id,
+      ],
+    );
+    scheduled += inserted.rowCount;
+  }
+  return {
+    scheduled,
+    reason: scheduled > 0
+      ? 'SCHEDULED'
+      : unchanged === configured.length
+        ? 'LABEL_UNCHANGED'
+        : 'DUPLICATE',
+  };
+}
+
 export async function moveLeadStage(id, stage, {
   origin = 'MANUAL',
   changedBy = null,
@@ -781,12 +1006,18 @@ export async function moveLeadStage(id, stage, {
       [id, stage, tenantId()],
     );
     const lead = updated.rows[0];
-    await client.query(
+    const historyResult = await client.query(
       `INSERT INTO lead_stage_history (
          lead_id, tenant_id, previous_stage, new_stage, origin, changed_by, observation
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id`,
       [id, lead.tenant_id, previousLead.stage, stage, origin, changedBy, observation],
     );
+    const wa2LabelSync = await enqueueWa2LabelJobs(client, {
+      lead,
+      previousStage: previousLead.stage,
+      stageHistoryId: historyResult.rows[0].id,
+    });
 
     let event = null;
     let jobCreated = false;
@@ -805,6 +1036,7 @@ export async function moveLeadStage(id, stage, {
       lead,
       event,
       jobCreated,
+      wa2LabelSync,
       stageChanged: true,
       attributed: Boolean(lead.meta_lead_id),
     };
@@ -1063,6 +1295,239 @@ export async function retryFailedJob(id) {
   } finally {
     client.release();
   }
+}
+
+export async function claimNextWa2LabelJob() {
+  const result = await pool.query(
+    `WITH terminal_stale AS (
+       UPDATE wa2_label_jobs
+       SET status = 'FAILED',
+           locked_at = NULL,
+           finished_at = now(),
+           last_error_code = 'WA2_MAX_ATTEMPTS',
+           last_error_message = 'Limite de tentativas atingido após recuperação.',
+           updated_at = now()
+       WHERE tenant_id = $1
+         AND status = 'RUNNING'
+         AND locked_at < now() - interval '5 minutes'
+         AND attempts >= max_attempts
+       RETURNING id
+     ),
+     candidate AS (
+       SELECT id
+       FROM wa2_label_jobs
+       WHERE tenant_id = $1
+         AND attempts < max_attempts
+         AND (
+           (status = 'PENDING' AND available_at <= now())
+           OR (
+             status = 'RUNNING'
+             AND locked_at < now() - interval '5 minutes'
+           )
+         )
+       ORDER BY available_at, created_at
+       FOR UPDATE SKIP LOCKED
+       LIMIT 1
+     )
+     UPDATE wa2_label_jobs AS job
+     SET status = 'RUNNING',
+         attempts = job.attempts + 1,
+         locked_at = now(),
+         finished_at = NULL,
+         updated_at = now()
+     FROM candidate
+     WHERE job.id = candidate.id
+     RETURNING job.*`,
+    [tenantId()],
+  );
+  return result.rows[0] || null;
+}
+
+export async function getWa2LabelJobContext(id) {
+  const result = await pool.query(
+    `SELECT job.*, instance.remote_instance_id, link.remote_chat_id,
+            ARRAY(
+              SELECT DISTINCT binding.remote_label_id
+              FROM wa2_label_bindings binding
+              WHERE binding.tenant_id = job.tenant_id
+                AND binding.wa2_instance_id = job.wa2_instance_id
+            ) AS known_remote_label_ids
+     FROM wa2_label_jobs job
+     JOIN wa2_instances instance
+       ON instance.id = job.wa2_instance_id
+      AND instance.tenant_id = job.tenant_id
+      AND instance.enabled = true
+     JOIN wa2_contact_links link
+       ON link.id = job.wa2_contact_link_id
+      AND link.tenant_id = job.tenant_id
+      AND link.unlinked_at IS NULL
+     JOIN wa2_label_bindings target
+       ON target.tenant_id = job.tenant_id
+      AND target.wa2_instance_id = job.wa2_instance_id
+      AND target.stage = job.target_stage
+      AND target.remote_label_id = job.target_remote_label_id
+      AND target.enabled = true
+     WHERE job.id = $1 AND job.tenant_id = $2`,
+    [id, tenantId()],
+  );
+  return result.rows[0] || null;
+}
+
+export async function completeWa2LabelJob(id) {
+  const result = await pool.query(
+    `UPDATE wa2_label_jobs
+     SET status = 'DONE',
+         locked_at = NULL,
+         finished_at = now(),
+         last_error_code = NULL,
+         last_error_message = NULL,
+         updated_at = now()
+     WHERE id = $1 AND tenant_id = $2 AND status = 'RUNNING'
+     RETURNING *`,
+    [id, tenantId()],
+  );
+  return result.rows[0] || null;
+}
+
+export async function requeueWa2LabelJobForRemoteConfirmation(
+  id,
+  { availableAt, pendingCode = 'WA2_REMOTE_PENDING' },
+) {
+  const result = await pool.query(
+    `UPDATE wa2_label_jobs
+     SET status = 'PENDING',
+         available_at = $3,
+         locked_at = NULL,
+         finished_at = NULL,
+         last_error_code = $4,
+         last_error_message = NULL,
+         updated_at = now()
+     WHERE id = $1 AND tenant_id = $2 AND status = 'RUNNING'
+     RETURNING *`,
+    [id, tenantId(), availableAt, pendingCode],
+  );
+  return result.rows[0] || null;
+}
+
+export async function failWa2LabelJob(id, error, { retryAt = null } = {}) {
+  const status = retryAt ? 'PENDING' : 'FAILED';
+  const result = await pool.query(
+    `UPDATE wa2_label_jobs
+     SET status = $3,
+         available_at = COALESCE($4, available_at),
+         locked_at = NULL,
+         finished_at = CASE WHEN $3 = 'FAILED' THEN now() ELSE NULL END,
+         last_error_code = $5,
+         last_error_message = $6,
+         updated_at = now()
+     WHERE id = $1 AND tenant_id = $2 AND status = 'RUNNING'
+     RETURNING *`,
+    [id, tenantId(), status, retryAt, error.code, error.message],
+  );
+  return result.rows[0] || null;
+}
+
+export async function retryFailedWa2LabelJob(id) {
+  const result = await pool.query(
+    `UPDATE wa2_label_jobs
+     SET status = 'PENDING',
+         max_attempts = CASE
+           WHEN attempts >= max_attempts THEN LEAST(10, attempts + 1)
+           ELSE max_attempts
+         END,
+         available_at = now(),
+         locked_at = NULL,
+         finished_at = NULL,
+         last_error_code = NULL,
+         last_error_message = NULL,
+         updated_at = now()
+     WHERE id = $1
+       AND tenant_id = $2
+       AND status = 'FAILED'
+       AND attempts < 10
+     RETURNING *`,
+    [id, tenantId()],
+  );
+  return result.rows[0] || null;
+}
+
+export async function listWa2LabelJobs(limit = 100) {
+  const result = await pool.query(
+    `SELECT job.*, lead.name AS lead_name, instance.name AS instance_name,
+            instance.remote_instance_id,
+            job.status = 'RUNNING'
+              AND job.locked_at < now() - interval '5 minutes' AS stale
+     FROM wa2_label_jobs job
+     JOIN leads lead
+       ON lead.id = job.lead_id AND lead.tenant_id = job.tenant_id
+     JOIN wa2_instances instance
+       ON instance.id = job.wa2_instance_id
+      AND instance.tenant_id = job.tenant_id
+     WHERE job.tenant_id = $1
+     ORDER BY job.created_at DESC
+     LIMIT $2`,
+    [tenantId(), limit],
+  );
+  return result.rows;
+}
+
+export async function getWa2LabelJobCounts() {
+  const result = await pool.query(
+    `SELECT
+       count(*) FILTER (WHERE status = 'PENDING')::int AS pending,
+       count(*) FILTER (WHERE status = 'RUNNING')::int AS running,
+       count(*) FILTER (WHERE status = 'DONE')::int AS done,
+       count(*) FILTER (WHERE status = 'FAILED')::int AS failed,
+       count(*) FILTER (
+         WHERE status = 'RUNNING'
+           AND locked_at < now() - interval '5 minutes'
+       )::int AS stale
+     FROM wa2_label_jobs
+     WHERE tenant_id = $1`,
+    [tenantId()],
+  );
+  return result.rows[0];
+}
+
+export async function getWa2LabelSyncStatusForLead(leadId, stage) {
+  const result = await pool.query(
+    `SELECT link.id AS contact_link_id, instance.id AS instance_id,
+            instance.name AS instance_name,
+            binding.id AS binding_id,
+            binding.remote_label_id,
+            binding.remote_label_name,
+            binding.enabled AS binding_enabled,
+            latest.id AS job_id,
+            latest.status AS job_status,
+            latest.attempts AS job_attempts,
+            latest.available_at AS job_available_at,
+            latest.finished_at AS job_finished_at,
+            latest.last_error_code,
+            latest.last_error_message
+     FROM wa2_contact_links link
+     JOIN wa2_instances instance
+       ON instance.id = link.wa2_instance_id
+      AND instance.tenant_id = link.tenant_id
+     LEFT JOIN wa2_label_bindings binding
+       ON binding.tenant_id = link.tenant_id
+      AND binding.wa2_instance_id = link.wa2_instance_id
+      AND binding.stage = $3
+     LEFT JOIN LATERAL (
+       SELECT job.*
+       FROM wa2_label_jobs job
+       WHERE job.tenant_id = link.tenant_id
+         AND job.lead_id = link.lead_id
+         AND job.wa2_instance_id = link.wa2_instance_id
+       ORDER BY job.created_at DESC
+       LIMIT 1
+     ) latest ON true
+     WHERE link.tenant_id = $1
+       AND link.lead_id = $2
+       AND link.unlinked_at IS NULL
+     ORDER BY instance.is_default DESC, instance.name NULLS LAST`,
+    [tenantId(), leadId, stage],
+  );
+  return result.rows;
 }
 
 export async function recordWorkerHeartbeat({ started = false } = {}) {

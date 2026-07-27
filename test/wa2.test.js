@@ -12,6 +12,8 @@ import {
 import {
   leadWa2View,
   wa2DashboardView,
+  wa2LabelBindingsView,
+  wa2LabelJobsView,
   wa2LinkConfirmView,
 } from '../src/views.js';
 import {
@@ -457,6 +459,134 @@ test('erro by-phone não expõe segredo nem mensagem remota', async () => {
   );
 });
 
+test('lista etiquetas da instância com o contrato real e descarta extras', async () => {
+  let capturedUrl;
+  let capturedOptions;
+  const client = clientWith(async (url, options) => {
+    capturedUrl = url;
+    capturedOptions = options;
+    return jsonResponse({
+      instanceId: 'instance-1',
+      labels: [{
+        waLabelId: '10',
+        name: 'CRM 01 Em atendimento',
+        color: 3,
+        predefined: false,
+        updatedAt: '2026-07-27T12:00:00.000Z',
+        secretExtra: 'descartar',
+      }],
+      extra: true,
+    });
+  });
+  assert.deepEqual(await client.listLabels('instance-1'), [{
+    id: '10',
+    name: 'CRM 01 Em atendimento',
+  }]);
+  assert.equal(
+    capturedUrl,
+    'http://localhost:3100/api/internal/v1/instances/instance-1/labels',
+  );
+  assert.equal(capturedOptions.method, 'GET');
+  assert.equal(capturedOptions.headers['idempotency-key'], undefined);
+});
+
+test('lista etiquetas do chat usando IDs validados e rota exata', async () => {
+  let capturedUrl;
+  const client = clientWith(async (url) => {
+    capturedUrl = url;
+    return jsonResponse({
+      instanceId: 'instance-1',
+      chatId: 'chat_1',
+      labels: [{ waLabelId: 'label-1', name: 'CRM 02 Qualificado', color: 4 }],
+    });
+  });
+  assert.deepEqual(await client.listChatLabels('instance-1', 'chat_1'), [{
+    id: 'label-1',
+    name: 'CRM 02 Qualificado',
+  }]);
+  assert.equal(
+    capturedUrl,
+    'http://localhost:3100/api/internal/v1/instances/instance-1/chats/chat_1/labels',
+  );
+});
+
+test('aplica e remove etiqueta com PUT/DELETE idempotentes e sem payload', async () => {
+  const calls = [];
+  const client = clientWith(async (url, options) => {
+    calls.push({ url, options });
+    const operation = options.method === 'PUT' ? 'apply' : 'remove';
+    return jsonResponse({
+      operation,
+      changed: operation === 'apply',
+      enqueued: operation === 'apply',
+      jobId: operation === 'apply' ? 'wa2-job-1' : null,
+      extra: 'descartar',
+    }, { status: operation === 'apply' ? 202 : 200 });
+  });
+  assert.deepEqual(
+    await client.applyChatLabel('instance-1', 'chat_1', 'label-1', {
+      idempotencyKey: 'crm-label:apply-test-1',
+    }),
+    { operation: 'apply', changed: true, enqueued: true, jobId: 'wa2-job-1' },
+  );
+  assert.deepEqual(
+    await client.removeChatLabel('instance-1', 'chat_1', 'label-1', {
+      idempotencyKey: 'crm-label:remove-test-1',
+    }),
+    { operation: 'remove', changed: false, enqueued: false, jobId: null },
+  );
+  assert.deepEqual(calls.map((call) => call.options.method), ['PUT', 'DELETE']);
+  for (const [index, call] of calls.entries()) {
+    assert.equal(
+      call.url,
+      'http://localhost:3100/api/internal/v1/instances/instance-1/chats/chat_1/labels/label-1',
+    );
+    assert.equal(call.options.body, undefined);
+    assert.equal(
+      call.options.headers['idempotency-key'],
+      index === 0 ? 'crm-label:apply-test-1' : 'crm-label:remove-test-1',
+    );
+    assert.equal(call.options.redirect, 'error');
+  }
+});
+
+test('rejeita IDs inseguros de chat e etiqueta antes do fetch', () => {
+  let called = false;
+  const client = clientWith(async () => {
+    called = true;
+    return jsonResponse({});
+  });
+  assert.throws(
+    () => client.listChatLabels('instance-1', '../chat'),
+    { code: 'WA2_RESOURCE_ID_INVALID' },
+  );
+  assert.throws(
+    () => client.applyChatLabel('instance-1', 'chat-1', 'label/1'),
+    { code: 'WA2_RESOURCE_ID_INVALID' },
+  );
+  assert.equal(called, false);
+});
+
+test('erros 404, 409 e 422 de etiquetas são identificáveis e sanitizados', async () => {
+  for (const [status, code] of [
+    [404, 'LABEL_NOT_FOUND'],
+    [409, 'IDEMPOTENCY_IN_PROGRESS'],
+    [422, 'UNSUPPORTED_JID'],
+  ]) {
+    const client = clientWith(async () => jsonResponse({
+      error: { code, message: `detalhe remoto ${PLACEHOLDER_SECRET}` },
+    }, { status }));
+    await assert.rejects(
+      () => client.applyChatLabel('instance-1', 'chat-1', 'label-1'),
+      (error) =>
+        error.status === status &&
+        error.remoteCode === code &&
+        !error.message.includes(PLACEHOLDER_SECRET) &&
+        !error.message.includes('detalhe remoto'),
+    );
+  }
+});
+
 test('aceita o contrato real completo do QR WA2', () => {
   const qr = parseWa2Qr({
     instanceId: 'instance-1',
@@ -690,12 +820,106 @@ test('view do lead mascara JID e mantém ações por IDs locais', () => {
       jid: '5538999990000@s.whatsapp.net',
       last_verified_at: '2026-07-27T12:00:00.000Z',
     }],
+    labelSync: [{
+      instance_name: 'Instância',
+      binding_id: 'binding-local',
+      remote_label_id: 'label-2',
+      remote_label_name: 'CRM 02 Qualificado',
+      job_id: 'job-local',
+      job_status: 'FAILED',
+      job_attempts: 5,
+      last_error_code: 'WA2_TIMEOUT',
+      last_error_message: 'Tempo esgotado',
+    }],
     csrfToken: 'csrf-placeholder',
   });
   assert.equal(html.includes('5538999990000@s.whatsapp.net'), false);
   assert.equal(html.includes('5538••••00@s.whatsapp.net'), true);
   assert.equal(html.includes('value="instance-local"'), true);
   assert.equal(html.includes('value="link-local"'), true);
+  assert.equal(html.includes('CRM 02 Qualificado'), true);
+  assert.equal(html.includes('WA2_TIMEOUT'), true);
+});
+
+test('painel de bindings escapa dados e envia instância/binding por IDs locais', () => {
+  const html = wa2LabelBindingsView({
+    instances: [{
+      id: '11111111-1111-4111-8111-111111111111',
+      remote_instance_id: 'remote-1',
+      name: '<Instância>',
+      enabled: true,
+    }],
+    selectedInstance: {
+      id: '11111111-1111-4111-8111-111111111111',
+      remote_instance_id: 'remote-1',
+      name: '<Instância>',
+      enabled: true,
+    },
+    labels: [{
+      id: 'label-1',
+      name: '<CRM 01 Em atendimento>',
+    }],
+    bindings: [{
+      id: '22222222-2222-4222-8222-222222222222',
+      stage: 'NEW',
+      remote_label_id: 'label-1',
+      remote_label_name: '<CRM 01 Em atendimento>',
+      enabled: true,
+      last_verified_at: '2026-07-27T12:00:00.000Z',
+    }],
+    csrfToken: 'csrf-placeholder',
+  });
+  assert.equal(html.includes('<Instância>'), false);
+  assert.equal(html.includes('&lt;Instância&gt;'), true);
+  assert.equal(html.includes('name="instanceId" value="11111111-1111-4111-8111-111111111111"'), true);
+  assert.equal(html.includes('/wa2/label-bindings/22222222-2222-4222-8222-222222222222/verify'), true);
+  assert.equal(html.includes(PLACEHOLDER_SECRET), false);
+  assert.equal(html.includes('rawPayload'), false);
+});
+
+test('painel de jobs permite retry somente para FAILED e escapa erro', () => {
+  const html = wa2LabelJobsView({
+    counts: { pending: 1, running: 1, done: 1, failed: 1, stale: 1 },
+    jobs: [{
+      id: '11111111-1111-4111-8111-111111111111',
+      lead_name: '<Lead>',
+      target_stage: 'QUALIFIED',
+      target_remote_label_id: 'label-2',
+      instance_name: '<Instância>',
+      remote_instance_id: 'remote-1',
+      status: 'FAILED',
+      attempts: 5,
+      max_attempts: 5,
+      available_at: '2026-07-27T12:00:00.000Z',
+      created_at: '2026-07-27T12:00:00.000Z',
+      last_error_code: 'WA2_TIMEOUT',
+      last_error_message: '<erro>',
+      stale: false,
+    }, {
+      id: '22222222-2222-4222-8222-222222222222',
+      lead_name: 'Lead 2',
+      target_stage: 'MATRICULATED',
+      target_remote_label_id: 'label-5',
+      instance_name: 'Instância',
+      status: 'RUNNING',
+      attempts: 1,
+      max_attempts: 5,
+      created_at: '2026-07-27T12:00:00.000Z',
+      stale: true,
+    }],
+    csrfToken: 'csrf-placeholder',
+  });
+  assert.equal(html.includes('<Lead>'), false);
+  assert.equal(html.includes('&lt;erro&gt;'), true);
+  assert.equal(
+    html.includes('/wa2/label-jobs/11111111-1111-4111-8111-111111111111/retry'),
+    true,
+  );
+  assert.equal(
+    html.includes('/wa2/label-jobs/22222222-2222-4222-8222-222222222222/retry'),
+    false,
+  );
+  assert.equal(html.includes('RUNNING abandonado'), true);
 });
 
 test('token de resolução aceita CREATE sem vínculo e REPLACE com vínculo assinado', () => {

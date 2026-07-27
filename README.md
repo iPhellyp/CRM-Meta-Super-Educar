@@ -102,8 +102,21 @@ lead e a instância, consulta o WA2 por telefone exato e repete a consulta duran
 confirmação. O navegador não decide tenant, telefone, chat ou JID.
 
 Desvínculos são lógicos e preservam histórico. Uma substituição exige confirmação
-explícita e mantém o vínculo anterior como inativo. Este checkpoint não sincroniza
-etiquetas, não cria fila ou worker WA2 e não cria leads orgânicos.
+explícita e mantém o vínculo anterior como inativo. O CRM não cria leads orgânicos
+nem altera etapas a partir de etiquetas recebidas do WA2.
+
+### Sincronização de etapas com etiquetas WA2
+
+A migration aditiva `004_wa2_label_sync.sql` cria os bindings por instância e a fila
+local de etiquetas. O administrador escolhe IDs de etiquetas que o servidor confirma
+novamente no WA2; `NEW` e `CONTACTED` compartilham `CRM 01 Em atendimento`.
+
+Quando uma etapa muda, o histórico e o job WA2 são gravados na mesma transação local.
+O worker consulta o chat depois do commit, aplica a etiqueta desejada e remove somente
+IDs cadastrados como etiquetas CRM na mesma instância. Etiquetas externas são
+preservadas. O job só chega a `DONE` depois de uma nova consulta confirmar o estado;
+aceites remotos ainda pendentes voltam à fila. Falhas transitórias usam backoff e jobs
+`FAILED` podem ser reenfileirados sem zerar o contador de tentativas.
 
 Em produção HTTPS, `COOKIE_SECURE=true` é obrigatório. Use `COOKIE_SECURE=false` apenas no acesso local por `http://localhost`.
 

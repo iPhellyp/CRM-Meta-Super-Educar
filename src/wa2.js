@@ -7,6 +7,8 @@ const MAX_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_QR_BYTES = 512 * 1024;
 const INSTANCE_ID_PATTERN = /^[A-Za-z0-9._:@-]{1,128}$/;
+const RESOURCE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const CONNECT_MODES = new Set(['auto', 'resume', 'new_qr']);
 const SYNC_SCOPES = new Set(['quick', 'catalog', 'history']);
 
@@ -200,6 +202,59 @@ function optionalRemoteText(value, maxLength, code = 'WA2_RESPONSE_INVALID') {
     throw new Wa2Error('Resposta WA2 incompatível', { code });
   }
   return value;
+}
+
+function validateWa2ResourceId(value, field) {
+  const text = String(value || '');
+  if (!RESOURCE_ID_PATTERN.test(text)) {
+    throw new Wa2Error(`Identificador de ${field} inválido`, {
+      code: 'WA2_RESOURCE_ID_INVALID',
+    });
+  }
+  return text;
+}
+
+function sanitizeLabel(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Wa2Error('Etiqueta WA2 incompatível', { code: 'WA2_LABEL_INVALID' });
+  }
+  return {
+    id: validateWa2ResourceId(
+      requiredRemoteText(value.waLabelId, 128, 'WA2_LABEL_INVALID'),
+      'etiqueta',
+    ),
+    name: requiredRemoteText(value.name, 200, 'WA2_LABEL_INVALID'),
+  };
+}
+
+function sanitizeLabels(payload) {
+  const value = objectPayload(payload);
+  if (!Array.isArray(value.labels)) {
+    throw new Wa2Error('Lista de etiquetas WA2 incompatível', {
+      code: 'WA2_LABELS_INVALID',
+    });
+  }
+  return value.labels.map(sanitizeLabel);
+}
+
+function sanitizeLabelMutation(payload, expectedOperation) {
+  const value = objectPayload(payload);
+  if (
+    value.operation !== expectedOperation ||
+    typeof value.changed !== 'boolean' ||
+    typeof value.enqueued !== 'boolean' ||
+    !Object.hasOwn(value, 'jobId')
+  ) {
+    throw new Wa2Error('Mutação de etiqueta WA2 incompatível', {
+      code: 'WA2_LABEL_MUTATION_INVALID',
+    });
+  }
+  return {
+    operation: value.operation,
+    changed: value.changed,
+    enqueued: value.enqueued,
+    jobId: sanitizeJobId(value.jobId),
+  };
 }
 
 function sanitizeContactByPhone(payload, requestedPhone) {
@@ -534,9 +589,16 @@ export function createWa2Client({
     method = 'GET',
     body,
     parse = objectPayload,
+    idempotencyKey = null,
   } = {}) {
     const requestId = randomUUID();
     const mutation = method !== 'GET';
+    const mutationKey = mutation ? (idempotencyKey || randomUUID()) : null;
+    if (mutation && !IDEMPOTENCY_KEY_PATTERN.test(mutationKey)) {
+      throw new Wa2Error('Idempotency-Key inválida', {
+        code: 'WA2_IDEMPOTENCY_KEY_INVALID',
+      });
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
     const headers = {
@@ -545,7 +607,7 @@ export function createWa2Client({
       'x-request-id': requestId,
     };
     if (body !== undefined) headers['content-type'] = 'application/json';
-    if (mutation) headers['idempotency-key'] = crypto.randomUUID();
+    if (mutation) headers['idempotency-key'] = mutationKey;
 
     let response;
     try {
@@ -628,6 +690,40 @@ export function createWa2Client({
         parse: (payload) => sanitizeContactByPhone(payload, phone),
       });
     },
+    listLabels: (instanceId) => request(instancePath(instanceId, '/labels'), {
+      parse: sanitizeLabels,
+    }),
+    listChatLabels: (instanceId, chatId) => {
+      const chat = validateWa2ResourceId(chatId, 'chat');
+      return request(instancePath(
+        instanceId,
+        `/chats/${encodeURIComponent(chat)}/labels`,
+      ), { parse: sanitizeLabels });
+    },
+    applyChatLabel: (instanceId, chatId, labelId, { idempotencyKey } = {}) => {
+      const chat = validateWa2ResourceId(chatId, 'chat');
+      const label = validateWa2ResourceId(labelId, 'etiqueta');
+      return request(instancePath(
+        instanceId,
+        `/chats/${encodeURIComponent(chat)}/labels/${encodeURIComponent(label)}`,
+      ), {
+        method: 'PUT',
+        idempotencyKey,
+        parse: (payload) => sanitizeLabelMutation(payload, 'apply'),
+      });
+    },
+    removeChatLabel: (instanceId, chatId, labelId, { idempotencyKey } = {}) => {
+      const chat = validateWa2ResourceId(chatId, 'chat');
+      const label = validateWa2ResourceId(labelId, 'etiqueta');
+      return request(instancePath(
+        instanceId,
+        `/chats/${encodeURIComponent(chat)}/labels/${encodeURIComponent(label)}`,
+      ), {
+        method: 'DELETE',
+        idempotencyKey,
+        parse: (payload) => sanitizeLabelMutation(payload, 'remove'),
+      });
+    },
     connectInstance: (instanceId, mode) => {
       if (!CONNECT_MODES.has(mode)) {
         throw new Wa2Error('Modo de conexão inválido', { code: 'WA2_CONNECT_MODE_INVALID' });
@@ -668,6 +764,28 @@ export const getWa2InstanceQr = (instanceId, options) =>
   defaultClient(options).getInstanceQr(instanceId);
 export const getWa2ContactByPhone = (instanceId, phoneNormalized, options) =>
   defaultClient(options).getContactByPhone(instanceId, phoneNormalized);
+export const listWa2Labels = (instanceId, options) =>
+  defaultClient(options).listLabels(instanceId);
+export const listWa2ChatLabels = (instanceId, chatId, options) =>
+  defaultClient(options).listChatLabels(instanceId, chatId);
+export const applyWa2ChatLabel = (instanceId, chatId, labelId, options = {}) => {
+  const { idempotencyKey, ...clientOptions } = options;
+  return defaultClient(clientOptions).applyChatLabel(
+    instanceId,
+    chatId,
+    labelId,
+    { idempotencyKey },
+  );
+};
+export const removeWa2ChatLabel = (instanceId, chatId, labelId, options = {}) => {
+  const { idempotencyKey, ...clientOptions } = options;
+  return defaultClient(clientOptions).removeChatLabel(
+    instanceId,
+    chatId,
+    labelId,
+    { idempotencyKey },
+  );
+};
 export const connectWa2Instance = (instanceId, mode, options) =>
   defaultClient(options).connectInstance(instanceId, mode);
 export const syncWa2Instance = (instanceId, scope, options) =>

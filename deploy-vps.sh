@@ -2,79 +2,119 @@
 set -Eeuo pipefail
 cd "$(dirname "$0")"
 
-if [[ ! -f .env ]]; then
-  cp .env.example .env
-  echo "Preencha o arquivo .env e execute novamente."
+env_file="${CRM_ENV_FILE:-.env}"
+[[ -f "$env_file" ]] || {
+  echo "Arquivo de ambiente ausente: $env_file" >&2
   exit 1
-fi
+}
 
 set -a
-source .env
+# shellcheck disable=SC1090
+source "$env_file"
 set +a
 
-: "${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no .env}"
-: "${DATABASE_SSL:?Defina DATABASE_SSL no .env}"
-: "${ADMIN_EMAIL:?Defina ADMIN_EMAIL no .env}"
-: "${ADMIN_PASSWORD_HASH:?Defina ADMIN_PASSWORD_HASH no .env}"
-: "${SESSION_SECRET:?Defina SESSION_SECRET no .env}"
-: "${OPERATION_START_AT:?Defina OPERATION_START_AT no .env}"
-: "${META_DATASET_ID:?Defina META_DATASET_ID no .env}"
-: "${META_CAPI_ACCESS_TOKEN:?Defina META_CAPI_ACCESS_TOKEN no .env}"
-: "${META_PAGE_ACCESS_TOKEN:?Defina META_PAGE_ACCESS_TOKEN no .env}"
-: "${META_APP_SECRET:?Defina META_APP_SECRET no .env}"
-: "${META_WEBHOOK_VERIFY_TOKEN:?Defina META_WEBHOOK_VERIFY_TOKEN no .env}"
-: "${META_GRAPH_VERSION:?Defina META_GRAPH_VERSION no .env}"
-: "${META_TEST_MODE:?Defina META_TEST_MODE no .env}"
-: "${META_LEAD_EVENT_SOURCE:?Defina META_LEAD_EVENT_SOURCE no .env}"
-: "${DEFAULT_TENANT_ID:?Defina DEFAULT_TENANT_ID no .env}"
-: "${APP_URL:?Defina APP_URL no .env}"
+require_env() {
+  local name="$1"
+  [[ -n "${!name:-}" ]] || {
+    echo "Variavel obrigatoria ausente: $name" >&2
+    exit 1
+  }
+  echo "OK: $name presente"
+}
 
-if [[ "${POSTGRES_PASSWORD}" == troque* || "${META_WEBHOOK_VERIFY_TOKEN}" == troque* ]]; then
-  echo "Substitua todos os valores de exemplo antes do deploy."
+wait_for_healthy_service() {
+  local service="$1"
+  local deadline=$((SECONDS + 300))
+  local -a ids
+  local health
+  while (( SECONDS < deadline )); do
+    mapfile -t ids < <(
+      docker ps --filter "label=com.docker.swarm.service.name=${service}" \
+        --format '{{.ID}}'
+    )
+    if [[ "${#ids[@]}" -eq 1 ]]; then
+      health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "${ids[0]}")"
+      [[ "$health" == "healthy" ]] && return 0
+    fi
+    sleep 5
+  done
+  echo "Timeout aguardando healthcheck de ${service}" >&2
+  return 1
+}
+
+for name in \
+  POSTGRES_PASSWORD DATABASE_URL DATABASE_SSL ADMIN_EMAIL ADMIN_PASSWORD_HASH \
+  SESSION_SECRET COOKIE_SECURE OPERATION_START_AT META_DATASET_ID \
+  META_CAPI_ACCESS_TOKEN META_PAGE_ACCESS_TOKEN META_APP_SECRET \
+  META_WEBHOOK_VERIFY_TOKEN META_GRAPH_VERSION META_TEST_MODE \
+  META_LEAD_EVENT_SOURCE DEFAULT_TENANT_ID APP_URL \
+  WA2_INTERNAL_API_BASE_URL WA2_INTERNAL_API_SECRET WA2_INTERNAL_API_TIMEOUT_MS
+do
+  require_env "$name"
+done
+
+[[ "$COOKIE_SECURE" == "true" ]] || { echo "COOKIE_SECURE deve ser true" >&2; exit 1; }
+[[ "$DATABASE_SSL" =~ ^(true|false)$ ]] || { echo "DATABASE_SSL invalido" >&2; exit 1; }
+[[ "$META_TEST_MODE" == "false" ]] || { echo "META_TEST_MODE deve ser false" >&2; exit 1; }
+[[ "$APP_URL" == https://* ]] || { echo "APP_URL deve usar HTTPS" >&2; exit 1; }
+[[ "$WA2_INTERNAL_API_BASE_URL" == "https://wa2.supereducarbrasil.com.br" ]] || {
+  echo "WA2_INTERNAL_API_BASE_URL deve usar o dominio HTTPS oficial" >&2
   exit 1
-fi
+}
+[[ "$ADMIN_PASSWORD_HASH" == scrypt\$* ]] || { echo "ADMIN_PASSWORD_HASH invalido" >&2; exit 1; }
+(( ${#SESSION_SECRET} >= 64 )) || { echo "SESSION_SECRET deve ter ao menos 64 caracteres" >&2; exit 1; }
 
-if [[ "${ADMIN_PASSWORD_HASH}" != scrypt\$* ]]; then
-  echo "ADMIN_PASSWORD_HASH deve conter um hash scrypt gerado conforme o README."
+git diff --quiet
+git diff --cached --quiet
+[[ -z "$(git status --porcelain)" ]] || { echo "Git deve estar limpo" >&2; exit 1; }
+
+branch="$(git branch --show-current)"
+commit="$(git rev-parse HEAD)"
+short_sha="$(git rev-parse --short=12 HEAD)"
+if [[ "${IMAGE_TAG+x}" == "x" ]]; then
+  [[ -n "$IMAGE_TAG" ]] || { echo "IMAGE_TAG nao pode ser vazia" >&2; exit 1; }
+else
+  IMAGE_TAG="$short_sha"
+fi
+[[ "$IMAGE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || {
+  echo "IMAGE_TAG invalida ou vazia" >&2
   exit 1
-fi
+}
+export IMAGE_TAG
+echo "Git confirmado: branch=${branch} commit=${commit}"
+echo "Tag imutavel selecionada: ${IMAGE_TAG}"
 
-if (( ${#SESSION_SECRET} < 64 )); then
-  echo "SESSION_SECRET deve ter pelo menos 64 caracteres."
-  exit 1
-fi
+wa2_host="$(node -e 'console.log(new URL(process.env.WA2_INTERNAL_API_BASE_URL).hostname)')"
+getent hosts "$wa2_host" > /dev/null
+printf 'silent\nshow-error\nfail\nheader = "Authorization: Bearer %s"\n' "$WA2_INTERNAL_API_SECRET" |
+  curl --fail --silent --show-error --config - \
+    "${WA2_INTERNAL_API_BASE_URL%/}/api/internal/v1/health" > /dev/null
+echo "DNS e HTTPS CRM -> WA2 confirmados via Traefik"
 
-if [[ "${COOKIE_SECURE:-}" != "true" ]]; then
-  echo "Produção HTTPS exige COOKIE_SECURE=true."
-  exit 1
-fi
+bash ./scripts/backup.sh
+docker build -t "crm-meta-super-educar:${IMAGE_TAG}" .
+echo "Imagem publicada localmente: crm-meta-super-educar:${IMAGE_TAG}"
 
-if [[ "${DATABASE_SSL}" != "true" && "${DATABASE_SSL}" != "false" ]]; then
-  echo "DATABASE_SSL deve ser true ou false."
-  exit 1
-fi
+export APP_REPLICAS=0
+export WORKER_REPLICAS=0
+docker stack deploy --resolve-image never -c docker-stack.yml crm-meta
 
-if [[ ! "${META_GRAPH_VERSION}" =~ ^v[0-9]+\.[0-9]+$ ]]; then
-  echo "META_GRAPH_VERSION deve usar o formato vNN.N."
-  exit 1
-fi
+docker run --rm \
+  --network crm-meta_internal \
+  --env-file "$env_file" \
+  --env RUN_MIGRATIONS_ON_STARTUP=false \
+  "crm-meta-super-educar:${IMAGE_TAG}" npm run migrate
 
-if [[ "${META_TEST_MODE}" != "true" && "${META_TEST_MODE}" != "false" ]]; then
-  echo "META_TEST_MODE deve ser true ou false."
-  exit 1
-fi
+export APP_REPLICAS=1
+docker stack deploy --resolve-image never -c docker-stack.yml crm-meta
+wait_for_healthy_service "crm-meta_app"
 
-if [[ "${APP_URL}" != https://* ]]; then
-  echo "APP_URL deve usar HTTPS em produção."
-  exit 1
-fi
+export WORKER_REPLICAS=1
+docker stack deploy --resolve-image never -c docker-stack.yml crm-meta
+wait_for_healthy_service "crm-meta_worker"
 
-if [[ "${META_TEST_MODE:-false}" == "true" && -z "${META_TEST_EVENT_CODE:-}" ]]; then
-  echo "META_TEST_MODE=true exige META_TEST_EVENT_CODE."
-  exit 1
-fi
-
-docker build -t crm-meta-super-educar:latest .
-docker stack deploy -c docker-stack.yml crm-meta
-
-echo "Deploy solicitado. Verifique com: docker service ls | grep crm-meta"
+echo "Deploy concluido com tag: ${IMAGE_TAG}"
+echo "Inspecao: docker stack services crm-meta"
+echo "Inspecao: docker service ps crm-meta_app --no-trunc"
+echo "Inspecao: docker service ps crm-meta_worker --no-trunc"
+echo "Nenhuma importacao de leads foi executada."

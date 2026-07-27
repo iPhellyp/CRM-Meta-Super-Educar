@@ -48,6 +48,7 @@ APP_URL=https://crm.supereducarbrasil.com.br
 POSTGRES_PASSWORD=
 DATABASE_URL=postgresql://crm_meta:SENHA@postgres:5432/crm_meta
 DATABASE_SSL=false
+RUN_MIGRATIONS_ON_STARTUP=false
 
 ADMIN_EMAIL=
 ADMIN_PASSWORD_HASH=
@@ -66,9 +67,57 @@ META_TEST_MODE=true
 META_TEST_EVENT_CODE=
 
 DEFAULT_TENANT_ID=super-educar
+
+WA2_INTERNAL_API_BASE_URL=https://wa2.supereducarbrasil.com.br
+WA2_INTERNAL_API_SECRET=
+WA2_INTERNAL_API_TIMEOUT_MS=5000
 ```
 
 `OPERATION_START_AT` deve ser uma data ISO 8601 com fuso. A tela principal e seus indicadores mostram, por padrão, apenas leads criados a partir dela. Leads anteriores continuam armazenados sem alteração.
+
+### WA Sender 2 opcional
+
+A integração administrativa com o WA2 é opcional. Para ativá-la, configure juntos
+`WA2_INTERNAL_API_BASE_URL` e `WA2_INTERNAL_API_SECRET`. Se ambos estiverem vazios,
+o CRM inicia normalmente e mostra a integração como desativada. O timeout server-side
+é definido por `WA2_INTERNAL_API_TIMEOUT_MS`.
+
+Health, instâncias, status, QR, conexão, sincronização e desconexão são consultados
+somente pelo servidor do CRM. O segredo Bearer nunca é enviado ao navegador. Os
+comandos são assíncronos: o painel confirma apenas que a solicitação foi enviada.
+
+O QR é validado, convertido em imagem por uma rota autenticada com cache desativado
+e nunca é persistido pelo CRM. Ele não deve aparecer em logs, URLs, cookies ou banco.
+
+### Vínculo manual de leads com o WA2
+
+O Checkpoint 2B adiciona a migration aditiva `003_wa2_contact_links.sql`, ainda não
+aplicada por esta alteração. Ela mantém o telefone bruto e acrescenta
+`phone_normalized`, usando somente números brasileiros válidos com DDI `55`. Telefones
+inválidos ficam com o valor normalizado nulo, e não existe índice único por telefone.
+Leads duplicados não são unidos nem apagados.
+
+Uma instância remota só pode ser salva localmente depois de ser consultada e validada
+pelo servidor do CRM. O vínculo com contato/chat também é manual: o servidor relê o
+lead e a instância, consulta o WA2 por telefone exato e repete a consulta durante a
+confirmação. O navegador não decide tenant, telefone, chat ou JID.
+
+Desvínculos são lógicos e preservam histórico. Uma substituição exige confirmação
+explícita e mantém o vínculo anterior como inativo. O CRM não cria leads orgânicos
+nem altera etapas a partir de etiquetas recebidas do WA2.
+
+### Sincronização de etapas com etiquetas WA2
+
+A migration aditiva `004_wa2_label_sync.sql` cria os bindings por instância e a fila
+local de etiquetas. O administrador escolhe IDs de etiquetas que o servidor confirma
+novamente no WA2; `NEW` e `CONTACTED` compartilham `CRM 01 Em atendimento`.
+
+Quando uma etapa muda, o histórico e o job WA2 são gravados na mesma transação local.
+O worker consulta o chat depois do commit, aplica a etiqueta desejada e remove somente
+IDs cadastrados como etiquetas CRM na mesma instância. Etiquetas externas são
+preservadas. O job só chega a `DONE` depois de uma nova consulta confirmar o estado;
+aceites remotos ainda pendentes voltam à fila. Falhas transitórias usam backoff e jobs
+`FAILED` podem ser reenfileirados sem zerar o contador de tentativas.
 
 Em produção HTTPS, `COOKIE_SECURE=true` é obrigatório. Use `COOKIE_SECURE=false` apenas no acesso local por `http://localhost`.
 
@@ -155,6 +204,9 @@ npm run worker
 ```
 
 ## VPS / Linux via SSH — Docker Swarm + Traefik
+
+O procedimento autoritativo de deploy, migration, backup e rollback está em
+[`docs/DEPLOY_PRODUCTION.md`](docs/DEPLOY_PRODUCTION.md).
 
 Execute estes comandos somente na sessão SSH da VPS, não no PowerShell local:
 
@@ -273,4 +325,5 @@ Este fluxo é server-side e envia eventos diretamente ao dataset pela Conversion
 - Use HTTPS e `COOKIE_SECURE=true` em produção.
 - Restrinja o acesso ao painel e monitore `/health` e os logs do worker.
 - Faça backup do PostgreSQL antes de qualquer manutenção operacional.
-- As alterações de esquema deste projeto são aditivas e executadas na inicialização.
+- Em produção, app e worker não executam migration na inicialização; o deploy
+  usa o comando único `npm run migrate` antes de atualizar os serviços.

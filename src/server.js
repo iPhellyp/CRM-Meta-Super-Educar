@@ -31,7 +31,6 @@ import {
   listWa2LabelJobs,
   listRecentJobs,
   listRecentMetaEvents,
-  migrate,
   moveLeadStage,
   operationStartAt,
   replaceWa2ContactLink,
@@ -49,6 +48,7 @@ import {
   verifyWa2ContactLink,
   verifyWa2LabelBinding,
 } from './db.js';
+import { runStartupMigrations } from './startup-migrations.js';
 import {
   clearSession,
   credentialsAreValid,
@@ -1208,7 +1208,7 @@ validateServerConfig();
 validateAuthConfig();
 validateDatabaseConfig();
 validateMetaConfig();
-await migrate();
+await runStartupMigrations();
 const server = app.listen(port, () => {
   console.log(JSON.stringify({ level: 'info', msg: 'CRM Meta iniciado', port }));
 });

@@ -48,6 +48,7 @@ APP_URL=https://crm.supereducarbrasil.com.br
 POSTGRES_PASSWORD=
 DATABASE_URL=postgresql://crm_meta:SENHA@postgres:5432/crm_meta
 DATABASE_SSL=false
+RUN_MIGRATIONS_ON_STARTUP=false
 
 ADMIN_EMAIL=
 ADMIN_PASSWORD_HASH=
@@ -67,7 +68,7 @@ META_TEST_EVENT_CODE=
 
 DEFAULT_TENANT_ID=super-educar
 
-WA2_INTERNAL_API_BASE_URL=
+WA2_INTERNAL_API_BASE_URL=https://wa2.supereducarbrasil.com.br
 WA2_INTERNAL_API_SECRET=
 WA2_INTERNAL_API_TIMEOUT_MS=5000
 ```
@@ -204,6 +205,9 @@ npm run worker
 
 ## VPS / Linux via SSH — Docker Swarm + Traefik
 
+O procedimento autoritativo de deploy, migration, backup e rollback está em
+[`docs/DEPLOY_PRODUCTION.md`](docs/DEPLOY_PRODUCTION.md).
+
 Execute estes comandos somente na sessão SSH da VPS, não no PowerShell local:
 
 ```bash
@@ -321,4 +325,5 @@ Este fluxo é server-side e envia eventos diretamente ao dataset pela Conversion
 - Use HTTPS e `COOKIE_SECURE=true` em produção.
 - Restrinja o acesso ao painel e monitore `/health` e os logs do worker.
 - Faça backup do PostgreSQL antes de qualquer manutenção operacional.
-- As alterações de esquema deste projeto são aditivas e executadas na inicialização.
+- Em produção, app e worker não executam migration na inicialização; o deploy
+  usa o comando único `npm run migrate` antes de atualizar os serviços.

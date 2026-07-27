@@ -21,7 +21,6 @@ import {
   markMetaEventProcessing,
   markMetaEventSent,
   metaHistoricalImportIsActive,
-  migrate,
   pauseMetaHistoricalImport,
   processWa2LabelEvent,
   recordMetaHistoricalInvalid,
@@ -30,6 +29,7 @@ import {
   requeueWa2LabelJobForRemoteConfirmation,
   validateDatabaseConfig,
 } from './db.js';
+import { runStartupMigrations } from './startup-migrations.js';
 import {
   importLeadPayload,
   importLeadgenId,
@@ -295,7 +295,7 @@ async function run() {
   validateDatabaseConfig();
   validateMetaConfig();
   validateWa2Config();
-  await migrate();
+  await runStartupMigrations();
   await recordWorkerHeartbeat({ started: true });
   lastHeartbeatAt = Date.now();
   console.log(JSON.stringify({ level: 'info', msg: 'Worker Meta iniciado' }));

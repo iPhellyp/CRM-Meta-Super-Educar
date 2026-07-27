@@ -1,13 +1,10 @@
-const stageLabels = {
-  NEW: 'Novo',
-  CONTACTED: 'CRM 01 - Em atendimento',
-  QUALIFIED: 'CRM 02 - Qualificado',
-  VESTIBULAR_REGISTERED: 'CRM 03 - Inscrição no vestibular',
-  VESTIBULAR_COMPLETED: 'CRM 04 - Vestibular concluído',
-  OPPORTUNITY: 'CRM 04 - Vestibular concluído',
-  MATRICULATED: 'CRM 05 - Matriculado',
-  LOST: 'CRM 99 - Perdido',
-};
+import {
+  STAGE_LABELS,
+  STAGES,
+  getStageActions,
+  getStageBadgeClass,
+} from './funnel.js';
+import { getWhatsAppUrl } from './phone.js';
 
 function esc(value) {
   return String(value ?? '')
@@ -57,21 +54,14 @@ function stat(label, value) {
   return `<div class="stat"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
 }
 
-function normalizeWhatsAppPhone(value) {
-  const digits = String(value || '').replace(/\D/g, '');
-  if (/^[1-9]\d{9,10}$/.test(digits)) return `55${digits}`;
-  if (/^55[1-9]\d{9,10}$/.test(digits)) return digits;
-  return '';
-}
-
 function whatsappAction(phone) {
-  const normalizedPhone = normalizeWhatsAppPhone(phone);
-  if (!normalizedPhone) {
+  const whatsappUrl = getWhatsAppUrl(phone);
+  if (!whatsappUrl) {
     return `
       <span class="small button-link whatsapp disabled" aria-disabled="true">Conversar</span>
       <small class="action-note error-text">Telefone inválido</small>`;
   }
-  return `<a class="small button-link whatsapp" href="https://wa.me/${normalizedPhone}" target="_blank" rel="noopener noreferrer">Conversar</a>`;
+  return `<a class="small button-link whatsapp" href="${esc(whatsappUrl)}" target="_blank" rel="noopener noreferrer">Conversar</a>`;
 }
 
 function formatArrival(value) {
@@ -99,26 +89,10 @@ function metadataValue(value) {
   return esc(value || '—');
 }
 
-function stageBadgeClass(stage) {
-  if (stage === 'VESTIBULAR_REGISTERED') return 'qualified';
-  if (['VESTIBULAR_COMPLETED', 'OPPORTUNITY'].includes(stage)) return 'opportunity';
-  return String(stage || 'NEW').toLowerCase();
-}
-
 function stageActions(lead, csrfToken) {
-  const actionsByStage = {
-    NEW: [['CONTACTED', 'Em atendimento']],
-    CONTACTED: [['QUALIFIED', 'Qualificar'], ['LOST', 'Perder']],
-    QUALIFIED: [['VESTIBULAR_REGISTERED', 'Inscrição no vestibular'], ['LOST', 'Perder']],
-    VESTIBULAR_REGISTERED: [['VESTIBULAR_COMPLETED', 'Vestibular concluído'], ['LOST', 'Perder']],
-    VESTIBULAR_COMPLETED: [['MATRICULATED', 'Matricular'], ['LOST', 'Perder']],
-    OPPORTUNITY: [['MATRICULATED', 'Matricular'], ['LOST', 'Perder']],
-    LOST: [['CONTACTED', 'Reativar atendimento']],
-    MATRICULATED: [],
-  };
-  const actions = actionsByStage[lead.stage] || [];
+  const actions = getStageActions(lead.stage);
   if (actions.length === 0) return '<span class="muted">Etapa final</span>';
-  return actions.map(([stage, label]) => stage === 'MATRICULATED'
+  return actions.map(({ stage, label }) => stage === STAGES.MATRICULATED
     ? `<a class="small button-link success" href="/leads/${esc(lead.id)}/matriculate">${label}</a>`
     : `
     <form method="post" action="/leads/${esc(lead.id)}/stage">
@@ -157,7 +131,7 @@ export function dashboardView({
           <small>Anúncio: ${metadataValue(lead.meta_ad_id)}</small>
           <small>Formulário: ${metadataValue(lead.meta_form_id)}</small>
         </td>
-        <td data-label="Etapa"><span class="badge ${esc(stageBadgeClass(lead.stage))}">${esc(stageLabels[lead.stage] || lead.stage)}</span></td>
+        <td data-label="Etapa"><span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span></td>
         <td data-label="Ações">
           <div class="actions">
             <div class="whatsapp-action">${whatsappAction(lead.phone)}</div>

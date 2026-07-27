@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
+import { canTransition, getStageEventName, isValidHistoryOrigin } from './funnel.js';
 
 const { Pool } = pg;
 const DEFAULT_TENANT_ID = 'super-educar';
@@ -233,10 +234,12 @@ export async function moveLeadStage(id, stage, {
   origin = 'MANUAL',
   changedBy = null,
   observation = null,
-  allowedPreviousStages = [],
-  eventName = null,
   mode = 'live',
 } = {}) {
+  if (!isValidHistoryOrigin(origin)) {
+    throw new Error('Origem de histórico inválida');
+  }
+  const eventName = getStageEventName(stage);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -252,7 +255,7 @@ export async function moveLeadStage(id, stage, {
     const previousLead = current.rows[0];
     if (
       previousLead.stage === stage ||
-      !allowedPreviousStages.includes(previousLead.stage)
+      !canTransition(previousLead.stage, stage)
     ) {
       await client.query('ROLLBACK');
       return {

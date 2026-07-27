@@ -1,12 +1,6 @@
 import crypto from 'node:crypto';
 import { upsertLead } from './db.js';
 
-const STAGE_EVENT = {
-  QUALIFIED: 'Marketing Qualified Lead',
-  VESTIBULAR_COMPLETED: 'Sales Opportunity',
-  MATRICULATED: 'Converted',
-};
-
 const TEMPORARY_META_CODES = new Set([1, 2, 4, 17, 32, 341, 613]);
 
 class MetaGraphError extends Error {
@@ -137,10 +131,6 @@ async function graphRequest(path, { fields, method = 'GET', body, token } = {}) 
     });
   }
   return payload;
-}
-
-export function getStageEventName(stage) {
-  return STAGE_EVENT[stage] || null;
 }
 
 export function currentMetaMode() {

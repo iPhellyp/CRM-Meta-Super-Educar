@@ -32,11 +32,17 @@ import {
 } from './auth.js';
 import {
   currentMetaMode,
-  getStageEventName,
   metaConfigStatus,
   validateMetaConfig,
   verifyMetaSignature,
 } from './meta.js';
+import {
+  STAGE_LABELS,
+  STAGES,
+  canTransition,
+  getStageEventName,
+  isDirectStageTarget,
+} from './funnel.js';
 import {
   dashboardView,
   eventsView,
@@ -225,32 +231,6 @@ app.post('/leads', async (req, res) => {
   }
 });
 
-const stageLabels = {
-  CONTACTED: 'CRM 01 - Em atendimento',
-  QUALIFIED: 'CRM 02 - Qualificado',
-  VESTIBULAR_REGISTERED: 'CRM 03 - Inscrição no vestibular',
-  VESTIBULAR_COMPLETED: 'CRM 04 - Vestibular concluído',
-  MATRICULATED: 'CRM 05 - Matriculado',
-  LOST: 'CRM 99 - Perdido',
-};
-
-const allowedPreviousStages = {
-  CONTACTED: ['NEW', 'LOST'],
-  QUALIFIED: ['CONTACTED'],
-  VESTIBULAR_REGISTERED: ['QUALIFIED'],
-  VESTIBULAR_COMPLETED: ['VESTIBULAR_REGISTERED'],
-  MATRICULATED: ['VESTIBULAR_COMPLETED', 'OPPORTUNITY'],
-  LOST: ['CONTACTED', 'QUALIFIED', 'VESTIBULAR_REGISTERED', 'VESTIBULAR_COMPLETED', 'OPPORTUNITY'],
-};
-
-const directStageTargets = new Set([
-  'CONTACTED',
-  'QUALIFIED',
-  'VESTIBULAR_REGISTERED',
-  'VESTIBULAR_COMPLETED',
-  'LOST',
-]);
-
 function metaResultSuffix(eventName, result) {
   if (!eventName) return '';
   if (!result.attributed) return ' Lead sem atribuição Meta; nenhum evento foi criado.';
@@ -262,7 +242,7 @@ app.post('/leads/:id/stage', async (req, res) => {
   const parsedId = z.string().uuid().safeParse(req.params.id);
   if (!parsedId.success) return redirectWith(res, '/', 'error', 'Lead inválido.');
   const stage = String(req.body.stage || '');
-  if (!directStageTargets.has(stage)) {
+  if (!isDirectStageTarget(stage)) {
     return redirectWith(res, '/', 'error', 'Etapa inválida.');
   }
   try {
@@ -270,8 +250,6 @@ app.post('/leads/:id/stage', async (req, res) => {
     const result = await moveLeadStage(parsedId.data, stage, {
       origin: 'MANUAL',
       changedBy: req.user.sub,
-      allowedPreviousStages: allowedPreviousStages[stage],
-      eventName,
       mode: currentMetaMode(),
     });
     if (!result) return redirectWith(res, '/', 'error', 'Lead não encontrado.');
@@ -279,7 +257,7 @@ app.post('/leads/:id/stage', async (req, res) => {
       return redirectWith(res, '/', 'error', 'Transição de etapa não permitida.');
     }
     const suffix = metaResultSuffix(eventName, result);
-    redirectWith(res, '/', 'message', `Lead movido para ${stageLabels[stage]}.${suffix}`);
+    redirectWith(res, '/', 'message', `Lead movido para ${STAGE_LABELS[stage]}.${suffix}`);
   } catch {
     redirectWith(res, '/', 'error', 'Não foi possível mover o lead.');
   }
@@ -291,7 +269,7 @@ app.get('/leads/:id/matriculate', async (req, res) => {
   try {
     const lead = await getLeadById(parsedId.data);
     if (!lead) return redirectWith(res, '/', 'error', 'Lead não encontrado.');
-    if (!allowedPreviousStages.MATRICULATED.includes(lead.stage)) {
+    if (!canTransition(lead.stage, STAGES.MATRICULATED)) {
       return redirectWith(res, '/', 'error', 'Este lead não pode ser matriculado nesta etapa.');
     }
     return res.send(matriculationConfirmView({
@@ -310,13 +288,11 @@ app.post('/leads/:id/matriculate', async (req, res) => {
     return redirectWith(res, '/', 'error', 'Confirmação de matrícula inválida.');
   }
   try {
-    const eventName = getStageEventName('MATRICULATED');
-    const result = await moveLeadStage(parsedId.data, 'MATRICULATED', {
+    const eventName = getStageEventName(STAGES.MATRICULATED);
+    const result = await moveLeadStage(parsedId.data, STAGES.MATRICULATED, {
       origin: 'MANUAL',
       changedBy: req.user.sub,
       observation: 'Matrícula concluída por confirmação manual.',
-      allowedPreviousStages: allowedPreviousStages.MATRICULATED,
-      eventName,
       mode: currentMetaMode(),
     });
     if (!result) return redirectWith(res, '/', 'error', 'Lead não encontrado.');
@@ -324,7 +300,7 @@ app.post('/leads/:id/matriculate', async (req, res) => {
       return redirectWith(res, '/', 'error', 'Transição para matrícula não permitida.');
     }
     const suffix = metaResultSuffix(eventName, result);
-    return redirectWith(res, '/', 'message', `Lead movido para ${stageLabels.MATRICULATED}.${suffix}`);
+    return redirectWith(res, '/', 'message', `Lead movido para ${STAGE_LABELS.MATRICULATED}.${suffix}`);
   } catch {
     return redirectWith(res, '/', 'error', 'Não foi possível concluir a matrícula.');
   }

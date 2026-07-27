@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 STACK_NAME="${STACK_NAME:-crm-meta}"
-BACKUP_ROOT="${BACKUP_ROOT:-./backups}"
+BACKUP_ROOT="${BACKUP_ROOT:-/root/crm-meta-backups}"
 
 [[ "$STACK_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || {
   echo "STACK_NAME invalido" >&2

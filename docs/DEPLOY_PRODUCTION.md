@@ -24,8 +24,12 @@ A migration usa o runner SQL existente em um serviço Swarm temporário, com uma
 única tarefa no manager, sem exigir rede overlay attachable. O serviço aguarda
 estado `complete` e exit code `0`, tem timeout de 300 segundos e é removido em
 sucesso ou falha. `MIGRATION_NETWORK` permite substituir a rede interna e
-`MIGRATION_TIMEOUT_SECONDS` permite ajustar o timeout. Qualquer falha interrompe
-o script antes da atualização. Localmente, a ausência de
+`MIGRATION_TIMEOUT_SECONDS` permite ajustar o timeout. O nome temporário usa
+`crmm_<tag-sanitizada>_<epoch>_<pid>`, limita a tag a 12 caracteres e é
+validado explicitamente para nunca ser enviado ao Swarm com mais de 63
+caracteres. Com epoch de 10 dígitos e PID Linux de até 7 dígitos, o máximo
+calculado é 36 caracteres. Não se usa `docker run` nem `migrate dev`. Qualquer
+falha interrompe o script antes da atualização. Localmente, a ausência de
 `RUN_MIGRATIONS_ON_STARTUP` mantém a compatibilidade anterior; defina `false`
 quando quiser executar `npm run migrate` separadamente. No Compose local,
 somente o app migra no startup; o worker aguarda o mesmo banco e não concorre.
@@ -34,6 +38,9 @@ somente o app migra no startup; o worker aguarda o mesmo banco e não concorre.
 
 `scripts/backup.sh` cria `pg_dump` custom, valida com `pg_restore --list`,
 gera SHA-256, usa diretório `0700`/arquivos restritos e nunca remove backups.
+Por padrão, grava fora do repositório em `/root/crm-meta-backups`. A variável
+externa `BACKUP_ROOT` permite override e o deploy a passa explicitamente ao
+script de backup.
 
 Rollback exige tag imutável:
 
@@ -41,7 +48,12 @@ Rollback exige tag imutável:
 bash ./scripts/rollback.sh TAG_ANTERIOR
 ```
 
-O worker é pausado antes da troca. Não há downgrade automático de schema.
+O worker é pausado antes da troca. App e worker são atualizados com
+`--no-healthcheck`, compatível com imagens antigas. O app é escalado
+explicitamente para 1 e precisa apresentar exatamente uma task e um container
+`Running`. Com `KEEP_WORKER_PAUSED=true`, apenas o worker permanece em 0; no
+fluxo normal, ele é escalado para 1 e validado pelo mesmo critério. Não há
+downgrade automático de schema.
 Tabelas/colunas aditivas permanecem. Restore de banco somente com corrupção
 comprovada e autorização explícita. Se bindings/importações precisarem ficar
 desativados durante a validação, use

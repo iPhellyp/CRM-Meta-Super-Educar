@@ -135,6 +135,7 @@ export function dashboardView({
         <td data-label="Ações">
           <div class="actions">
             <div class="whatsapp-action">${whatsappAction(lead.phone)}</div>
+            <a class="small button-link" href="/leads/${esc(lead.id)}/wa2">WhatsApp/WA2</a>
             ${stageActions(lead, csrfToken)}
           </div>
         </td>
@@ -287,11 +288,15 @@ export function wa2DashboardView({
   configStatus,
   health = null,
   instances = [],
+  localInstances = [],
   unavailable = false,
   message = '',
   error = '',
   csrfToken = '',
 }) {
+  const localByRemoteId = new Map(
+    localInstances.map((instance) => [instance.remote_instance_id, instance]),
+  );
   const rows = instances.map((instance) => `
     <tr>
       <td><strong>${detailValue(instance.name || instance.id)}</strong><small>${esc(instance.id)}</small></td>
@@ -299,7 +304,44 @@ export function wa2DashboardView({
       <td>${detailValue(instance.phone)}</td>
       <td><span class="badge ${statusClass(instance.status)}">${detailValue(instance.status)}</span></td>
       <td>${instance.isDefault ? '<span class="ok">Padrão</span>' : '—'}</td>
-      <td><a class="small button-link" href="/wa2/instances/${encodeURIComponent(instance.id)}">Detalhes</a></td>
+      <td>
+        <a class="small button-link" href="/wa2/instances/${encodeURIComponent(instance.id)}">Detalhes</a>
+        ${localByRemoteId.has(instance.id)
+          ? '<small class="ok">Salva no CRM</small>'
+          : `<form method="post" action="/wa2/instances/import">
+              ${csrfField(csrfToken)}
+              <input type="hidden" name="remoteInstanceId" value="${esc(instance.id)}">
+              <button class="small">Validar e salvar</button>
+            </form>`}
+      </td>
+    </tr>`).join('');
+  const localRows = localInstances.map((instance) => `
+    <tr>
+      <td><strong>${detailValue(instance.name || instance.remote_instance_id)}</strong><small>${esc(instance.remote_instance_id)}</small></td>
+      <td>${detailValue(instance.role)}</td>
+      <td>${instance.enabled ? '<span class="ok">Habilitada</span>' : '<span class="muted">Desabilitada</span>'}</td>
+      <td>${instance.is_default ? '<span class="ok">Padrão</span>' : '—'}</td>
+      <td>
+        <div class="actions">
+          ${!instance.is_default && instance.enabled ? `
+            <form method="post" action="/wa2/local-instances/${esc(instance.id)}/default">
+              ${csrfField(csrfToken)}
+              <button class="small">Definir padrão</button>
+            </form>` : ''}
+          ${instance.enabled ? `
+            <form method="post" action="/wa2/local-instances/${esc(instance.id)}/disable">
+              ${csrfField(csrfToken)}
+              ${instance.is_default
+                ? '<input type="hidden" name="confirmation" value="DISABLE_DEFAULT_WA2_INSTANCE">'
+                : ''}
+              <button class="small danger">${instance.is_default ? 'Desabilitar e remover padrão' : 'Desabilitar'}</button>
+            </form>`
+            : `<form method="post" action="/wa2/local-instances/${esc(instance.id)}/enable">
+                ${csrfField(csrfToken)}
+                <button class="small">Habilitar</button>
+              </form>`}
+        </div>
+      </td>
     </tr>`).join('');
 
   return layout('WA2', `
@@ -319,6 +361,13 @@ export function wa2DashboardView({
       <div class="table-wrap"><table>
         <thead><tr><th>Instância</th><th>Função</th><th>Telefone</th><th>Status</th><th>Principal</th><th>Ação</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="6" class="empty">Nenhuma instância disponível.</td></tr>'}</tbody>
+      </table></div>
+    </section>
+    <section class="panel">
+      <div class="panel-title"><h2>Instâncias salvas no CRM</h2><span>${localInstances.length} exibidas</span></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Instância</th><th>Função</th><th>Estado local</th><th>Principal</th><th>Ações</th></tr></thead>
+        <tbody>${localRows || '<tr><td colspan="5" class="empty">Nenhuma instância validada no CRM.</td></tr>'}</tbody>
       </table></div>
     </section>
   `, { csrfToken });
@@ -389,5 +438,125 @@ export function wa2QrView({ instanceId, status, error = '', csrfToken = '' }) {
         <a class="small button-link" href="/wa2/instances/${encodeURIComponent(instanceId)}">Voltar aos detalhes</a>
       </div>
     </section>
+  `, { csrfToken });
+}
+
+function maskJid(value) {
+  const jid = String(value || '');
+  const [phone, domain] = jid.split('@');
+  if (!phone || !domain) return '—';
+  const visible = phone.length > 6
+    ? `${phone.slice(0, 4)}••••${phone.slice(-2)}`
+    : '••••';
+  return `${visible}@${domain}`;
+}
+
+export function leadWa2View({
+  lead,
+  instances,
+  links,
+  message = '',
+  error = '',
+  csrfToken = '',
+}) {
+  const linkRows = links.map((link) => `
+    <tr>
+      <td>${detailValue(link.instance_name || link.remote_instance_id)}</td>
+      <td>${detailValue(link.remote_contact_id)}</td>
+      <td>${detailValue(link.remote_chat_id)}<small>${esc(maskJid(link.jid))}</small></td>
+      <td>${detailValue(link.last_verified_at)}</td>
+      <td>
+        <div class="actions">
+          <form method="post" action="/leads/${esc(lead.id)}/wa2/verify">
+            ${csrfField(csrfToken)}
+            <input type="hidden" name="linkId" value="${esc(link.id)}">
+            <button class="small">Verificar</button>
+          </form>
+          <form method="post" action="/leads/${esc(lead.id)}/wa2/unlink">
+            ${csrfField(csrfToken)}
+            <input type="hidden" name="linkId" value="${esc(link.id)}">
+            <input type="hidden" name="confirmation" value="UNLINK_WA2">
+            <button class="small danger">Desvincular</button>
+          </form>
+        </div>
+      </td>
+    </tr>`).join('');
+  const instanceOptions = instances.map((instance) =>
+    `<option value="${esc(instance.id)}">${detailValue(instance.name || instance.remote_instance_id)}${instance.is_default ? ' · padrão' : ''}</option>`).join('');
+
+  return layout('Vínculo WA2', `
+    ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
+    ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+    <section class="hero">
+      <div><h1>WhatsApp/WA2 · ${esc(lead.name)}</h1><p>Vínculo manual com contato e chat individual.</p></div>
+    </section>
+    <section class="panel detail-grid">
+      <div><strong>Telefone bruto</strong><span>${detailValue(lead.phone)}</span></div>
+      <div><strong>Telefone normalizado</strong><span>${detailValue(lead.phone_normalized)}</span></div>
+      <div><strong>Origem do lead</strong><span>${detailValue(lead.source)}</span></div>
+    </section>
+    <section class="panel">
+      <h2>Resolver contato no WA2</h2>
+      ${instances.length ? `
+        <form method="post" action="/leads/${esc(lead.id)}/wa2/resolve" class="stack compact-form">
+          ${csrfField(csrfToken)}
+          <label>Instância local habilitada
+            <select name="instanceId" required>${instanceOptions}</select>
+          </label>
+          <button type="submit">Consultar contato e chat</button>
+        </form>`
+        : '<p class="muted">Salve e habilite uma instância WA2 antes de resolver o contato.</p>'}
+    </section>
+    <section class="panel">
+      <div class="panel-title"><h2>Vínculos ativos</h2><span>${links.length}</span></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Instância</th><th>Contato remoto</th><th>Chat/JID</th><th>Última verificação</th><th>Ações</th></tr></thead>
+        <tbody>${linkRows || '<tr><td colspan="5" class="empty">Nenhum vínculo ativo.</td></tr>'}</tbody>
+      </table></div>
+    </section>
+    <a href="/">Voltar aos leads</a>
+  `, { csrfToken });
+}
+
+export function wa2LinkConfirmView({
+  lead,
+  instance,
+  resolved,
+  phoneNormalized,
+  currentLink = null,
+  expectedAction,
+  expectedLinkId,
+  resolutionToken,
+  csrfToken = '',
+}) {
+  return layout('Confirmar vínculo WA2', `
+    <section class="hero">
+      <div>
+        <h1>${currentLink ? 'Confirmar substituição' : 'Confirmar vínculo'} WA2</h1>
+        <p>Os dados serão consultados novamente no WA2 ao confirmar.</p>
+      </div>
+    </section>
+    <section class="panel detail-grid">
+      <div><strong>Lead</strong><span>${esc(lead.name)}</span></div>
+      <div><strong>Telefone</strong><span>${esc(phoneNormalized)}</span></div>
+      <div><strong>Instância</strong><span>${detailValue(instance.name || instance.remote_instance_id)}</span></div>
+      <div><strong>Contato remoto</strong><span>${detailValue(resolved.contact.id)}</span></div>
+      <div><strong>Nome remoto</strong><span>${detailValue(resolved.contact.name)}</span></div>
+      <div><strong>Chat remoto</strong><span>${detailValue(resolved.chat.id)}</span></div>
+      <div><strong>JID</strong><span>${esc(maskJid(resolved.chat.jid))}</span></div>
+    </section>
+    ${currentLink ? '<div class="alert error">A confirmação substituirá logicamente o vínculo ativo nesta instância sem apagar seu histórico.</div>' : ''}
+    <div class="actions">
+      <form method="post" action="/leads/${esc(lead.id)}/wa2/confirm">
+        ${csrfField(csrfToken)}
+        <input type="hidden" name="instanceId" value="${esc(instance.id)}">
+        <input type="hidden" name="expectedAction" value="${esc(expectedAction)}">
+        <input type="hidden" name="expectedLinkId" value="${esc(expectedLinkId || '')}">
+        <input type="hidden" name="resolutionToken" value="${esc(resolutionToken)}">
+        <input type="hidden" name="confirmation" value="CONFIRM_WA2_LINK">
+        <button type="submit" class="success">${currentLink ? 'Confirmar substituição' : 'Confirmar vínculo'}</button>
+      </form>
+      <a class="small button-link" href="/leads/${esc(lead.id)}/wa2">Cancelar</a>
+    </div>
   `, { csrfToken });
 }

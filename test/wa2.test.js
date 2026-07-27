@@ -1,13 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import {
   Wa2Error,
+  classifyWa2Jid,
   createWa2Client,
   parseWa2Qr,
   validateWa2Config,
   wa2ConfigStatus,
 } from '../src/wa2.js';
-import { wa2DashboardView } from '../src/views.js';
+import {
+  leadWa2View,
+  wa2DashboardView,
+  wa2LinkConfirmView,
+} from '../src/views.js';
+import {
+  WA2_LINK_RESOLUTION_PURPOSE,
+  createWa2ResolutionToken,
+  wa2ResolutionTokenIsValid,
+} from '../src/wa2-link-token.js';
 
 const PLACEHOLDER_SECRET = 'placeholder-for-local-tests';
 const VALID_ENV = Object.freeze({
@@ -271,6 +282,181 @@ test('impede injeção de caminho pelo instanceId', () => {
   assert.equal(called, false);
 });
 
+const BY_PHONE_RESPONSE = Object.freeze({
+  contact: {
+    id: 'contact-1',
+    phoneNormalized: '5538999990000',
+    name: 'Contato WA2',
+    jid: '5538999990000@s.whatsapp.net',
+  },
+  chat: {
+    id: 'chat-1',
+    jid: '5538999990000@s.whatsapp.net',
+    lastInboundAt: '2026-07-27T12:00:00.000Z',
+    lastOutboundAt: null,
+  },
+  labels: [{ waLabelId: 'label-1', name: 'Não retornar' }],
+  raw: 'não retornar',
+});
+
+test('consulta contato por telefone e remove campos extras', async () => {
+  let capturedUrl;
+  let capturedOptions;
+  const client = clientWith(async (url, options) => {
+    capturedUrl = url;
+    capturedOptions = options;
+    return jsonResponse(BY_PHONE_RESPONSE);
+  });
+  const result = await client.getContactByPhone('instance-1', '5538999990000');
+  assert.equal(
+    capturedUrl,
+    'http://localhost:3100/api/internal/v1/instances/instance-1/contacts/by-phone/5538999990000',
+  );
+  assert.equal(capturedOptions.headers['idempotency-key'], undefined);
+  assert.deepEqual(result, {
+    contact: {
+      id: 'contact-1',
+      phoneNormalized: '5538999990000',
+      name: 'Contato WA2',
+      jid: '5538999990000@s.whatsapp.net',
+    },
+    chat: {
+      id: 'chat-1',
+      jid: '5538999990000@s.whatsapp.net',
+    },
+  });
+  assert.equal(Object.hasOwn(result, 'labels'), false);
+});
+
+test('aceita wrapper data no contrato by-phone', async () => {
+  const client = clientWith(async () => jsonResponse({ data: BY_PHONE_RESPONSE }));
+  const result = await client.getContactByPhone('instance-1', '5538999990000');
+  assert.equal(result.chat.id, 'chat-1');
+});
+
+test('aceita contato by-phone sem chat sem criar dado inventado', async () => {
+  const client = clientWith(async () => jsonResponse({
+    ...BY_PHONE_RESPONSE,
+    chat: null,
+  }));
+  const result = await client.getContactByPhone('instance-1', '5538999990000');
+  assert.equal(result.chat, null);
+});
+
+test('preserva 404 e 409 do by-phone como erros identificáveis', async () => {
+  for (const [status, code] of [[404, 'CONTACT_NOT_FOUND'], [409, 'CONTACT_AMBIGUOUS']]) {
+    const client = clientWith(async () => jsonResponse({ error: { code } }, { status }));
+    await assert.rejects(
+      () => client.getContactByPhone('instance-1', '5538999990000'),
+      (error) => error.status === status && error.remoteCode === code,
+    );
+  }
+});
+
+test('rejeita telefone retornado diferente do solicitado', async () => {
+  const client = clientWith(async () => jsonResponse({
+    ...BY_PHONE_RESPONSE,
+    contact: { ...BY_PHONE_RESPONSE.contact, phoneNormalized: '553833330000' },
+  }));
+  await assert.rejects(
+    () => client.getContactByPhone('instance-1', '5538999990000'),
+    (error) => error.code === 'WA2_PHONE_MISMATCH',
+  );
+});
+
+test('rejeita contact ausente ou com id vazio', async () => {
+  for (const contact of [null, { ...BY_PHONE_RESPONSE.contact, id: '' }]) {
+    const client = clientWith(async () => jsonResponse({ ...BY_PHONE_RESPONSE, contact }));
+    await assert.rejects(
+      () => client.getContactByPhone('instance-1', '5538999990000'),
+      (error) => error.code === 'WA2_CONTACT_INVALID',
+    );
+  }
+});
+
+test('rejeita chat sem id', async () => {
+  const client = clientWith(async () => jsonResponse({
+    ...BY_PHONE_RESPONSE,
+    chat: { ...BY_PHONE_RESPONSE.chat, id: '' },
+  }));
+  await assert.rejects(
+    () => client.getContactByPhone('instance-1', '5538999990000'),
+    (error) => error.code === 'WA2_CHAT_INVALID',
+  );
+});
+
+test('rejeita contact.jid e chat.jid de telefones diferentes', async () => {
+  const client = clientWith(async () => jsonResponse({
+    ...BY_PHONE_RESPONSE,
+    chat: { ...BY_PHONE_RESPONSE.chat, jid: '553833330000@s.whatsapp.net' },
+  }));
+  await assert.rejects(
+    () => client.getContactByPhone('instance-1', '5538999990000'),
+    (error) => error.code === 'WA2_JID_MISMATCH',
+  );
+});
+
+test('aceita sufixos individuais garantidos pelo WA2 para o mesmo telefone', async () => {
+  const client = clientWith(async () => jsonResponse({
+    ...BY_PHONE_RESPONSE,
+    contact: { ...BY_PHONE_RESPONSE.contact, jid: '5538999990000@c.us' },
+  }));
+  const result = await client.getContactByPhone('instance-1', '5538999990000');
+  assert.equal(result.contact.jid, '5538999990000@c.us');
+  assert.equal(result.chat.jid, '5538999990000@s.whatsapp.net');
+});
+
+test('classifica e rejeita LID, grupo e broadcast no by-phone', async () => {
+  assert.equal(classifyWa2Jid('123@lid'), 'lid');
+  assert.equal(classifyWa2Jid('123@g.us'), 'group');
+  assert.equal(classifyWa2Jid('status@broadcast'), 'status');
+  assert.equal(classifyWa2Jid('123@broadcast'), 'broadcast');
+  const rejected = [
+    ['123@lid', 'WA2_LID_UNRESOLVED'],
+    ['123@g.us', 'WA2_GROUP_UNSUPPORTED'],
+    ['status@broadcast', 'WA2_BROADCAST_UNSUPPORTED'],
+    ['123@broadcast', 'WA2_BROADCAST_UNSUPPORTED'],
+  ];
+  for (const [jid, code] of rejected) {
+    const client = clientWith(async () => jsonResponse({
+      ...BY_PHONE_RESPONSE,
+      contact: { ...BY_PHONE_RESPONSE.contact, jid },
+    }));
+    await assert.rejects(
+      () => client.getContactByPhone('instance-1', '5538999990000'),
+      (error) => error.code === code,
+    );
+  }
+});
+
+test('rejeita telefone não normalizado antes de chamar by-phone', () => {
+  let called = false;
+  const client = clientWith(async () => {
+    called = true;
+    return jsonResponse(BY_PHONE_RESPONSE);
+  });
+  assert.throws(
+    () => client.getContactByPhone('instance-1', '(38) 99999-0000'),
+    (error) => error.code === 'WA2_PHONE_INVALID',
+  );
+  assert.equal(called, false);
+});
+
+test('erro by-phone não expõe segredo nem mensagem remota', async () => {
+  const client = clientWith(async () => jsonResponse({
+    error: {
+      code: 'CONTACT_FAILURE',
+      message: `erro interno ${PLACEHOLDER_SECRET}`,
+    },
+  }, { status: 500 }));
+  await assert.rejects(
+    () => client.getContactByPhone('instance-1', '5538999990000'),
+    (error) =>
+      !error.message.includes(PLACEHOLDER_SECRET) &&
+      !error.message.includes('erro interno'),
+  );
+});
+
 test('aceita o contrato real completo do QR WA2', () => {
   const qr = parseWa2Qr({
     instanceId: 'instance-1',
@@ -416,4 +602,239 @@ test('view escapa dados remotos e não recebe configuração secreta', () => {
   assert.equal(html.includes('<script>alert(1)</script>'), false);
   assert.equal(html.includes('&lt;script&gt;alert(1)&lt;/script&gt;'), true);
   assert.equal(html.includes(PLACEHOLDER_SECRET), false);
+});
+
+test('confirmação de vínculo não confia chat, telefone ou JID a hidden inputs', () => {
+  const html = wa2LinkConfirmView({
+    lead: { id: 'lead-local', name: '<Lead>' },
+    instance: { id: 'instance-local', name: 'Instância', remote_instance_id: 'remote-1' },
+    resolved: {
+      contact: { id: 'contact-1', name: '<Contato>' },
+      chat: { id: 'chat-1', jid: '5538999990000@s.whatsapp.net' },
+    },
+    phoneNormalized: '5538999990000',
+    currentLink: null,
+    expectedAction: 'CREATE',
+    expectedLinkId: null,
+    resolutionToken: 'timestamp.signature-placeholder',
+    csrfToken: 'csrf-placeholder',
+  });
+  assert.equal(html.includes('name="chatId"'), false);
+  assert.equal(html.includes('name="contactId"'), false);
+  assert.equal(html.includes('name="jid"'), false);
+  assert.equal(html.includes('name="phoneNormalized"'), false);
+  assert.equal(html.includes('name="tenant"'), false);
+  assert.equal(html.includes('name="tenantId"'), false);
+  assert.equal(html.includes('name="remoteInstanceId"'), false);
+  assert.equal(html.includes('name="resolutionToken"'), true);
+  assert.equal(html.includes('5538999990000@s.whatsapp.net'), false);
+  assert.equal(html.includes('&lt;Contato&gt;'), true);
+  assert.equal(html.includes('name="expectedAction" value="CREATE"'), true);
+  assert.equal(html.includes('name="expectedLinkId" value=""'), true);
+});
+
+test('confirmação de substituição inclui somente o ID local do vínculo esperado', () => {
+  const expectedLinkId = '11111111-1111-4111-8111-111111111111';
+  const html = wa2LinkConfirmView({
+    lead: { id: 'lead-local', name: 'Lead' },
+    instance: { id: 'instance-local', name: 'Instância', remote_instance_id: 'remote-1' },
+    resolved: {
+      contact: { id: 'contact-1', name: 'Contato' },
+      chat: { id: 'chat-1', jid: '5538999990000@s.whatsapp.net' },
+    },
+    phoneNormalized: '5538999990000',
+    currentLink: { id: expectedLinkId },
+    expectedAction: 'REPLACE',
+    expectedLinkId,
+    resolutionToken: 'timestamp.signature-placeholder',
+    csrfToken: 'csrf-placeholder',
+  });
+  assert.equal(html.includes('name="expectedAction" value="REPLACE"'), true);
+  assert.equal(
+    html.includes(`name="expectedLinkId" value="${expectedLinkId}"`),
+    true,
+  );
+  for (const field of [
+    'phoneNormalized',
+    'contactId',
+    'chatId',
+    'jid',
+    'tenant',
+    'tenantId',
+    'remoteInstanceId',
+  ]) {
+    assert.equal(html.includes(`name="${field}"`), false);
+  }
+});
+
+test('view do lead mascara JID e mantém ações por IDs locais', () => {
+  const html = leadWa2View({
+    lead: {
+      id: 'lead-local',
+      name: 'Lead',
+      phone: '(38) 99999-0000',
+      phone_normalized: '5538999990000',
+      source: 'MANUAL',
+    },
+    instances: [{
+      id: 'instance-local',
+      remote_instance_id: 'remote-1',
+      name: 'Instância',
+      is_default: true,
+    }],
+    links: [{
+      id: 'link-local',
+      instance_name: 'Instância',
+      remote_contact_id: 'contact-1',
+      remote_chat_id: 'chat-1',
+      jid: '5538999990000@s.whatsapp.net',
+      last_verified_at: '2026-07-27T12:00:00.000Z',
+    }],
+    csrfToken: 'csrf-placeholder',
+  });
+  assert.equal(html.includes('5538999990000@s.whatsapp.net'), false);
+  assert.equal(html.includes('5538••••00@s.whatsapp.net'), true);
+  assert.equal(html.includes('value="instance-local"'), true);
+  assert.equal(html.includes('value="link-local"'), true);
+});
+
+test('token de resolução aceita CREATE sem vínculo e REPLACE com vínculo assinado', () => {
+  const baseContext = {
+    leadId: 'lead-local',
+    instanceId: 'instance-local',
+    phoneNormalized: '5538999990000',
+    resolved: {
+      contact: { id: 'contact-1' },
+      chat: { id: 'chat-1', jid: '5538999990000@s.whatsapp.net' },
+    },
+  };
+  const secret = 'placeholder-session-secret-with-no-production-value';
+  const now = 1_800_000_000_000;
+  const createContext = {
+    ...baseContext,
+    expectedAction: 'CREATE',
+    expectedLinkId: null,
+  };
+  const replaceContext = {
+    ...baseContext,
+    expectedAction: 'REPLACE',
+    expectedLinkId: '11111111-1111-4111-8111-111111111111',
+  };
+  const createToken = createWa2ResolutionToken(createContext, { secret, now });
+  const replaceToken = createWa2ResolutionToken(replaceContext, { secret, now });
+  assert.equal(
+    wa2ResolutionTokenIsValid(createToken, createContext, { secret, now }),
+    true,
+  );
+  assert.equal(
+    wa2ResolutionTokenIsValid(replaceToken, replaceContext, { secret, now }),
+    true,
+  );
+});
+
+test('token vincula CREATE, REPLACE e expectedLinkId à assinatura', () => {
+  const secret = 'placeholder-session-secret-with-no-production-value';
+  const now = 1_800_000_000_000;
+  const createContext = {
+    leadId: 'lead-local',
+    instanceId: 'instance-local',
+    phoneNormalized: '5538999990000',
+    resolved: {
+      contact: { id: 'contact-1' },
+      chat: { id: 'chat-1', jid: '5538999990000@s.whatsapp.net' },
+    },
+    expectedAction: 'CREATE',
+    expectedLinkId: null,
+  };
+  const replaceContext = {
+    ...createContext,
+    expectedAction: 'REPLACE',
+    expectedLinkId: '11111111-1111-4111-8111-111111111111',
+  };
+  const createToken = createWa2ResolutionToken(createContext, { secret, now });
+  const replaceToken = createWa2ResolutionToken(replaceContext, { secret, now });
+  assert.equal(
+    wa2ResolutionTokenIsValid(createToken, replaceContext, { secret, now }),
+    false,
+  );
+  assert.equal(
+    wa2ResolutionTokenIsValid(replaceToken, createContext, { secret, now }),
+    false,
+  );
+  assert.equal(wa2ResolutionTokenIsValid(replaceToken, {
+    ...replaceContext,
+    expectedLinkId: '22222222-2222-4222-8222-222222222222',
+  }, { secret, now }), false);
+});
+
+test('token continua detectando chat alterado, expiração e adulteração', () => {
+  const context = {
+    leadId: 'lead-local',
+    instanceId: 'instance-local',
+    phoneNormalized: '5538999990000',
+    resolved: {
+      contact: { id: 'contact-1' },
+      chat: { id: 'chat-1', jid: '5538999990000@s.whatsapp.net' },
+    },
+    expectedAction: 'CREATE',
+    expectedLinkId: null,
+  };
+  const secret = 'placeholder-session-secret-with-no-production-value';
+  const now = 1_800_000_000_000;
+  const token = createWa2ResolutionToken(context, { secret, now });
+  assert.equal(wa2ResolutionTokenIsValid(token, {
+    ...context,
+    resolved: {
+      ...context.resolved,
+      chat: { ...context.resolved.chat, id: 'chat-2' },
+    },
+  }, { secret, now }), false);
+  assert.equal(
+    wa2ResolutionTokenIsValid(token, context, { secret, now: now + 10 * 60 * 1000 + 1 }),
+    false,
+  );
+  assert.equal(
+    wa2ResolutionTokenIsValid(
+      `${token.slice(0, -1)}${token.endsWith('0') ? '1' : '0'}`,
+      context,
+      { secret, now },
+    ),
+    false,
+  );
+});
+
+test('purpose/version e domínio próprio participam da assinatura HMAC', () => {
+  const context = {
+    leadId: 'lead-local',
+    instanceId: 'instance-local',
+    phoneNormalized: '5538999990000',
+    resolved: {
+      contact: { id: 'contact-1' },
+      chat: { id: 'chat-1', jid: '5538999990000@s.whatsapp.net' },
+    },
+    expectedAction: 'CREATE',
+    expectedLinkId: null,
+  };
+  const secret = 'placeholder-session-secret-with-no-production-value';
+  const now = 1_800_000_000_000;
+  const timestamp = String(now);
+  const payload = JSON.stringify({
+    purpose: WA2_LINK_RESOLUTION_PURPOSE,
+    leadId: context.leadId,
+    instanceId: context.instanceId,
+    phoneNormalized: context.phoneNormalized,
+    remoteContactId: context.resolved.contact.id,
+    remoteChatId: context.resolved.chat.id,
+    jid: context.resolved.chat.jid,
+    expectedAction: context.expectedAction,
+    expectedLinkId: context.expectedLinkId,
+    timestamp,
+  });
+  const expectedSignature = crypto.createHmac('sha256', secret)
+    .update(`crm-meta-super-educar:wa2-link-resolution:hmac:v1\0${payload}`)
+    .digest('hex');
+  assert.equal(
+    createWa2ResolutionToken(context, { secret, now }),
+    `${timestamp}.${expectedSignature}`,
+  );
 });

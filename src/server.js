@@ -6,20 +6,33 @@ import compression from 'compression';
 import cookieParser from 'cookie-parser';
 import { z } from 'zod';
 import {
+  Wa2DataError,
+  createWa2ContactLink,
+  disableWa2Instance,
+  enableWa2Instance,
   enqueueLeadgenJobs,
   closePool,
+  getActiveWa2ContactLinkForLead,
   getDashboardCounts,
   getLeadById,
+  getWa2ContactLinkById,
+  getWa2InstanceLocalById,
   healthcheck,
   listLeads,
+  listWa2InstancesLocal,
   listRecentJobs,
   listRecentMetaEvents,
   migrate,
   moveLeadStage,
   operationStartAt,
+  replaceWa2ContactLink,
   retryFailedJob,
+  setDefaultWa2Instance,
+  unlinkWa2ContactLink,
   upsertLead,
+  upsertVerifiedWa2Instance,
   validateDatabaseConfig,
+  verifyWa2ContactLink,
 } from './db.js';
 import {
   clearSession,
@@ -48,14 +61,17 @@ import {
   eventsView,
   loginView,
   matriculationConfirmView,
+  leadWa2View,
   wa2DashboardView,
   wa2InstanceView,
+  wa2LinkConfirmView,
   wa2QrView,
 } from './views.js';
 import {
   Wa2Error,
   connectWa2Instance,
   disconnectWa2Instance,
+  getWa2ContactByPhone,
   getWa2Health,
   getWa2InstanceQr,
   getWa2InstanceStatus,
@@ -64,6 +80,12 @@ import {
   validateWa2InstanceId,
   wa2ConfigStatus,
 } from './wa2.js';
+import { normalizeWhatsAppPhone } from './phone.js';
+import {
+  createWa2ResolutionToken,
+  wa2ResolutionTokenIsValid,
+} from './wa2-link-token.js';
+import { validateWa2ConfirmationState } from './wa2-link-rules.js';
 
 const app = express();
 const loginAttempts = new Map();
@@ -239,6 +261,7 @@ app.get('/wa2', async (req, res) => {
   let health = null;
   let instances = [];
   let unavailable = false;
+  const localInstances = await listWa2InstancesLocal();
   if (configStatus.state === 'configured') {
     const [healthResult, instancesResult] = await Promise.allSettled([
       getWa2Health(),
@@ -252,11 +275,60 @@ app.get('/wa2', async (req, res) => {
     configStatus,
     health,
     instances,
+    localInstances,
     unavailable,
     message: req.query.message || '',
     error: req.query.error || '',
     csrfToken: issueCsrfToken(req, res),
   }));
+});
+
+app.post('/wa2/instances/import', async (req, res) => {
+  try {
+    const remoteInstanceId = validateWa2InstanceId(req.body.remoteInstanceId);
+    const remoteInstances = await listWa2Instances();
+    const remoteInstance = remoteInstances.find((item) => item.id === remoteInstanceId);
+    if (!remoteInstance) {
+      return redirectWith(res, '/wa2', 'error', 'Instância não foi confirmada no WA2.');
+    }
+    await upsertVerifiedWa2Instance(remoteInstance, req.user.sub);
+    return redirectWith(res, '/wa2', 'message', 'Instância WA2 validada e salva no CRM.');
+  } catch (error) {
+    return redirectWith(res, '/wa2', 'error', wa2LinkErrorMessage(error));
+  }
+});
+
+app.post('/wa2/local-instances/:id/default', async (req, res) => {
+  try {
+    const id = z.string().uuid().parse(req.params.id);
+    await setDefaultWa2Instance(id);
+    return redirectWith(res, '/wa2', 'message', 'Instância definida como padrão.');
+  } catch (error) {
+    return redirectWith(res, '/wa2', 'error', wa2LinkErrorMessage(error));
+  }
+});
+
+app.post('/wa2/local-instances/:id/enable', async (req, res) => {
+  try {
+    const id = z.string().uuid().parse(req.params.id);
+    const instance = await enableWa2Instance(id);
+    if (!instance) return redirectWith(res, '/wa2', 'error', 'Instância local não encontrada.');
+    return redirectWith(res, '/wa2', 'message', 'Instância local habilitada.');
+  } catch (error) {
+    return redirectWith(res, '/wa2', 'error', wa2LinkErrorMessage(error));
+  }
+});
+
+app.post('/wa2/local-instances/:id/disable', async (req, res) => {
+  try {
+    const id = z.string().uuid().parse(req.params.id);
+    const clearDefault = req.body.confirmation === 'DISABLE_DEFAULT_WA2_INSTANCE';
+    const instance = await disableWa2Instance(id, { clearDefault });
+    if (!instance) return redirectWith(res, '/wa2', 'error', 'Instância local não encontrada.');
+    return redirectWith(res, '/wa2', 'message', 'Instância local desabilitada.');
+  } catch (error) {
+    return redirectWith(res, '/wa2', 'error', wa2LinkErrorMessage(error));
+  }
 });
 
 app.get('/wa2/instances/:id', async (req, res) => {
@@ -365,6 +437,311 @@ app.post('/wa2/instances/:id/disconnect', async (req, res) => {
       ? `/wa2/instances/${encodeURIComponent(instanceId)}`
       : '/wa2';
     return redirectWith(res, path, 'error', wa2UnavailableMessage(error));
+  }
+});
+
+function wa2LinkErrorMessage(error) {
+  if (error instanceof Wa2DataError) {
+    const messages = {
+      WA2_INSTANCE_TENANT_CONFLICT: 'A instância já pertence a outro tenant.',
+      WA2_INSTANCE_NOT_FOUND: 'Instância local não encontrada.',
+      WA2_INSTANCE_DISABLED: 'A instância local está desabilitada.',
+      WA2_DEFAULT_INSTANCE_CONFLICT:
+        'Confirme explicitamente a remoção da condição padrão antes de desabilitar.',
+      WA2_LEAD_NOT_FOUND: 'Lead não encontrado.',
+      WA2_LEAD_PHONE_MISSING: 'O lead não possui telefone.',
+      WA2_LEAD_PHONE_INVALID: 'O telefone do lead é inválido.',
+      WA2_LEAD_PHONE_CHANGED: 'O telefone do lead mudou. Resolva o contato novamente.',
+      WA2_LINK_CONFLICT: 'Já existe um vínculo conflitante para este lead ou chat.',
+      WA2_LINK_NOT_FOUND: 'Vínculo ativo não encontrado.',
+      WA2_LINK_CHANGED: 'O contato ou chat remoto mudou. Confirme uma substituição.',
+      WA2_RESOLUTION_CHANGED:
+        'A confirmação expirou ou o contato/chat mudou. Resolva novamente.',
+      WA2_CONTACT_WITHOUT_CHAT: 'O contato foi encontrado, mas ainda não possui chat.',
+    };
+    return messages[error.code] || 'Não foi possível alterar o vínculo WA2.';
+  }
+  if (error instanceof Wa2Error) {
+    if (error.remoteCode === 'CONTACT_NOT_FOUND') return 'Contato não encontrado no WA2.';
+    if (error.remoteCode === 'INSTANCE_NOT_FOUND') return 'Instância não encontrada no WA2.';
+    if (error.remoteCode === 'CONTACT_AMBIGUOUS' || error.status === 409) {
+      return 'O WA2 encontrou um resultado ambíguo.';
+    }
+    if (error.status === 404) return 'Recurso não encontrado no WA2.';
+    const messages = {
+      WA2_PHONE_INVALID: 'O telefone do lead é inválido.',
+      WA2_PHONE_MISMATCH: 'O telefone retornado pelo WA2 é diferente do lead.',
+      WA2_UNSUPPORTED_JID: 'O contato não possui um JID individual por telefone.',
+      WA2_LID_UNRESOLVED: 'O contato possui LID sem telefone individual resolvido.',
+      WA2_GROUP_UNSUPPORTED: 'Grupos não podem ser vinculados a leads.',
+      WA2_BROADCAST_UNSUPPORTED: 'Broadcasts, status e canais não podem ser vinculados.',
+      WA2_JID_MISMATCH: 'O contato e o chat representam JIDs diferentes.',
+      WA2_CONTACT_INVALID: 'A resposta do contato WA2 é incompatível.',
+      WA2_CHAT_INVALID: 'A resposta do chat WA2 é incompatível.',
+      WA2_TIMEOUT: 'O WA2 não respondeu dentro do prazo.',
+    };
+    return messages[error.code] || wa2UnavailableMessage(error);
+  }
+  return 'Não foi possível concluir a operação WA2.';
+}
+
+async function resolveLeadWa2Contact(lead, instance) {
+  if (!instance?.enabled) {
+    throw new Wa2DataError('Instância local está desabilitada', 'WA2_INSTANCE_DISABLED');
+  }
+  const phoneNormalized = normalizeWhatsAppPhone(lead.phone);
+  if (!lead.phone) {
+    throw new Wa2DataError('Lead sem telefone', 'WA2_LEAD_PHONE_MISSING');
+  }
+  if (!phoneNormalized) {
+    throw new Wa2DataError('Telefone do lead inválido', 'WA2_LEAD_PHONE_INVALID');
+  }
+  if (phoneNormalized !== lead.phone_normalized) {
+    throw new Wa2DataError(
+      'Telefone do lead inválido ou desatualizado',
+      'WA2_LEAD_PHONE_CHANGED',
+    );
+  }
+  const resolved = await getWa2ContactByPhone(
+    instance.remote_instance_id,
+    phoneNormalized,
+  );
+  if (!resolved.chat) {
+    throw new Wa2DataError('Contato sem chat disponível', 'WA2_CONTACT_WITHOUT_CHAT');
+  }
+  return { resolved, phoneNormalized };
+}
+
+app.get('/leads/:id/wa2', async (req, res) => {
+  const parsedId = z.string().uuid().safeParse(req.params.id);
+  if (!parsedId.success) return redirectWith(res, '/', 'error', 'Lead inválido.');
+  try {
+    const [lead, instances, links] = await Promise.all([
+      getLeadById(parsedId.data),
+      listWa2InstancesLocal({ enabledOnly: true }),
+      getActiveWa2ContactLinkForLead(parsedId.data),
+    ]);
+    if (!lead) return redirectWith(res, '/', 'error', 'Lead não encontrado.');
+    return res.send(leadWa2View({
+      lead,
+      instances,
+      links,
+      message: req.query.message || '',
+      error: req.query.error || '',
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  } catch (error) {
+    return redirectWith(res, '/', 'error', wa2LinkErrorMessage(error));
+  }
+});
+
+app.post('/leads/:id/wa2/resolve', async (req, res) => {
+  const parsedLeadId = z.string().uuid().safeParse(req.params.id);
+  const parsedInstanceId = z.string().uuid().safeParse(req.body.instanceId);
+  if (!parsedLeadId.success || !parsedInstanceId.success) {
+    return redirectWith(res, '/', 'error', 'Lead ou instância inválida.');
+  }
+  try {
+    const [lead, instance, currentLink] = await Promise.all([
+      getLeadById(parsedLeadId.data),
+      getWa2InstanceLocalById(parsedInstanceId.data),
+      getActiveWa2ContactLinkForLead(parsedLeadId.data, parsedInstanceId.data),
+    ]);
+    if (!lead) return redirectWith(res, '/', 'error', 'Lead não encontrado.');
+    const { resolved, phoneNormalized } = await resolveLeadWa2Contact(lead, instance);
+    const expectedAction = currentLink ? 'REPLACE' : 'CREATE';
+    const expectedLinkId = currentLink?.id ?? null;
+    return res.send(wa2LinkConfirmView({
+      lead,
+      instance,
+      resolved,
+      phoneNormalized,
+      currentLink,
+      expectedAction,
+      expectedLinkId,
+      resolutionToken: createWa2ResolutionToken({
+        leadId: lead.id,
+        instanceId: instance.id,
+        phoneNormalized,
+        resolved,
+        expectedAction,
+        expectedLinkId,
+      }, { secret: process.env.SESSION_SECRET }),
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  } catch (error) {
+    return redirectWith(
+      res,
+      `/leads/${parsedLeadId.data}/wa2`,
+      'error',
+      wa2LinkErrorMessage(error),
+    );
+  }
+});
+
+app.post('/leads/:id/wa2/confirm', async (req, res) => {
+  const parsedLeadId = z.string().uuid().safeParse(req.params.id);
+  const parsedInstanceId = z.string().uuid().safeParse(req.body.instanceId);
+  const expectedAction = req.body.expectedAction;
+  const parsedExpectedLinkId = z.string().uuid().safeParse(req.body.expectedLinkId);
+  const expectedLinkId = expectedAction === 'CREATE' ? null : parsedExpectedLinkId.data;
+  const expectedLinkIdIsValid = expectedAction === 'CREATE'
+    ? req.body.expectedLinkId == null || req.body.expectedLinkId === ''
+    : expectedAction === 'REPLACE' && parsedExpectedLinkId.success;
+  if (
+    !parsedLeadId.success ||
+    !parsedInstanceId.success ||
+    req.body.confirmation !== 'CONFIRM_WA2_LINK' ||
+    !['CREATE', 'REPLACE'].includes(expectedAction) ||
+    !expectedLinkIdIsValid ||
+    typeof req.body.resolutionToken !== 'string'
+  ) {
+    return redirectWith(res, '/', 'error', 'Confirmação de vínculo inválida.');
+  }
+  try {
+    const [lead, instance, currentLink] = await Promise.all([
+      getLeadById(parsedLeadId.data),
+      getWa2InstanceLocalById(parsedInstanceId.data),
+      getActiveWa2ContactLinkForLead(parsedLeadId.data, parsedInstanceId.data),
+    ]);
+    if (!lead) return redirectWith(res, '/', 'error', 'Lead não encontrado.');
+    const { resolved, phoneNormalized } = await resolveLeadWa2Contact(lead, instance);
+    if (!wa2ResolutionTokenIsValid(req.body.resolutionToken, {
+      leadId: lead.id,
+      instanceId: instance.id,
+      phoneNormalized,
+      resolved,
+      expectedAction,
+      expectedLinkId,
+    }, { secret: process.env.SESSION_SECRET })) {
+      throw new Wa2DataError(
+        'A resolução WA2 expirou ou o contato/chat mudou',
+        'WA2_RESOLUTION_CHANGED',
+      );
+    }
+    validateWa2ConfirmationState({
+      expectedAction,
+      expectedLinkId,
+      currentLink,
+    });
+    if (expectedAction === 'REPLACE') {
+      await replaceWa2ContactLink({
+        leadId: lead.id,
+        instanceId: instance.id,
+        expectedLinkId,
+        expectedPhoneNormalized: phoneNormalized,
+        resolved,
+        actor: req.user.sub,
+      });
+    } else {
+      await createWa2ContactLink({
+        leadId: lead.id,
+        instanceId: instance.id,
+        expectedPhoneNormalized: phoneNormalized,
+        resolved,
+        actor: req.user.sub,
+      });
+    }
+    return redirectWith(
+      res,
+      `/leads/${lead.id}/wa2`,
+      'message',
+      expectedAction === 'REPLACE'
+        ? 'Vínculo WA2 confirmado ou substituído.'
+        : 'Vínculo WA2 criado.',
+    );
+  } catch (error) {
+    return redirectWith(
+      res,
+      `/leads/${parsedLeadId.data}/wa2`,
+      'error',
+      wa2LinkErrorMessage(error),
+    );
+  }
+});
+
+app.post('/leads/:id/wa2/verify', async (req, res) => {
+  const parsedLeadId = z.string().uuid().safeParse(req.params.id);
+  const parsedLinkId = z.string().uuid().safeParse(req.body.linkId);
+  if (!parsedLeadId.success || !parsedLinkId.success) {
+    return redirectWith(res, '/', 'error', 'Vínculo inválido.');
+  }
+  try {
+    const [link, lead] = await Promise.all([
+      getWa2ContactLinkById(parsedLinkId.data),
+      getLeadById(parsedLeadId.data),
+    ]);
+    if (!link || link.lead_id !== parsedLeadId.data || link.unlinked_at) {
+      return redirectWith(res, '/', 'error', 'Vínculo ativo não encontrado.');
+    }
+    if (!lead || lead.phone_normalized !== link.phone_normalized) {
+      throw new Wa2DataError(
+        'O telefone do lead mudou durante a verificação',
+        'WA2_LEAD_PHONE_CHANGED',
+      );
+    }
+    if (!link.instance_enabled) {
+      throw new Wa2DataError('Instância local está desabilitada', 'WA2_INSTANCE_DISABLED');
+    }
+    const resolved = await getWa2ContactByPhone(
+      link.remote_instance_id,
+      link.phone_normalized,
+    );
+    if (!resolved.chat) {
+      throw new Wa2DataError('Contato sem chat disponível', 'WA2_CONTACT_WITHOUT_CHAT');
+    }
+    await verifyWa2ContactLink({ linkId: link.id, resolved });
+    return redirectWith(
+      res,
+      `/leads/${parsedLeadId.data}/wa2`,
+      'message',
+      'Vínculo WA2 verificado.',
+    );
+  } catch (error) {
+    return redirectWith(
+      res,
+      `/leads/${parsedLeadId.data}/wa2`,
+      'error',
+      wa2LinkErrorMessage(error),
+    );
+  }
+});
+
+app.post('/leads/:id/wa2/unlink', async (req, res) => {
+  const parsedLeadId = z.string().uuid().safeParse(req.params.id);
+  const parsedLinkId = z.string().uuid().safeParse(req.body.linkId);
+  if (
+    !parsedLeadId.success ||
+    !parsedLinkId.success ||
+    req.body.confirmation !== 'UNLINK_WA2'
+  ) {
+    return redirectWith(res, '/', 'error', 'Confirmação de desvínculo inválida.');
+  }
+  try {
+    const link = await getWa2ContactLinkById(parsedLinkId.data);
+    if (!link || link.lead_id !== parsedLeadId.data) {
+      return redirectWith(res, '/', 'error', 'Vínculo não encontrado.');
+    }
+    const unlinked = await unlinkWa2ContactLink({
+      linkId: link.id,
+      actor: req.user.sub,
+    });
+    if (!unlinked) {
+      return redirectWith(res, '/', 'error', 'Vínculo já estava desfeito.');
+    }
+    return redirectWith(
+      res,
+      `/leads/${parsedLeadId.data}/wa2`,
+      'message',
+      'Vínculo WA2 desfeito sem apagar o histórico.',
+    );
+  } catch (error) {
+    return redirectWith(
+      res,
+      `/leads/${parsedLeadId.data}/wa2`,
+      'error',
+      wa2LinkErrorMessage(error),
+    );
   }
 });
 

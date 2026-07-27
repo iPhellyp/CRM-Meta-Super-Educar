@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getWhatsAppUrl, normalizeWhatsAppPhone } from '../src/phone.js';
+import {
+  getWhatsAppUrl,
+  normalizeWhatsAppPhone,
+  normalizeWhatsAppPhoneOrNull,
+} from '../src/phone.js';
 
 test('normaliza telefones nacionais válidos sem alterar o número local', () => {
   assert.equal(normalizeWhatsAppPhone('(38) 3333-0000'), '553833330000');
@@ -27,4 +31,9 @@ test('rejeita formatos de telefone não reconhecidos', () => {
 test('gera URL somente para telefone válido', () => {
   assert.equal(getWhatsAppUrl('(38) 99999-0000'), 'https://wa.me/5538999990000');
   assert.equal(getWhatsAppUrl('telefone vazio'), '');
+});
+
+test('retorna null para persistência quando telefone é inválido', () => {
+  assert.equal(normalizeWhatsAppPhoneOrNull('(38) 99999-0000'), '5538999990000');
+  assert.equal(normalizeWhatsAppPhoneOrNull('telefone inválido'), null);
 });

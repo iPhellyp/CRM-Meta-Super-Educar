@@ -5,6 +5,10 @@ export function normalizeWhatsAppPhone(value) {
   return '';
 }
 
+export function normalizeWhatsAppPhoneOrNull(value) {
+  return normalizeWhatsAppPhone(value) || null;
+}
+
 export function getWhatsAppUrl(value) {
   const normalizedPhone = normalizeWhatsAppPhone(value);
   return normalizedPhone ? `https://wa.me/${normalizedPhone}` : '';

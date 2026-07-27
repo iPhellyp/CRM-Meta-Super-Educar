@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { normalizeWhatsAppPhone } from './phone.js';
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MIN_TIMEOUT_MS = 500;
@@ -137,6 +138,122 @@ function objectPayload(payload) {
 function safeText(value, maxLength = 200) {
   if (value == null) return null;
   return String(value).slice(0, maxLength);
+}
+
+export function classifyWa2Jid(value) {
+  const jid = String(value || '').trim().toLowerCase();
+  if (!jid) return 'unsupported';
+  if (jid === 'status@broadcast') return 'status';
+  if (jid.endsWith('@lid')) return 'lid';
+  if (jid.endsWith('@g.us')) return 'group';
+  if (jid.includes('newsletter') || jid.includes('channel')) return 'newsletter';
+  if (jid.includes('broadcast')) return 'broadcast';
+  if (/^\d+@(s\.whatsapp\.net|c\.us)$/.test(jid)) return 'individual_phone';
+  return 'unsupported';
+}
+
+function individualJidPhone(value) {
+  const jid = String(value || '').trim().toLowerCase();
+  const type = classifyWa2Jid(jid);
+  if (type !== 'individual_phone') {
+    const code = {
+      lid: 'WA2_LID_UNRESOLVED',
+      group: 'WA2_GROUP_UNSUPPORTED',
+      broadcast: 'WA2_BROADCAST_UNSUPPORTED',
+      status: 'WA2_BROADCAST_UNSUPPORTED',
+      newsletter: 'WA2_BROADCAST_UNSUPPORTED',
+    }[type] || 'WA2_UNSUPPORTED_JID';
+    throw new Wa2Error('JID WA2 não representa contato individual', {
+      code,
+    });
+  }
+  return {
+    jid,
+    phoneNormalized: jid.slice(0, jid.indexOf('@')),
+  };
+}
+
+function validateNormalizedPhone(value) {
+  const phone = String(value || '');
+  if (!phone || normalizeWhatsAppPhone(phone) !== phone) {
+    throw new Wa2Error('Telefone não está normalizado', {
+      code: 'WA2_PHONE_INVALID',
+    });
+  }
+  return phone;
+}
+
+function requiredRemoteText(value, maxLength, code = 'WA2_RESPONSE_INVALID') {
+  if (typeof value !== 'string') {
+    throw new Wa2Error('Resposta WA2 incompatível', { code });
+  }
+  const text = value.trim();
+  if (!text || text.length > maxLength) {
+    throw new Wa2Error('Resposta WA2 incompatível', { code });
+  }
+  return text;
+}
+
+function optionalRemoteText(value, maxLength, code = 'WA2_RESPONSE_INVALID') {
+  if (value == null) return null;
+  if (typeof value !== 'string' || value.length > maxLength) {
+    throw new Wa2Error('Resposta WA2 incompatível', { code });
+  }
+  return value;
+}
+
+function sanitizeContactByPhone(payload, requestedPhone) {
+  const value = objectPayload(payload);
+  if (!value.contact || typeof value.contact !== 'object' || Array.isArray(value.contact)) {
+    throw new Wa2Error('Contato WA2 ausente na resposta', {
+      code: 'WA2_CONTACT_INVALID',
+    });
+  }
+  const contactId = requiredRemoteText(value.contact.id, 200, 'WA2_CONTACT_INVALID');
+  const phoneNormalized = requiredRemoteText(
+    value.contact.phoneNormalized,
+    20,
+    'WA2_CONTACT_INVALID',
+  );
+  if (phoneNormalized !== requestedPhone) {
+    throw new Wa2Error('Telefone retornado pelo WA2 é divergente', {
+      code: 'WA2_PHONE_MISMATCH',
+    });
+  }
+  const contactJid = individualJidPhone(value.contact.jid);
+  if (contactJid.phoneNormalized !== requestedPhone) {
+    throw new Wa2Error('JID do contato diverge do telefone', {
+      code: 'WA2_JID_MISMATCH',
+    });
+  }
+
+  let chat = null;
+  if (value.chat != null) {
+    if (typeof value.chat !== 'object' || Array.isArray(value.chat)) {
+      throw new Wa2Error('Chat WA2 incompatível', { code: 'WA2_CHAT_INVALID' });
+    }
+    const chatId = requiredRemoteText(value.chat.id, 200, 'WA2_CHAT_INVALID');
+    const chatJid = individualJidPhone(value.chat.jid);
+    if (
+      chatJid.phoneNormalized !== requestedPhone ||
+      chatJid.phoneNormalized !== contactJid.phoneNormalized
+    ) {
+      throw new Wa2Error('JID do chat diverge do contato', {
+        code: 'WA2_JID_MISMATCH',
+      });
+    }
+    chat = { id: chatId, jid: chatJid.jid };
+  }
+
+  return {
+    contact: {
+      id: contactId,
+      phoneNormalized,
+      name: optionalRemoteText(value.contact.name, 200, 'WA2_CONTACT_INVALID'),
+      jid: contactJid.jid,
+    },
+    chat,
+  };
 }
 
 function sanitizeHealth(payload) {
@@ -502,6 +619,15 @@ export function createWa2Client({
     getInstanceQr: (instanceId) => request(instancePath(instanceId, '/qr'), {
       parse: parseWa2Qr,
     }),
+    getContactByPhone: (instanceId, phoneNormalized) => {
+      const phone = validateNormalizedPhone(phoneNormalized);
+      return request(instancePath(
+        instanceId,
+        `/contacts/by-phone/${encodeURIComponent(phone)}`,
+      ), {
+        parse: (payload) => sanitizeContactByPhone(payload, phone),
+      });
+    },
     connectInstance: (instanceId, mode) => {
       if (!CONNECT_MODES.has(mode)) {
         throw new Wa2Error('Modo de conexão inválido', { code: 'WA2_CONNECT_MODE_INVALID' });
@@ -540,6 +666,8 @@ export const getWa2InstanceStatus = (instanceId, options) =>
   defaultClient(options).getInstanceStatus(instanceId);
 export const getWa2InstanceQr = (instanceId, options) =>
   defaultClient(options).getInstanceQr(instanceId);
+export const getWa2ContactByPhone = (instanceId, phoneNormalized, options) =>
+  defaultClient(options).getContactByPhone(instanceId, phoneNormalized);
 export const connectWa2Instance = (instanceId, mode, options) =>
   defaultClient(options).connectInstance(instanceId, mode);
 export const syncWa2Instance = (instanceId, scope, options) =>

@@ -88,6 +88,23 @@ comandos são assíncronos: o painel confirma apenas que a solicitação foi env
 O QR é validado, convertido em imagem por uma rota autenticada com cache desativado
 e nunca é persistido pelo CRM. Ele não deve aparecer em logs, URLs, cookies ou banco.
 
+### Vínculo manual de leads com o WA2
+
+O Checkpoint 2B adiciona a migration aditiva `003_wa2_contact_links.sql`, ainda não
+aplicada por esta alteração. Ela mantém o telefone bruto e acrescenta
+`phone_normalized`, usando somente números brasileiros válidos com DDI `55`. Telefones
+inválidos ficam com o valor normalizado nulo, e não existe índice único por telefone.
+Leads duplicados não são unidos nem apagados.
+
+Uma instância remota só pode ser salva localmente depois de ser consultada e validada
+pelo servidor do CRM. O vínculo com contato/chat também é manual: o servidor relê o
+lead e a instância, consulta o WA2 por telefone exato e repete a consulta durante a
+confirmação. O navegador não decide tenant, telefone, chat ou JID.
+
+Desvínculos são lógicos e preservam histórico. Uma substituição exige confirmação
+explícita e mantém o vínculo anterior como inativo. Este checkpoint não sincroniza
+etiquetas, não cria fila ou worker WA2 e não cria leads orgânicos.
+
 Em produção HTTPS, `COOKIE_SECURE=true` é obrigatório. Use `COOKIE_SECURE=false` apenas no acesso local por `http://localhost`.
 
 ### Gerar o hash da senha administrativa

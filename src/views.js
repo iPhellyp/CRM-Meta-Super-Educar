@@ -33,7 +33,7 @@ function layout(title, body, { logged = true, csrfToken = '' } = {}) {
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-  ${logged ? `<header><strong>CRM Meta · Super Educar</strong><nav><a href="/">Leads</a><a href="/events">Eventos Meta</a><a href="/wa2">WA2</a><a href="/wa2/labels">Etiquetas WA2</a><a href="/wa2/label-jobs">Jobs WA2</a><form method="post" action="/logout">${csrfField(csrfToken)}<button class="link">Sair</button></form></nav></header>` : ''}
+  ${logged ? `<header><strong>CRM Meta · Super Educar</strong><nav><a href="/">Leads</a><a href="/events">Eventos Meta</a><a href="/wa2">WA2</a><a href="/wa2/labels">Etiquetas WA2</a><a href="/wa2/label-jobs">Jobs WA2</a><a href="/operations">Importação e reconciliação</a><form method="post" action="/logout">${csrfField(csrfToken)}<button class="link">Sair</button></form></nav></header>` : ''}
   <main>${body}</main>
 </body>
 </html>`;
@@ -56,6 +56,78 @@ export function loginView(error = '', csrfToken = '') {
 
 function stat(label, value) {
   return `<div class="stat"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
+}
+
+export function historicalOperationsView({
+  operations,
+  instances,
+  message = '',
+  error = '',
+  csrfToken = '',
+}) {
+  const cursor = operations.cursor;
+  return layout('Importação e reconciliação', `
+    <section class="hero"><div><h1>Importação histórica e WA2</h1>
+      <p>Operações retomáveis por tenant, executadas em lotes pelo worker.</p></div></section>
+    ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
+    ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+    <section class="card">
+      <h2>Importação Meta</h2>
+      <form method="post" action="/operations/meta-imports" class="stack">
+        ${csrfField(csrfToken)}
+        <label>Page ID<input name="pageId" inputmode="numeric" maxlength="100" required></label>
+        <label>Form ID<input name="formId" inputmode="numeric" maxlength="100" required></label>
+        <button type="submit">Iniciar importação</button>
+      </form>
+      <table><thead><tr><th>Form</th><th>Status</th><th>Recebidos</th>
+        <th>Criados</th><th>Atualizados</th><th>Inválidos</th><th>Cursor</th><th>Ação</th></tr></thead>
+        <tbody>${operations.imports.map((run) => `<tr>
+          <td>${esc(run.form_id)}</td><td>${esc(run.status)}</td>
+          <td>${esc(run.received_count)}</td><td>${esc(run.created_count)}</td>
+          <td>${esc(run.updated_count)}</td><td>${esc(run.invalid_count)}</td>
+          <td>${esc(run.cursor_value || '—')}</td><td>
+          ${['PAUSED', 'FAILED'].includes(run.status) ? `<form method="post" action="/operations/meta-imports/${esc(run.id)}/resume">${csrfField(csrfToken)}<button>Retomar</button></form>` : ''}
+          ${['PENDING', 'PAUSED'].includes(run.status) ? `<form method="post" action="/operations/meta-imports/${esc(run.id)}/cancel">${csrfField(csrfToken)}<button>Cancelar</button></form>` : ''}
+          </td></tr>`).join('')}</tbody></table>
+    </section>
+    <section class="card">
+      <h2>Eventos WhatsApp</h2>
+      <p>Cursor: ${esc(cursor?.cursor_value || 'inicial')} · Status: ${esc(cursor?.status || 'IDLE')}</p>
+      <p>Processados: ${esc(cursor?.processed_count || 0)} · Ignorados INTERNAL_API/REMOVE:
+        ${esc(cursor?.ignored_count || 0)} · Conflitos: ${esc(cursor?.conflict_count || 0)} ·
+        Pendências: ${esc(cursor?.pending_count || 0)}</p>
+    </section>
+    <section class="card">
+      <h2>Reconciliação WA2</h2>
+      <form method="post" action="/operations/reconciliations" class="stack">
+        ${csrfField(csrfToken)}
+        <label>Instância<select name="instanceId" required>
+          ${instances.filter((item) => item.enabled).map((item) =>
+            `<option value="${esc(item.id)}">${esc(item.name || item.remote_instance_id)}</option>`).join('')}
+        </select></label><button type="submit">Iniciar lote</button>
+      </form>
+      <table><thead><tr><th>Instância</th><th>Status</th><th>Progresso</th>
+        <th>Resultados</th><th>Ação</th></tr></thead><tbody>
+        ${operations.reconciliations.map((run) => `<tr>
+          <td>${esc(run.instance_name)}</td><td>${esc(run.status)}</td>
+          <td>${esc(run.processed_count)}/${esc(run.total_count)}</td>
+          <td>${esc(JSON.stringify(run.results || {}))}</td>
+          <td><form method="post" action="/operations/reconciliations/${esc(run.id)}/retry">
+            ${csrfField(csrfToken)}<button>Retry falhas</button></form></td></tr>`).join('')}
+      </tbody></table>
+    </section>
+    <section class="card"><h2>Conflitos abertos</h2><ul>
+      ${operations.conflicts.map((item) =>
+        `<li>${esc(item.conflict_type)} — ${item.lead_id ? `<a href="/leads/${esc(item.lead_id)}">${esc(item.lead_name || item.lead_id)}</a>` : 'sem lead'}</li>`).join('') || '<li>Nenhum.</li>'}
+    </ul></section>
+    <section class="card"><h2>Confirmações de matrícula</h2><ul>
+      ${operations.confirmations.map((item) => `<li>${esc(item.lead_name)}
+        <a href="/leads/${esc(item.lead_id)}">Abrir lead</a>
+        <form method="post" action="/operations/confirmations/${esc(item.id)}/confirm">${csrfField(csrfToken)}<button>Confirmar</button></form>
+        <form method="post" action="/operations/confirmations/${esc(item.id)}/reject">${csrfField(csrfToken)}<button>Rejeitar</button></form>
+      </li>`).join('') || '<li>Nenhuma.</li>'}
+    </ul></section>
+  `, { csrfToken });
 }
 
 function whatsappAction(phone) {

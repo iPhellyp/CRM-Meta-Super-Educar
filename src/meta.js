@@ -100,10 +100,13 @@ async function readJsonResponse(response) {
   }
 }
 
-async function graphRequest(path, { fields, method = 'GET', body, token } = {}) {
+async function graphRequest(path, { fields, query, method = 'GET', body, token } = {}) {
   if (!token) throw new MetaGraphError('Token da Meta não configurado');
   const url = new URL(`https://graph.facebook.com/${graphVersion()}/${path}`);
   if (fields) url.searchParams.set('fields', fields);
+  for (const [key, value] of Object.entries(query || {})) {
+    if (value != null && value !== '') url.searchParams.set(key, String(value));
+  }
 
   let response;
   try {
@@ -195,16 +198,19 @@ function metaCreatedAt(primary, fallback) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-export async function importLeadgenId(
-  metaLeadId,
+export async function importLeadPayload(
+  leadPayload,
   webhookValue = {},
   receivedAt = null,
   tenantId = null,
+  { upsert = upsertLead } = {},
 ) {
-  const leadPayload = await graphRequest(String(metaLeadId), {
-    fields: 'id,created_time,ad_id,form_id,field_data',
-    token: process.env.META_PAGE_ACCESS_TOKEN,
-  });
+  const metaLeadId = String(leadPayload?.id || webhookValue.leadgen_id || '');
+  if (!/^\d{1,100}$/.test(metaLeadId)) {
+    const error = new MetaGraphError('Lead histórico Meta inválido');
+    error.code = 'META_LEAD_INVALID';
+    throw error;
+  }
   const fields = fieldsToObject(leadPayload.field_data);
 
   let adPayload = {};
@@ -225,12 +231,13 @@ export async function importLeadgenId(
   }
 
   const name = firstValue(fields, ['full_name', 'nome_completo', 'name', 'nome']) || 'Lead Meta';
-  const email = firstValue(fields, ['email', 'email_address']);
+  const emailRaw = firstValue(fields, ['email', 'email_address']).trim().toLowerCase();
+  const email = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emailRaw) ? emailRaw : '';
   const phone = firstValue(fields, ['phone_number', 'telefone', 'phone', 'celular']);
   const course = firstValue(fields, ['curso', 'course', 'qual_curso_voce_deseja', 'curso_de_interesse']);
   const city = firstValue(fields, ['city', 'cidade']);
 
-  return upsertLead({
+  return upsert({
     tenantId,
     name,
     email,
@@ -269,6 +276,52 @@ export async function importLeadgenId(
       webhook: webhookValue,
     },
   });
+}
+
+export async function importLeadgenId(
+  metaLeadId,
+  webhookValue = {},
+  receivedAt = null,
+  tenantId = null,
+) {
+  const leadPayload = await graphRequest(String(metaLeadId), {
+    fields: 'id,created_time,ad_id,form_id,field_data',
+    token: process.env.META_PAGE_ACCESS_TOKEN,
+  });
+  return importLeadPayload(leadPayload, webhookValue, receivedAt, tenantId);
+}
+
+export async function listMetaFormLeadsPage(formId, {
+  after = null,
+  limit = 100,
+} = {}) {
+  const normalizedFormId = String(formId || '').trim();
+  if (!/^\d{1,100}$/.test(normalizedFormId)) {
+    const error = new MetaGraphError('Form ID inválido');
+    error.code = 'META_FORM_ID_INVALID';
+    throw error;
+  }
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+    const error = new MetaGraphError('Limite de importação Meta inválido');
+    error.code = 'META_PAGE_LIMIT_INVALID';
+    throw error;
+  }
+  const payload = await graphRequest(`${normalizedFormId}/leads`, {
+    fields: 'id,created_time,ad_id,form_id,field_data',
+    query: { limit, after },
+    token: process.env.META_PAGE_ACCESS_TOKEN,
+  });
+  if (!Array.isArray(payload.data)) {
+    throw new MetaGraphError('Página de leads Meta inválida');
+  }
+  const nextCursor = payload.paging?.cursors?.after
+    ? String(payload.paging.cursors.after).slice(0, 1000)
+    : null;
+  return {
+    leads: payload.data,
+    nextCursor,
+    hasMore: Boolean(payload.paging?.next && nextCursor),
+  };
 }
 
 function buildUserData(lead) {

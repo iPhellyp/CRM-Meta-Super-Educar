@@ -7,7 +7,10 @@ import cookieParser from 'cookie-parser';
 import { z } from 'zod';
 import {
   Wa2DataError,
+  createMetaHistoricalImport,
+  createWa2Reconciliation,
   createWa2ContactLink,
+  decideWa2StageConfirmation,
   disableWa2Instance,
   enableWa2Instance,
   enqueueLeadgenJobs,
@@ -22,6 +25,7 @@ import {
   getWa2LabelSyncStatusForLead,
   healthcheck,
   listLeads,
+  listHistoricalOperations,
   listWa2InstancesLocal,
   listWa2LabelBindings,
   listWa2LabelJobs,
@@ -33,6 +37,8 @@ import {
   replaceWa2ContactLink,
   retryFailedJob,
   retryFailedWa2LabelJob,
+  retryWa2ReconciliationFailures,
+  setMetaHistoricalImportStatus,
   setDefaultWa2Instance,
   setWa2LabelBindingEnabled,
   unlinkWa2ContactLink,
@@ -68,6 +74,7 @@ import {
 import {
   dashboardView,
   eventsView,
+  historicalOperationsView,
   loginView,
   matriculationConfirmView,
   leadWa2View,
@@ -245,6 +252,109 @@ app.use((req, res, next) => req.method === 'POST' ? requireCsrf(req, res, next) 
 app.post('/logout', (_req, res) => {
   clearSession(res);
   res.redirect('/login');
+});
+
+const metaHistoricalIdsSchema = z.object({
+  pageId: z.string().regex(/^[0-9]{1,100}$/),
+  formId: z.string().regex(/^[0-9]{1,100}$/),
+});
+
+app.get('/operations', async (req, res) => {
+  try {
+    const [operations, instances] = await Promise.all([
+      listHistoricalOperations(),
+      listWa2InstancesLocal(),
+    ]);
+    return res.send(historicalOperationsView({
+      operations,
+      instances,
+      message: req.query.message || '',
+      error: req.query.error || '',
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  } catch {
+    return redirectWith(res, '/', 'error', 'Não foi possível carregar as operações.');
+  }
+});
+
+app.post('/operations/meta-imports', async (req, res) => {
+  const parsed = metaHistoricalIdsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return redirectWith(res, '/operations', 'error', 'Page ID ou Form ID inválido.');
+  }
+  await createMetaHistoricalImport({
+    ...parsed.data,
+    actor: req.user.sub,
+  });
+  return redirectWith(res, '/operations', 'message', 'Importação Meta enfileirada.');
+});
+
+app.post('/operations/meta-imports/:id/:action', async (req, res) => {
+  const id = z.string().uuid().safeParse(req.params.id);
+  const action = String(req.params.action || '');
+  if (!id.success || !['resume', 'cancel'].includes(action)) {
+    return redirectWith(res, '/operations', 'error', 'Ação de importação inválida.');
+  }
+  const changed = await setMetaHistoricalImportStatus(id.data, action);
+  return redirectWith(
+    res,
+    '/operations',
+    changed ? 'message' : 'error',
+    changed ? 'Importação atualizada.' : 'Importação não está no estado permitido.',
+  );
+});
+
+app.post('/operations/reconciliations', async (req, res) => {
+  const instanceId = z.string().uuid().safeParse(req.body.instanceId);
+  if (!instanceId.success) {
+    return redirectWith(res, '/operations', 'error', 'Instância inválida.');
+  }
+  try {
+    await createWa2Reconciliation({
+      instanceId: instanceId.data,
+      actor: req.user.sub,
+    });
+    return redirectWith(res, '/operations', 'message', 'Reconciliação enfileirada.');
+  } catch (error) {
+    return redirectWith(res, '/operations', 'error', wa2LinkErrorMessage(error));
+  }
+});
+
+app.post('/operations/reconciliations/:id/retry', async (req, res) => {
+  const id = z.string().uuid().safeParse(req.params.id);
+  if (!id.success) {
+    return redirectWith(res, '/operations', 'error', 'Reconciliação inválida.');
+  }
+  const count = await retryWa2ReconciliationFailures(id.data);
+  return redirectWith(
+    res,
+    '/operations',
+    count ? 'message' : 'error',
+    count ? `${count} item(ns) reenfileirado(s).` : 'Nenhuma falha disponível para retry.',
+  );
+});
+
+app.post('/operations/confirmations/:id/:decision', async (req, res) => {
+  const id = z.string().uuid().safeParse(req.params.id);
+  const decision = String(req.params.decision || '');
+  if (!id.success || !['confirm', 'reject'].includes(decision)) {
+    return redirectWith(res, '/operations', 'error', 'Confirmação inválida.');
+  }
+  try {
+    const changed = await decideWa2StageConfirmation(
+      id.data,
+      decision,
+      req.user.sub,
+    );
+    return redirectWith(
+      res,
+      '/operations',
+      changed ? 'message' : 'error',
+      changed ? 'Confirmação registrada.' : 'Pendência não encontrada.',
+    );
+  } catch {
+    return redirectWith(res, '/operations', 'error', 'Transição de matrícula indisponível.');
+  }
 });
 
 function noStore(res) {

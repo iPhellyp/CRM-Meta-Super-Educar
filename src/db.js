@@ -13,6 +13,7 @@ import {
   isWa2LabelStage,
   stagesSharingWa2Label,
 } from './wa2-label-sync.js';
+import { decideInboundLabelAction } from './historical-sync.js';
 
 const { Pool } = pg;
 const DEFAULT_TENANT_ID = 'super-educar';
@@ -145,12 +146,12 @@ export async function getLeadById(id) {
   return result.rows[0] || null;
 }
 
-export async function upsertLead(input) {
+export async function upsertLead(input, { client = pool } = {}) {
   const currentTenantId = input.tenantId || tenantId();
   const phoneNormalized = normalizeWhatsAppPhoneOrNull(input.phone);
 
   if (input.metaLeadId) {
-    const result = await pool.query(
+    const result = await client.query(
       `INSERT INTO leads (
         tenant_id, name, email, phone, phone_normalized, course, city, source, stage,
         meta_lead_id, meta_page_id, meta_form_id, meta_ad_id, meta_adset_id,
@@ -158,11 +159,18 @@ export async function upsertLead(input) {
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
       ON CONFLICT (tenant_id, meta_lead_id) WHERE meta_lead_id IS NOT NULL
       DO UPDATE SET
-        name = COALESCE(NULLIF(EXCLUDED.name, ''), leads.name),
+        name = CASE
+          WHEN NULLIF(EXCLUDED.name, '') IS NOT NULL AND EXCLUDED.name <> 'Lead Meta'
+            THEN EXCLUDED.name
+          ELSE leads.name
+        END,
         email = COALESCE(NULLIF(EXCLUDED.email, ''), leads.email),
-        phone = COALESCE(NULLIF(EXCLUDED.phone, ''), leads.phone),
+        phone = CASE
+          WHEN EXCLUDED.phone_normalized IS NOT NULL THEN EXCLUDED.phone
+          ELSE leads.phone
+        END,
         phone_normalized = CASE
-          WHEN NULLIF(EXCLUDED.phone, '') IS NOT NULL THEN EXCLUDED.phone_normalized
+          WHEN EXCLUDED.phone_normalized IS NOT NULL THEN EXCLUDED.phone_normalized
           ELSE leads.phone_normalized
         END,
         course = COALESCE(NULLIF(EXCLUDED.course, ''), leads.course),
@@ -176,7 +184,7 @@ export async function upsertLead(input) {
         received_at = COALESCE(leads.received_at, EXCLUDED.received_at),
         raw_meta = COALESCE(EXCLUDED.raw_meta, leads.raw_meta),
         updated_at = now()
-      RETURNING *`,
+      RETURNING *, (xmax = 0) AS was_inserted`,
       [
         currentTenantId,
         input.name,
@@ -201,7 +209,7 @@ export async function upsertLead(input) {
     return result.rows[0];
   }
 
-  const result = await pool.query(
+  const result = await client.query(
     `INSERT INTO leads (
        tenant_id, name, email, phone, phone_normalized, course, city, source, stage
      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
@@ -1528,6 +1536,785 @@ export async function getWa2LabelSyncStatusForLead(leadId, stage) {
     [tenantId(), leadId, stage],
   );
   return result.rows;
+}
+
+function safeActor(value) {
+  const actor = String(value || '').trim();
+  return actor ? actor.slice(0, 320) : null;
+}
+
+export async function claimWa2LabelEventCursor() {
+  await pool.query(
+    `INSERT INTO wa2_label_event_cursors (tenant_id)
+     VALUES ($1) ON CONFLICT (tenant_id) DO NOTHING`,
+    [tenantId()],
+  );
+  const result = await pool.query(
+    `WITH candidate AS (
+       SELECT tenant_id FROM wa2_label_event_cursors
+       WHERE tenant_id = $1
+         AND next_attempt_at <= now()
+         AND (
+           status IN ('IDLE', 'ERROR')
+           OR (status = 'RUNNING' AND locked_at < now() - interval '5 minutes')
+         )
+       FOR UPDATE SKIP LOCKED
+     )
+     UPDATE wa2_label_event_cursors cursor
+     SET status = 'RUNNING', locked_at = now(), updated_at = now()
+     FROM candidate
+     WHERE cursor.tenant_id = candidate.tenant_id
+     RETURNING cursor.*`,
+    [tenantId()],
+  );
+  return result.rows[0] || null;
+}
+
+export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const receiptResult = await client.query(
+      `INSERT INTO wa2_label_event_receipts (
+         tenant_id, event_id, remote_instance_id, remote_chat_id, jid,
+         phone_normalized, remote_label_id, operation, source,
+         eligible_for_crm, ineligible_reason, observed_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       ON CONFLICT (tenant_id, event_id) DO NOTHING
+       RETURNING *`,
+      [
+        tenantId(), event.eventId, event.instanceId, event.chatId, event.jid,
+        event.phoneNormalized, event.waLabelId, event.operation, event.source,
+        event.eligibleForCrm, event.ineligibleReason, event.observedAt,
+      ],
+    );
+    if (receiptResult.rowCount === 0) {
+      await client.query('COMMIT');
+      return { duplicate: true, action: 'IGNORED', code: 'DUPLICATE_EVENT' };
+    }
+    const receipt = receiptResult.rows[0];
+    const instanceResult = await client.query(
+      `SELECT * FROM wa2_instances
+       WHERE tenant_id = $1 AND remote_instance_id = $2 AND enabled = true`,
+      [tenantId(), event.instanceId],
+    );
+    const instance = instanceResult.rows[0] || null;
+    let link = null;
+    let lead = null;
+    if (instance) {
+      const links = await client.query(
+        `SELECT link.*, lead.stage, lead.meta_lead_id
+         FROM wa2_contact_links link
+         JOIN leads lead ON lead.tenant_id = link.tenant_id AND lead.id = link.lead_id
+         WHERE link.tenant_id = $1 AND link.wa2_instance_id = $2
+           AND link.remote_chat_id = $3 AND link.unlinked_at IS NULL
+         FOR UPDATE OF link, lead`,
+        [tenantId(), instance.id, event.chatId],
+      );
+      if (links.rowCount === 1) {
+        link = links.rows[0];
+        lead = { id: link.lead_id, stage: link.stage, meta_lead_id: link.meta_lead_id };
+      }
+    }
+
+    let decision;
+    let eventBindingStages = [];
+    let currentCrmLabelStages = [];
+    if (event.source === 'WHATSAPP' && event.operation === 'APPLY' && event.eligibleForCrm) {
+      if (!instance) {
+        decision = { action: 'CONFLICT', code: 'INSTANCE_NOT_CONFIGURED' };
+      } else if (!lead) {
+        decision = { action: 'CONFLICT', code: 'CHAT_NOT_LINKED_EXACTLY_ONCE' };
+      } else {
+        const bindings = await client.query(
+          `SELECT remote_label_id, array_agg(stage ORDER BY stage) AS stages
+           FROM wa2_label_bindings
+           WHERE tenant_id = $1 AND wa2_instance_id = $2 AND enabled = true
+             AND remote_label_id = ANY($3::text[])
+           GROUP BY remote_label_id`,
+          [tenantId(), instance.id, [...new Set([event.waLabelId, ...currentRemoteLabelIds])]],
+        );
+        const byLabel = new Map(bindings.rows.map((row) => [row.remote_label_id, row.stages]));
+        eventBindingStages = byLabel.get(event.waLabelId) || [];
+        currentCrmLabelStages = currentRemoteLabelIds
+          .map((id) => byLabel.get(id))
+          .filter(Boolean);
+      }
+    }
+    decision ||= decideInboundLabelAction({
+      event,
+      currentStage: lead?.stage,
+      eventBindingStages,
+      currentCrmLabelStages,
+    });
+    const actionResult = await client.query(
+      `INSERT INTO wa2_inbound_label_actions (
+         tenant_id, receipt_id, wa2_instance_id, wa2_contact_link_id,
+         lead_id, target_stage, action, detail_code
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [
+        tenantId(), receipt.id, instance?.id || null, link?.id || null,
+        lead?.id || null, decision.targetStage || null, decision.action, decision.code,
+      ],
+    );
+    const action = actionResult.rows[0];
+    if (decision.action === 'CONFLICT') {
+      await client.query(
+        `INSERT INTO wa2_label_conflicts (
+           tenant_id, action_id, lead_id, conflict_type, details
+         ) VALUES ($1,$2,$3,$4,$5)`,
+        [
+          tenantId(), action.id, lead?.id || null, decision.code,
+          { currentRemoteLabelIds, eventBindingStages },
+        ],
+      );
+    } else if (decision.action === 'PENDING_CONFIRMATION') {
+      await client.query(
+        `INSERT INTO wa2_stage_confirmations (
+           tenant_id, action_id, lead_id, wa2_contact_link_id, requested_stage
+         ) VALUES ($1,$2,$3,$4,'MATRICULATED')`,
+        [tenantId(), action.id, lead.id, link.id],
+      );
+    } else if (decision.action === 'STAGE_CHANGED') {
+      const timestampColumn = {
+        CONTACTED: 'first_contact_at',
+        QUALIFIED: 'qualified_at',
+        VESTIBULAR_COMPLETED: 'opportunity_at',
+        LOST: 'lost_at',
+      }[decision.targetStage];
+      const timestampUpdate = timestampColumn
+        ? `, ${timestampColumn} = COALESCE(${timestampColumn}, $5)`
+        : '';
+      const updateValues = [tenantId(), lead.id, decision.targetStage, lead.stage];
+      if (timestampColumn) updateValues.push(new Date(event.observedAt));
+      const updated = await client.query(
+        `UPDATE leads SET stage = $3, updated_at = now() ${timestampUpdate}
+         WHERE tenant_id = $1 AND id = $2 AND stage = $4 RETURNING *`,
+        updateValues,
+      );
+      if (updated.rowCount !== 1) throw new Error('Etapa do lead mudou durante o evento WA2');
+      const history = await client.query(
+        `INSERT INTO lead_stage_history (
+           tenant_id, lead_id, previous_stage, new_stage, origin, observation
+         ) VALUES ($1,$2,$3,$4,'WHATSAPP',$5) RETURNING id`,
+        [
+          tenantId(), lead.id, lead.stage, decision.targetStage,
+          `Evento WA2 ${event.eventId}`,
+        ],
+      );
+      const eventName = getStageEventName(decision.targetStage);
+      if (eventName && lead.meta_lead_id) {
+        const metaEvent = await createOrGetMetaEvent(client, {
+          lead: updated.rows[0],
+          eventName,
+          eventTime: new Date(event.observedAt),
+          mode: process.env.META_TEST_MODE === 'true' ? 'test' : 'live',
+        });
+        await enqueueConversionJob(client, metaEvent);
+      }
+      void history;
+    }
+    await client.query('COMMIT');
+    return { duplicate: false, action: decision.action, code: decision.code };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function completeWa2LabelEventPage(cursor, results) {
+  const counts = results.reduce((total, result) => {
+    if (result.action === 'CONFLICT') total.conflicts += 1;
+    else if (result.action === 'PENDING_CONFIRMATION') total.pending += 1;
+    else if (result.action === 'IGNORED') total.ignored += 1;
+    else total.processed += 1;
+    return total;
+  }, { processed: 0, ignored: 0, conflicts: 0, pending: 0 });
+  await pool.query(
+    `UPDATE wa2_label_event_cursors
+     SET cursor_value = COALESCE($2, cursor_value), status = 'IDLE',
+         locked_at = NULL, next_attempt_at = now(),
+         processed_count = processed_count + $3,
+         ignored_count = ignored_count + $4,
+         conflict_count = conflict_count + $5,
+         pending_count = pending_count + $6,
+         last_error_code = NULL, last_error_message = NULL, updated_at = now()
+     WHERE tenant_id = $1 AND status = 'RUNNING'`,
+    [tenantId(), cursor, counts.processed, counts.ignored, counts.conflicts, counts.pending],
+  );
+}
+
+export async function failWa2LabelEventCursor(error, retryAt) {
+  await pool.query(
+    `UPDATE wa2_label_event_cursors
+     SET status = 'ERROR', locked_at = NULL, next_attempt_at = $2,
+         last_error_code = $3, last_error_message = $4, updated_at = now()
+     WHERE tenant_id = $1`,
+    [tenantId(), retryAt, error.code, error.message],
+  );
+}
+
+export async function createMetaHistoricalImport({ pageId, formId, actor }) {
+  const result = await pool.query(
+    `INSERT INTO meta_historical_imports (tenant_id, page_id, form_id, started_by)
+     VALUES ($1,$2,$3,$4) RETURNING *`,
+    [tenantId(), pageId, formId, safeActor(actor)],
+  );
+  return result.rows[0];
+}
+
+export async function claimMetaHistoricalImport() {
+  const result = await pool.query(
+    `WITH candidate AS (
+       SELECT id FROM meta_historical_imports
+       WHERE tenant_id = $1
+         AND (
+           (status = 'PENDING' AND next_attempt_at <= now())
+           OR (status = 'RUNNING' AND locked_at < now() - interval '5 minutes')
+         )
+       ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1
+     )
+     UPDATE meta_historical_imports run
+     SET status = 'RUNNING', locked_at = now(),
+         started_at = COALESCE(started_at, now()), updated_at = now()
+     FROM candidate WHERE run.id = candidate.id RETURNING run.*`,
+    [tenantId()],
+  );
+  return result.rows[0] || null;
+}
+
+export async function recordMetaHistoricalLead(importId, leadInput) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const lead = await upsertLead(leadInput, { client });
+    const item = await client.query(
+      `INSERT INTO meta_historical_import_items (
+         tenant_id, import_id, meta_lead_id, lead_id, result
+       ) VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (tenant_id, import_id, meta_lead_id) DO NOTHING
+       RETURNING id`,
+      [
+        tenantId(), importId, String(leadInput.metaLeadId), lead.id,
+        lead.was_inserted ? 'CREATED' : 'UPDATED',
+      ],
+    );
+    if (item.rowCount === 1) {
+      await client.query(
+        `UPDATE meta_historical_imports
+         SET received_count = received_count + 1,
+             created_count = created_count + $3,
+             updated_count = updated_count + $4, updated_at = now()
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantId(), importId, lead.was_inserted ? 1 : 0, lead.was_inserted ? 0 : 1],
+      );
+    }
+    await client.query('COMMIT');
+    return lead;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function metaHistoricalImportIsActive(id) {
+  const result = await pool.query(
+    `SELECT status = 'RUNNING' AS active
+     FROM meta_historical_imports WHERE tenant_id = $1 AND id = $2`,
+    [tenantId(), id],
+  );
+  return result.rows[0]?.active === true;
+}
+
+export async function recordMetaHistoricalInvalid(importId, metaLeadId, errorCode) {
+  const result = await pool.query(
+    `WITH inserted AS (
+       INSERT INTO meta_historical_import_items (
+         tenant_id, import_id, meta_lead_id, result, error_code
+       ) VALUES ($1,$2,$3,'INVALID',$4)
+       ON CONFLICT (tenant_id, import_id, meta_lead_id) DO NOTHING RETURNING id
+     )
+     UPDATE meta_historical_imports
+     SET received_count = received_count + (SELECT count(*) FROM inserted),
+         invalid_count = invalid_count + (SELECT count(*) FROM inserted),
+         updated_at = now()
+     WHERE tenant_id = $1 AND id = $2`,
+    [tenantId(), importId, String(metaLeadId).slice(0, 100), errorCode],
+  );
+  return result.rowCount;
+}
+
+export async function completeMetaHistoricalPage(id, { nextCursor, hasMore }) {
+  await pool.query(
+    `UPDATE meta_historical_imports
+     SET cursor_value = $3, status = $4, locked_at = NULL,
+         completed_at = CASE WHEN $4 = 'COMPLETED' THEN now() ELSE NULL END,
+         updated_at = now()
+     WHERE tenant_id = $1 AND id = $2 AND status = 'RUNNING'`,
+    [tenantId(), id, nextCursor, hasMore ? 'PENDING' : 'COMPLETED'],
+  );
+}
+
+export async function pauseMetaHistoricalImport(id, error) {
+  await pool.query(
+    `UPDATE meta_historical_imports
+     SET status = 'PAUSED', locked_at = NULL,
+         last_error_code = $3, last_error_message = $4, updated_at = now()
+     WHERE tenant_id = $1 AND id = $2 AND status = 'RUNNING'`,
+    [tenantId(), id, error.code, error.message],
+  );
+}
+
+export async function setMetaHistoricalImportStatus(id, action) {
+  const status = action === 'resume' ? 'PENDING' : 'CANCELLED';
+  const allowed = action === 'resume'
+    ? ['PAUSED', 'FAILED']
+    : ['PENDING', 'PAUSED', 'RUNNING'];
+  const result = await pool.query(
+    `UPDATE meta_historical_imports
+     SET status = $3, locked_at = NULL, next_attempt_at = now(),
+         last_error_code = NULL, last_error_message = NULL, updated_at = now()
+     WHERE tenant_id = $1 AND id = $2 AND status = ANY($4::text[]) RETURNING *`,
+    [tenantId(), id, status, allowed],
+  );
+  return result.rows[0] || null;
+}
+
+export async function createWa2Reconciliation({ instanceId, actor }) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const instance = await client.query(
+      `SELECT * FROM wa2_instances
+       WHERE tenant_id = $1 AND id = $2 AND enabled = true FOR UPDATE`,
+      [tenantId(), instanceId],
+    );
+    if (!instance.rows[0]) throw new Wa2DataError('Instância inválida', 'WA2_INSTANCE_DISABLED');
+    const run = await client.query(
+      `INSERT INTO wa2_reconciliation_runs (
+         tenant_id, wa2_instance_id, started_by
+       ) VALUES ($1,$2,$3) RETURNING *`,
+      [tenantId(), instanceId, safeActor(actor)],
+    );
+    const items = await client.query(
+      `INSERT INTO wa2_reconciliation_items (tenant_id, run_id, lead_id)
+       SELECT tenant_id, $2, id FROM leads WHERE tenant_id = $1
+       ON CONFLICT (tenant_id, run_id, lead_id) DO NOTHING`,
+      [tenantId(), run.rows[0].id],
+    );
+    await client.query(
+      `UPDATE wa2_reconciliation_runs SET total_count = $3
+       WHERE tenant_id = $1 AND id = $2`,
+      [tenantId(), run.rows[0].id, items.rowCount],
+    );
+    await client.query('COMMIT');
+    return { ...run.rows[0], total_count: items.rowCount };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function claimWa2ReconciliationItem() {
+  const result = await pool.query(
+    `WITH candidate AS (
+       SELECT item.id
+       FROM wa2_reconciliation_items item
+       JOIN wa2_reconciliation_runs run
+         ON run.tenant_id = item.tenant_id AND run.id = item.run_id
+       WHERE item.tenant_id = $1
+         AND run.status IN ('PENDING', 'RUNNING')
+         AND (
+           item.status = 'PENDING'
+           OR (item.status = 'RUNNING' AND item.locked_at < now() - interval '5 minutes')
+         )
+         AND item.attempts < 5
+       ORDER BY item.created_at
+       FOR UPDATE OF item SKIP LOCKED LIMIT 1
+     )
+     UPDATE wa2_reconciliation_items item
+     SET status = 'RUNNING', attempts = attempts + 1,
+         locked_at = now(), updated_at = now()
+     FROM candidate
+     WHERE item.id = candidate.id
+     RETURNING item.*,
+       (SELECT phone_normalized FROM leads
+        WHERE id = item.lead_id AND tenant_id = item.tenant_id) AS phone_normalized,
+       (SELECT remote_instance_id FROM wa2_instances
+        WHERE id = (SELECT wa2_instance_id FROM wa2_reconciliation_runs
+                    WHERE id = item.run_id AND tenant_id = item.tenant_id)
+          AND tenant_id = item.tenant_id) AS remote_instance_id`,
+    [tenantId()],
+  );
+  if (!result.rows[0]) return null;
+  await pool.query(
+    `UPDATE wa2_reconciliation_runs SET status = 'RUNNING',
+       started_at = COALESCE(started_at, now()), locked_at = now(), updated_at = now()
+     WHERE tenant_id = $1 AND id = $2`,
+    [tenantId(), result.rows[0].run_id],
+  );
+  return result.rows[0];
+}
+
+export async function completeWa2ReconciliationItem(
+  item,
+  { contact, chat, remoteLabelIds = [] },
+) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const locked = await client.query(
+      `SELECT item.*, lead.stage, lead.phone_normalized, run.wa2_instance_id
+       FROM wa2_reconciliation_items item
+       JOIN leads lead ON lead.tenant_id = item.tenant_id AND lead.id = item.lead_id
+       JOIN wa2_reconciliation_runs run ON run.tenant_id = item.tenant_id AND run.id = item.run_id
+       WHERE item.tenant_id = $1 AND item.id = $2 AND item.status = 'RUNNING'
+       FOR UPDATE OF item, lead`,
+      [tenantId(), item.id],
+    );
+    const row = locked.rows[0];
+    if (!row) throw new Error('Item de reconciliação indisponível');
+    const active = await client.query(
+      `SELECT * FROM wa2_contact_links
+       WHERE tenant_id = $1 AND wa2_instance_id = $2
+         AND (lead_id = $3 OR remote_chat_id = $4) AND unlinked_at IS NULL
+       FOR UPDATE`,
+      [tenantId(), row.wa2_instance_id, row.lead_id, chat.id],
+    );
+    const same = active.rows.find(
+      (link) => link.lead_id === row.lead_id && link.remote_chat_id === chat.id,
+    );
+    if (active.rows.some((link) => link.id !== same?.id)) {
+      await finishReconciliationItem(client, row, 'CONFLICT');
+      await client.query('COMMIT');
+      return 'CONFLICT';
+    }
+    let link = same;
+    let baseResult = 'ALREADY_LINKED';
+    if (!link) {
+      const inserted = await client.query(
+        `INSERT INTO wa2_contact_links (
+           tenant_id, lead_id, wa2_instance_id, remote_contact_id,
+           remote_chat_id, jid, phone_normalized, linked_by
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,'historical-reconciliation')
+         RETURNING *`,
+        [
+          tenantId(), row.lead_id, row.wa2_instance_id, contact.id,
+          chat.id, chat.jid, row.phone_normalized,
+        ],
+      );
+      link = inserted.rows[0];
+      baseResult = 'LINKED';
+    }
+    const bindings = await client.query(
+      `SELECT stage, remote_label_id FROM wa2_label_bindings
+       WHERE tenant_id = $1 AND wa2_instance_id = $2 AND enabled = true`,
+      [tenantId(), row.wa2_instance_id],
+    );
+    const currentBindings = bindings.rows.filter(
+      (binding) => remoteLabelIds.includes(binding.remote_label_id),
+    );
+    const distinctLabels = [...new Set(currentBindings.map((binding) => binding.remote_label_id))];
+    if (distinctLabels.length > 1) {
+      await finishReconciliationItem(client, row, 'CONFLICT');
+      await client.query('COMMIT');
+      return 'CONFLICT';
+    }
+    if (distinctLabels.length === 1) {
+      const decision = decideInboundLabelAction({
+        event: { source: 'WHATSAPP', operation: 'APPLY', eligibleForCrm: true },
+        currentStage: row.stage,
+        eventBindingStages: currentBindings.map((binding) => binding.stage),
+        currentCrmLabelStages: [currentBindings.map((binding) => binding.stage)],
+      });
+      if (decision.action === 'STAGE_CHANGED') {
+        const timestampColumn = {
+          CONTACTED: 'first_contact_at',
+          QUALIFIED: 'qualified_at',
+          VESTIBULAR_COMPLETED: 'opportunity_at',
+          LOST: 'lost_at',
+        }[decision.targetStage];
+        const timestampUpdate = timestampColumn
+          ? `, ${timestampColumn} = COALESCE(${timestampColumn}, now())`
+          : '';
+        await client.query(
+          `UPDATE leads SET stage = $3, updated_at = now() ${timestampUpdate}
+           WHERE tenant_id = $1 AND id = $2`,
+          [tenantId(), row.lead_id, decision.targetStage],
+        );
+        await client.query(
+          `INSERT INTO lead_stage_history (
+             tenant_id, lead_id, previous_stage, new_stage, origin, observation
+           ) VALUES ($1,$2,$3,$4,'WHATSAPP','Reconciliação histórica WA2')`,
+          [tenantId(), row.lead_id, row.stage, decision.targetStage],
+        );
+      } else if (['CONFLICT', 'PENDING_CONFIRMATION'].includes(decision.action)) {
+        await finishReconciliationItem(client, row, 'CONFLICT');
+        await client.query('COMMIT');
+        return 'CONFLICT';
+      }
+    } else {
+      const target = bindings.rows.find((binding) => binding.stage === row.stage);
+      if (target) {
+        await client.query(
+          `INSERT INTO wa2_label_jobs (
+             tenant_id, lead_id, wa2_instance_id, wa2_contact_link_id,
+             reconciliation_item_id, target_stage, target_remote_label_id
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+           ON CONFLICT (tenant_id, reconciliation_item_id)
+             WHERE reconciliation_item_id IS NOT NULL DO NOTHING`,
+          [
+            tenantId(), row.lead_id, row.wa2_instance_id, link.id,
+            row.id, row.stage, target.remote_label_id,
+          ],
+        );
+        baseResult = 'SYNC_SCHEDULED';
+      } else {
+        await finishReconciliationItem(client, row, 'CONFLICT');
+        await client.query('COMMIT');
+        return 'CONFLICT';
+      }
+    }
+    await finishReconciliationItem(client, row, baseResult);
+    await client.query('COMMIT');
+    return baseResult;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function finishReconciliationItem(client, item, result) {
+  await client.query(
+    `UPDATE wa2_reconciliation_items
+     SET status = 'DONE', result = $3, locked_at = NULL,
+         finished_at = now(), updated_at = now()
+     WHERE tenant_id = $1 AND id = $2`,
+    [tenantId(), item.id, result],
+  );
+  await client.query(
+    `UPDATE wa2_reconciliation_runs run
+     SET processed_count = (
+       SELECT count(*) FROM wa2_reconciliation_items
+       WHERE tenant_id = run.tenant_id AND run_id = run.id
+         AND status IN ('DONE', 'FAILED')
+     ),
+     status = CASE WHEN NOT EXISTS (
+       SELECT 1 FROM wa2_reconciliation_items
+       WHERE tenant_id = run.tenant_id AND run_id = run.id
+         AND status IN ('PENDING', 'RUNNING')
+     ) THEN 'COMPLETED' ELSE 'RUNNING' END,
+     completed_at = CASE WHEN NOT EXISTS (
+       SELECT 1 FROM wa2_reconciliation_items
+       WHERE tenant_id = run.tenant_id AND run_id = run.id
+         AND status IN ('PENDING', 'RUNNING')
+     ) THEN now() ELSE NULL END,
+     updated_at = now()
+     WHERE run.tenant_id = $1 AND run.id = $2`,
+    [tenantId(), item.run_id],
+  );
+}
+
+export async function failWa2ReconciliationItem(item, result, errorCode, retry) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE wa2_reconciliation_items
+       SET status = $3, result = CASE WHEN $3 = 'FAILED' THEN $4 ELSE NULL END,
+           locked_at = NULL, last_error_code = $5,
+           finished_at = CASE WHEN $3 = 'FAILED' THEN now() ELSE NULL END,
+           updated_at = now()
+       WHERE tenant_id = $1 AND id = $2`,
+      [tenantId(), item.id, retry ? 'PENDING' : 'FAILED', result, errorCode],
+    );
+    if (!retry) {
+      await client.query(
+        `UPDATE wa2_reconciliation_runs run
+         SET processed_count = (
+           SELECT count(*) FROM wa2_reconciliation_items
+           WHERE tenant_id = run.tenant_id AND run_id = run.id
+             AND status IN ('DONE', 'FAILED')
+         ),
+         status = CASE WHEN NOT EXISTS (
+           SELECT 1 FROM wa2_reconciliation_items
+           WHERE tenant_id = run.tenant_id AND run_id = run.id
+             AND status IN ('PENDING', 'RUNNING')
+         ) THEN 'COMPLETED' ELSE 'RUNNING' END,
+         completed_at = CASE WHEN NOT EXISTS (
+           SELECT 1 FROM wa2_reconciliation_items
+           WHERE tenant_id = run.tenant_id AND run_id = run.id
+             AND status IN ('PENDING', 'RUNNING')
+         ) THEN now() ELSE NULL END,
+         updated_at = now()
+         WHERE run.tenant_id = $1 AND run.id = $2`,
+        [tenantId(), item.run_id],
+      );
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function retryWa2ReconciliationFailures(runId) {
+  const result = await pool.query(
+    `UPDATE wa2_reconciliation_items
+     SET status = 'PENDING', result = NULL, locked_at = NULL,
+         last_error_code = NULL, finished_at = NULL, updated_at = now()
+     WHERE tenant_id = $1 AND run_id = $2
+       AND status = 'FAILED' AND attempts < 5 RETURNING id`,
+    [tenantId(), runId],
+  );
+  if (result.rowCount > 0) {
+    await pool.query(
+      `UPDATE wa2_reconciliation_runs
+       SET status = 'PENDING', completed_at = NULL,
+           processed_count = (
+             SELECT count(*) FROM wa2_reconciliation_items
+             WHERE tenant_id = $1 AND run_id = $2
+               AND status IN ('DONE', 'FAILED')
+           ),
+           updated_at = now()
+       WHERE tenant_id = $1 AND id = $2`,
+      [tenantId(), runId],
+    );
+  }
+  return result.rowCount;
+}
+
+export async function decideWa2StageConfirmation(id, decision, actor) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const selected = await client.query(
+      `SELECT confirmation.*, lead.stage, lead.meta_lead_id
+       FROM wa2_stage_confirmations confirmation
+       JOIN leads lead ON lead.tenant_id = confirmation.tenant_id
+         AND lead.id = confirmation.lead_id
+       WHERE confirmation.tenant_id = $1 AND confirmation.id = $2
+         AND confirmation.status = 'PENDING'
+       FOR UPDATE OF confirmation, lead`,
+      [tenantId(), id],
+    );
+    const confirmation = selected.rows[0];
+    if (!confirmation) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    if (decision === 'reject') {
+      await client.query(
+        `UPDATE wa2_stage_confirmations
+         SET status = 'REJECTED', confirmed_at = now(), confirmed_by = $3
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantId(), id, safeActor(actor)],
+      );
+      await client.query('COMMIT');
+      return { status: 'REJECTED' };
+    }
+    if (!canTransition(confirmation.stage, 'MATRICULATED')) {
+      throw new Error('Transição oficial para matrícula não está disponível');
+    }
+    const lead = await client.query(
+      `UPDATE leads SET stage = 'MATRICULATED',
+         converted_at = COALESCE(converted_at, now()),
+         matriculated_at = COALESCE(matriculated_at, now()), updated_at = now()
+       WHERE tenant_id = $1 AND id = $2 AND stage = $3 RETURNING *`,
+      [tenantId(), confirmation.lead_id, confirmation.stage],
+    );
+    await client.query(
+      `INSERT INTO lead_stage_history (
+         tenant_id, lead_id, previous_stage, new_stage, origin, changed_by, observation
+       ) VALUES ($1,$2,$3,'MATRICULATED','MANUAL',$4,$5)`,
+      [
+        tenantId(), confirmation.lead_id, confirmation.stage, safeActor(actor),
+        `Confirmação administrativa da solicitação WA2 ${confirmation.action_id}`,
+      ],
+    );
+    if (lead.rows[0]?.meta_lead_id) {
+      const metaEvent = await createOrGetMetaEvent(client, {
+        lead: lead.rows[0],
+        eventName: 'Converted',
+        eventTime: lead.rows[0].converted_at,
+        mode: process.env.META_TEST_MODE === 'true' ? 'test' : 'live',
+      });
+      await enqueueConversionJob(client, metaEvent);
+    }
+    await client.query(
+      `UPDATE wa2_stage_confirmations
+       SET status = 'CONFIRMED', confirmed_at = now(), confirmed_by = $3
+       WHERE tenant_id = $1 AND id = $2`,
+      [tenantId(), id, safeActor(actor)],
+    );
+    await client.query('COMMIT');
+    return { status: 'CONFIRMED' };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function listHistoricalOperations() {
+  const [cursor, imports, reconciliations, conflicts, confirmations] = await Promise.all([
+    pool.query('SELECT * FROM wa2_label_event_cursors WHERE tenant_id = $1', [tenantId()]),
+    pool.query(
+      `SELECT * FROM meta_historical_imports
+       WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 20`,
+      [tenantId()],
+    ),
+    pool.query(
+      `SELECT run.*, instance.name AS instance_name,
+              (SELECT jsonb_object_agg(result, count) FROM (
+                SELECT result, count(*)::int AS count
+                FROM wa2_reconciliation_items item
+                WHERE item.tenant_id = run.tenant_id AND item.run_id = run.id
+                  AND result IS NOT NULL GROUP BY result
+              ) totals) AS results
+       FROM wa2_reconciliation_runs run
+       JOIN wa2_instances instance
+         ON instance.tenant_id = run.tenant_id AND instance.id = run.wa2_instance_id
+       WHERE run.tenant_id = $1 ORDER BY run.created_at DESC LIMIT 20`,
+      [tenantId()],
+    ),
+    pool.query(
+      `SELECT conflict.*, lead.name AS lead_name
+       FROM wa2_label_conflicts conflict
+       LEFT JOIN leads lead ON lead.tenant_id = conflict.tenant_id
+         AND lead.id = conflict.lead_id
+       WHERE conflict.tenant_id = $1 AND conflict.status = 'OPEN'
+       ORDER BY conflict.created_at DESC LIMIT 50`,
+      [tenantId()],
+    ),
+    pool.query(
+      `SELECT confirmation.*, lead.name AS lead_name
+       FROM wa2_stage_confirmations confirmation
+       JOIN leads lead ON lead.tenant_id = confirmation.tenant_id
+         AND lead.id = confirmation.lead_id
+       WHERE confirmation.tenant_id = $1 AND confirmation.status = 'PENDING'
+       ORDER BY confirmation.created_at DESC LIMIT 50`,
+      [tenantId()],
+    ),
+  ]);
+  return {
+    cursor: cursor.rows[0] || null,
+    imports: imports.rows,
+    reconciliations: reconciliations.rows,
+    conflicts: conflicts.rows,
+    confirmations: confirmations.rows,
+  };
 }
 
 export async function recordWorkerHeartbeat({ started = false } = {}) {

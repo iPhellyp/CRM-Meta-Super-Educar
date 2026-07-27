@@ -11,6 +11,8 @@ const RESOURCE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const CONNECT_MODES = new Set(['auto', 'resume', 'new_qr']);
 const SYNC_SCOPES = new Set(['quick', 'catalog', 'history']);
+const LABEL_EVENT_OPERATIONS = new Set(['APPLY', 'REMOVE']);
+const LABEL_EVENT_SOURCES = new Set(['INTERNAL_API', 'WHATSAPP', 'UNKNOWN']);
 
 export class Wa2Error extends Error {
   constructor(message, {
@@ -235,6 +237,99 @@ function sanitizeLabels(payload) {
     });
   }
   return value.labels.map(sanitizeLabel);
+}
+
+function sanitizeLabelEvent(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Wa2Error('Evento de etiqueta WA2 incompatível', {
+      code: 'WA2_LABEL_EVENT_INVALID',
+    });
+  }
+  const eventId = requiredRemoteText(value.eventId, 36, 'WA2_LABEL_EVENT_INVALID');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(eventId)) {
+    throw new Wa2Error('Evento de etiqueta WA2 incompatível', {
+      code: 'WA2_LABEL_EVENT_INVALID',
+    });
+  }
+  const instanceId = validateWa2InstanceId(
+    requiredRemoteText(value.instanceId, 128, 'WA2_LABEL_EVENT_INVALID'),
+  );
+  const chatId = validateWa2ResourceId(
+    requiredRemoteText(value.chatId, 128, 'WA2_LABEL_EVENT_INVALID'),
+    'chat',
+  );
+  const jid = requiredRemoteText(value.jid, 255, 'WA2_LABEL_EVENT_INVALID').toLowerCase();
+  const jidType = classifyWa2Jid(jid);
+  const phoneNormalized = value.phoneNormalized == null
+    ? null
+    : validateNormalizedPhone(value.phoneNormalized);
+  if (
+    !LABEL_EVENT_OPERATIONS.has(value.operation) ||
+    !LABEL_EVENT_SOURCES.has(value.source) ||
+    typeof value.eligibleForCrm !== 'boolean'
+  ) {
+    throw new Wa2Error('Evento de etiqueta WA2 incompatível', {
+      code: 'WA2_LABEL_EVENT_INVALID',
+    });
+  }
+  const observedAt = parseIsoDate(value.observedAt);
+  if (!observedAt) {
+    throw new Wa2Error('Evento de etiqueta WA2 incompatível', {
+      code: 'WA2_LABEL_EVENT_INVALID',
+    });
+  }
+  if (
+    value.eligibleForCrm &&
+    (
+      !phoneNormalized ||
+      !['individual_phone', 'lid'].includes(jidType) ||
+      (
+        jidType === 'individual_phone' &&
+        individualJidPhone(jid).phoneNormalized !== phoneNormalized
+      )
+    )
+  ) {
+    throw new Wa2Error('Elegibilidade WA2 divergente do contato', {
+      code: 'WA2_LABEL_EVENT_INVALID',
+    });
+  }
+  return {
+    eventId,
+    instanceId,
+    chatId,
+    jid,
+    phoneNormalized,
+    waLabelId: validateWa2ResourceId(
+      requiredRemoteText(value.waLabelId, 128, 'WA2_LABEL_EVENT_INVALID'),
+      'etiqueta',
+    ),
+    operation: value.operation,
+    source: value.source,
+    observedAt: observedAt.toISOString(),
+    eligibleForCrm: value.eligibleForCrm,
+    ineligibleReason: optionalRemoteText(
+      value.ineligibleReason,
+      80,
+      'WA2_LABEL_EVENT_INVALID',
+    ),
+  };
+}
+
+function sanitizeLabelEvents(payload) {
+  const value = objectPayload(payload);
+  if (!Array.isArray(value.events) || typeof value.hasMore !== 'boolean') {
+    throw new Wa2Error('Feed de etiquetas WA2 incompatível', {
+      code: 'WA2_LABEL_EVENTS_INVALID',
+    });
+  }
+  const nextCursor = value.nextCursor == null
+    ? null
+    : requiredRemoteText(value.nextCursor, 500, 'WA2_LABEL_EVENTS_INVALID');
+  return {
+    events: value.events.map(sanitizeLabelEvent),
+    nextCursor,
+    hasMore: value.hasMore,
+  };
 }
 
 function sanitizeLabelMutation(payload, expectedOperation) {
@@ -675,6 +770,23 @@ export function createWa2Client({
   return {
     getHealth: () => request('/api/internal/v1/health', { parse: sanitizeHealth }),
     listInstances: () => request('/api/internal/v1/instances', { parse: sanitizeInstances }),
+    listLabelEvents: ({ after = null, limit = 100 } = {}) => {
+      if (
+        (after != null && !/^[A-Za-z0-9_-]{1,500}$/.test(String(after))) ||
+        !Number.isSafeInteger(limit) ||
+        limit < 1 ||
+        limit > 200
+      ) {
+        throw new Wa2Error('Paginação do feed WA2 inválida', {
+          code: 'WA2_LABEL_EVENTS_PAGE_INVALID',
+        });
+      }
+      const search = new URLSearchParams({ limit: String(limit) });
+      if (after) search.set('after', String(after));
+      return request(`/api/internal/v1/label-events?${search}`, {
+        parse: sanitizeLabelEvents,
+      });
+    },
     getInstanceStatus: (instanceId) => request(instancePath(instanceId, '/status'), {
       parse: sanitizeStatus,
     }),
@@ -758,6 +870,8 @@ function defaultClient(options) {
 
 export const getWa2Health = (options) => defaultClient(options).getHealth();
 export const listWa2Instances = (options) => defaultClient(options).listInstances();
+export const listWa2LabelEvents = (page, options) =>
+  defaultClient(options).listLabelEvents(page);
 export const getWa2InstanceStatus = (instanceId, options) =>
   defaultClient(options).getInstanceStatus(instanceId);
 export const getWa2InstanceQr = (instanceId, options) =>

@@ -1,30 +1,47 @@
 import 'dotenv/config';
 import {
+  claimMetaHistoricalImport,
+  claimWa2LabelEventCursor,
+  claimWa2ReconciliationItem,
   claimNextWa2LabelJob,
   claimNextJob,
   closePool,
   completeWa2LabelJob,
+  completeMetaHistoricalPage,
+  completeWa2LabelEventPage,
+  completeWa2ReconciliationItem,
   completeJob,
   failWa2LabelJob,
+  failWa2LabelEventCursor,
+  failWa2ReconciliationItem,
   failJob,
   getMetaEventContext,
   getWa2LabelJobContext,
   markMetaEventFailed,
   markMetaEventProcessing,
   markMetaEventSent,
+  metaHistoricalImportIsActive,
   migrate,
+  pauseMetaHistoricalImport,
+  processWa2LabelEvent,
+  recordMetaHistoricalInvalid,
+  recordMetaHistoricalLead,
   recordWorkerHeartbeat,
   requeueWa2LabelJobForRemoteConfirmation,
   validateDatabaseConfig,
 } from './db.js';
 import {
+  importLeadPayload,
   importLeadgenId,
   isTemporaryMetaError,
+  listMetaFormLeadsPage,
   sendMetaConversion,
   validateMetaConfig,
 } from './meta.js';
 import {
   applyWa2ChatLabel,
+  getWa2ContactByPhone,
+  listWa2LabelEvents,
   listWa2ChatLabels,
   removeWa2ChatLabel,
   validateWa2Config,
@@ -36,6 +53,11 @@ import {
   wa2LabelJobCompletionDecision,
   wa2LabelRetryDelayMs,
 } from './wa2-label-sync.js';
+import {
+  historicalRetryDelayMs,
+  reconciliationFailureResult,
+  sanitizeHistoricalError,
+} from './historical-sync.js';
 
 const MAX_ATTEMPTS = 6;
 const IDLE_DELAY_MS = 2_000;
@@ -142,6 +164,127 @@ async function handleWa2LabelFailure(job, error) {
   }));
 }
 
+async function processWa2LabelFeed() {
+  const cursor = await claimWa2LabelEventCursor();
+  if (!cursor) return false;
+  try {
+    const page = await listWa2LabelEvents({
+      after: cursor.cursor_value,
+      limit: 100,
+    });
+    const results = [];
+    for (const event of page.events) {
+      let currentLabelIds = [];
+      if (
+        event.source === 'WHATSAPP' &&
+        event.operation === 'APPLY' &&
+        event.eligibleForCrm
+      ) {
+        const labels = await listWa2ChatLabels(event.instanceId, event.chatId);
+        currentLabelIds = labels.map((label) => label.id);
+      }
+      results.push(await processWa2LabelEvent(event, currentLabelIds));
+    }
+    await completeWa2LabelEventPage(page.nextCursor, results);
+    return page.events.length > 0 || page.hasMore;
+  } catch (error) {
+    const safe = sanitizeHistoricalError(error, 'WA2_LABEL_FEED_FAILED');
+    await failWa2LabelEventCursor(
+      safe,
+      new Date(Date.now() + historicalRetryDelayMs(1)),
+    );
+    return false;
+  }
+}
+
+async function processMetaHistoricalImport() {
+  const run = await claimMetaHistoricalImport();
+  if (!run) return false;
+  try {
+    const page = await listMetaFormLeadsPage(run.form_id, {
+      after: run.cursor_value,
+      limit: 100,
+    });
+    for (const [index, payload] of page.leads.entries()) {
+      if (!await metaHistoricalImportIsActive(run.id)) return false;
+      const metaLeadId = String(
+        payload?.id || `invalid:${run.cursor_value || 'start'}:${index}`,
+      ).slice(0, 100);
+      try {
+        await importLeadPayload(
+          payload,
+          { page_id: run.page_id, form_id: run.form_id },
+          null,
+          run.tenant_id,
+          {
+            upsert: (leadInput) => recordMetaHistoricalLead(run.id, leadInput),
+          },
+        );
+      } catch (error) {
+        if (isTemporaryMetaError(error)) throw error;
+        const safe = sanitizeHistoricalError(error, 'META_LEAD_INVALID');
+        await recordMetaHistoricalInvalid(run.id, metaLeadId, safe.code);
+      }
+    }
+    await completeMetaHistoricalPage(run.id, page);
+    return true;
+  } catch (error) {
+    await pauseMetaHistoricalImport(
+      run.id,
+      sanitizeHistoricalError(error, 'META_HISTORICAL_IMPORT_FAILED'),
+    );
+    return false;
+  }
+}
+
+async function processWa2Reconciliation() {
+  const item = await claimWa2ReconciliationItem();
+  if (!item) return false;
+  if (!item.phone_normalized) {
+    await failWa2ReconciliationItem(
+      item,
+      'PHONE_INVALID',
+      'WA2_PHONE_INVALID',
+      false,
+    );
+    return true;
+  }
+  try {
+    const resolved = await getWa2ContactByPhone(
+      item.remote_instance_id,
+      item.phone_normalized,
+    );
+    if (!resolved.chat) {
+      await failWa2ReconciliationItem(
+        item,
+        'CONTACT_WITHOUT_CHAT',
+        'WA2_CONTACT_WITHOUT_CHAT',
+        false,
+      );
+      return true;
+    }
+    const labels = await listWa2ChatLabels(
+      item.remote_instance_id,
+      resolved.chat.id,
+    );
+    await completeWa2ReconciliationItem(item, {
+      ...resolved,
+      remoteLabelIds: labels.map((label) => label.id),
+    });
+    return true;
+  } catch (error) {
+    const temporary = isTemporaryWa2LabelError(error) && item.attempts < 5;
+    const safe = sanitizeHistoricalError(error, 'WA2_RECONCILIATION_FAILED');
+    await failWa2ReconciliationItem(
+      item,
+      reconciliationFailureResult(error),
+      safe.code,
+      temporary,
+    );
+    return true;
+  }
+}
+
 async function heartbeatIfNeeded() {
   if (Date.now() - lastHeartbeatAt < HEARTBEAT_INTERVAL_MS) return;
   await recordWorkerHeartbeat();
@@ -180,27 +323,31 @@ async function run() {
     }
 
     const wa2Job = await claimNextWa2LabelJob();
-    if (!wa2Job) {
-      if (!metaJob) await delay(IDLE_DELAY_MS);
-      continue;
+    if (wa2Job) {
+      try {
+        const decision = await processWa2LabelJob(wa2Job);
+        console.log(JSON.stringify({
+          level: 'info',
+          msg: decision.status === 'DONE'
+            ? 'Job WA2 concluído'
+            : decision.status === 'PENDING'
+              ? 'Job WA2 aguardando confirmação remota'
+              : 'Job WA2 sem convergência marcado como FAILED',
+          jobId: wa2Job.id,
+          jobType: 'WA2_LABEL_SYNC',
+          attempts: wa2Job.attempts,
+          status: decision.status,
+        }));
+      } catch (error) {
+        await handleWa2LabelFailure(wa2Job, error);
+      }
     }
 
-    try {
-      const decision = await processWa2LabelJob(wa2Job);
-      console.log(JSON.stringify({
-        level: 'info',
-        msg: decision.status === 'DONE'
-          ? 'Job WA2 concluído'
-          : decision.status === 'PENDING'
-            ? 'Job WA2 aguardando confirmação remota'
-            : 'Job WA2 sem convergência marcado como FAILED',
-        jobId: wa2Job.id,
-        jobType: 'WA2_LABEL_SYNC',
-        attempts: wa2Job.attempts,
-        status: decision.status,
-      }));
-    } catch (error) {
-      await handleWa2LabelFailure(wa2Job, error);
+    const feedWorked = await processWa2LabelFeed();
+    const importWorked = await processMetaHistoricalImport();
+    const reconciliationWorked = await processWa2Reconciliation();
+    if (!metaJob && !wa2Job && !feedWorked && !importWorked && !reconciliationWorked) {
+      await delay(IDLE_DELAY_MS);
     }
   }
 }

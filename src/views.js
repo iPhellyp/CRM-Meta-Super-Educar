@@ -55,6 +55,48 @@ function stat(label, value) {
   return `<div class="stat"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
 }
 
+function normalizeWhatsAppPhone(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  if (/^[1-9]\d{9,10}$/.test(digits)) return `55${digits}`;
+  if (/^55[1-9]\d{9,10}$/.test(digits)) return digits;
+  return '';
+}
+
+function whatsappAction(phone) {
+  const normalizedPhone = normalizeWhatsAppPhone(phone);
+  if (!normalizedPhone) {
+    return `
+      <span class="small button-link whatsapp disabled" aria-disabled="true">Conversar</span>
+      <small class="action-note error-text">Telefone inválido</small>`;
+  }
+  return `<a class="small button-link whatsapp" href="https://wa.me/${normalizedPhone}" target="_blank" rel="noopener noreferrer">Conversar</a>`;
+}
+
+function formatArrival(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return { date: '—', time: '' };
+  return {
+    date: date.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }),
+    time: date.toLocaleTimeString('pt-BR', {
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: 'America/Sao_Paulo',
+    }),
+  };
+}
+
+function sourceLabel(source) {
+  const labels = {
+    MANUAL: 'Cadastro manual',
+    META_INSTANT_FORM: 'Formulário da Meta',
+  };
+  return labels[source] || source || '—';
+}
+
+function metadataValue(value) {
+  return esc(value || '—');
+}
+
 function stageActions(lead, csrfToken) {
   const stages = [
     ['CONTACTED', 'Atendimento'],
@@ -80,14 +122,35 @@ export function dashboardView({
   operationStartAt = null,
   csrfToken = '',
 }) {
-  const rows = leads.map((lead) => `
-    <tr>
-      <td><strong>${esc(lead.name)}</strong><small>${esc(lead.phone || '')}${lead.email ? `<br>${esc(lead.email)}` : ''}</small></td>
-      <td>${esc(lead.course || '—')}<small>${esc(lead.city || '')}</small></td>
-      <td><span class="badge ${esc(lead.stage.toLowerCase())}">${esc(stageLabels[lead.stage] || lead.stage)}</span><small>${esc(lead.source)}</small></td>
-      <td>${lead.meta_lead_id ? `<span class="ok">✓ atribuído</span><small>${esc(lead.meta_lead_id)}</small>` : '<span class="muted">sem lead_id</span>'}</td>
-      <td><div class="actions">${stageActions(lead, csrfToken)}</div></td>
-    </tr>`).join('');
+  const rows = leads.map((lead) => {
+    const arrival = formatArrival(lead.received_at || lead.created_at);
+    return `
+      <tr>
+        <td data-label="Lead">
+          <strong>${esc(lead.name)}</strong>
+          <small>${esc(lead.phone || 'Sem telefone')}${lead.email ? `<br>${esc(lead.email)}` : ''}</small>
+          <small>Curso/produto: ${esc(lead.course || '—')}${lead.city ? `<br>Cidade: ${esc(lead.city)}` : ''}</small>
+        </td>
+        <td data-label="Chegada">${esc(arrival.date)}${arrival.time ? `<small>${esc(arrival.time)}</small>` : ''}</td>
+        <td data-label="Origem">
+          ${esc(sourceLabel(lead.source))}
+          <small>${lead.meta_lead_id ? `Lead Meta: ${esc(lead.meta_lead_id)}` : 'Sem atribuição Meta'}</small>
+        </td>
+        <td data-label="Campanha" class="metadata-cell">
+          <span>Campanha: ${metadataValue(lead.meta_campaign_id)}</span>
+          <small>Conjunto: ${metadataValue(lead.meta_adset_id)}</small>
+          <small>Anúncio: ${metadataValue(lead.meta_ad_id)}</small>
+          <small>Formulário: ${metadataValue(lead.meta_form_id)}</small>
+        </td>
+        <td data-label="Etapa"><span class="badge ${esc(lead.stage.toLowerCase())}">${esc(stageLabels[lead.stage] || lead.stage)}</span></td>
+        <td data-label="Ações">
+          <div class="actions">
+            <div class="whatsapp-action">${whatsappAction(lead.phone)}</div>
+            ${stageActions(lead, csrfToken)}
+          </div>
+        </td>
+      </tr>`;
+  }).join('');
 
   return layout('Leads', `
     ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
@@ -127,9 +190,9 @@ export function dashboardView({
         </div>
         <span>${leads.length} exibidos</span>
       </div>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Lead</th><th>Interesse</th><th>Etapa</th><th>Atribuição Meta</th><th>Ações</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="5" class="empty">Nenhum lead ainda.</td></tr>'}</tbody>
+      <div class="table-wrap"><table class="leads-table">
+        <thead><tr><th>Lead</th><th>Chegada</th><th>Origem</th><th>Campanha</th><th>Etapa</th><th>Ações</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="6" class="empty">Nenhum lead ainda.</td></tr>'}</tbody>
       </table></div>
     </section>
   `, { csrfToken });

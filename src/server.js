@@ -9,6 +9,7 @@ import {
   enqueueLeadgenJobs,
   closePool,
   getDashboardCounts,
+  getLeadById,
   healthcheck,
   listLeads,
   listRecentJobs,
@@ -36,7 +37,12 @@ import {
   validateMetaConfig,
   verifyMetaSignature,
 } from './meta.js';
-import { dashboardView, eventsView, loginView } from './views.js';
+import {
+  dashboardView,
+  eventsView,
+  loginView,
+  matriculationConfirmView,
+} from './views.js';
 
 const app = express();
 const loginAttempts = new Map();
@@ -219,35 +225,108 @@ app.post('/leads', async (req, res) => {
   }
 });
 
-const allowedStages = new Set(['NEW', 'CONTACTED', 'QUALIFIED', 'OPPORTUNITY', 'MATRICULATED', 'LOST']);
+const stageLabels = {
+  CONTACTED: 'CRM 01 - Em atendimento',
+  QUALIFIED: 'CRM 02 - Qualificado',
+  VESTIBULAR_REGISTERED: 'CRM 03 - Inscrição no vestibular',
+  VESTIBULAR_COMPLETED: 'CRM 04 - Vestibular concluído',
+  MATRICULATED: 'CRM 05 - Matriculado',
+  LOST: 'CRM 99 - Perdido',
+};
+
+const allowedPreviousStages = {
+  CONTACTED: ['NEW', 'LOST'],
+  QUALIFIED: ['CONTACTED'],
+  VESTIBULAR_REGISTERED: ['QUALIFIED'],
+  VESTIBULAR_COMPLETED: ['VESTIBULAR_REGISTERED'],
+  MATRICULATED: ['VESTIBULAR_COMPLETED', 'OPPORTUNITY'],
+  LOST: ['CONTACTED', 'QUALIFIED', 'VESTIBULAR_REGISTERED', 'VESTIBULAR_COMPLETED', 'OPPORTUNITY'],
+};
+
+const directStageTargets = new Set([
+  'CONTACTED',
+  'QUALIFIED',
+  'VESTIBULAR_REGISTERED',
+  'VESTIBULAR_COMPLETED',
+  'LOST',
+]);
+
+function metaResultSuffix(eventName, result) {
+  if (!eventName) return '';
+  if (!result.attributed) return ' Lead sem atribuição Meta; nenhum evento foi criado.';
+  if (result.event.status === 'SENT') return ' O evento Meta já havia sido enviado.';
+  return result.jobCreated ? ' Evento Meta enfileirado.' : ' Evento Meta já está na fila.';
+}
 
 app.post('/leads/:id/stage', async (req, res) => {
   const parsedId = z.string().uuid().safeParse(req.params.id);
   if (!parsedId.success) return redirectWith(res, '/', 'error', 'Lead inválido.');
   const stage = String(req.body.stage || '');
-  if (!allowedStages.has(stage)) return redirectWith(res, '/', 'error', 'Etapa inválida.');
+  if (!directStageTargets.has(stage)) {
+    return redirectWith(res, '/', 'error', 'Etapa inválida.');
+  }
   try {
     const eventName = getStageEventName(stage);
     const result = await moveLeadStage(parsedId.data, stage, {
       origin: 'MANUAL',
       changedBy: req.user.sub,
+      allowedPreviousStages: allowedPreviousStages[stage],
       eventName,
       mode: currentMetaMode(),
     });
     if (!result) return redirectWith(res, '/', 'error', 'Lead não encontrado.');
-    let suffix = '';
-    if (eventName && !result.attributed) {
-      suffix = ' Lead sem atribuição Meta; nenhum evento foi criado.';
-    } else if (eventName) {
-      suffix = result.event.status === 'SENT'
-        ? ' O evento Meta já havia sido enviado.'
-        : result.jobCreated
-          ? ' Evento Meta enfileirado.'
-          : ' Evento Meta já está na fila.';
+    if (result.invalidTransition) {
+      return redirectWith(res, '/', 'error', 'Transição de etapa não permitida.');
     }
-    redirectWith(res, '/', 'message', `Lead movido para ${stage}.${suffix}`);
+    const suffix = metaResultSuffix(eventName, result);
+    redirectWith(res, '/', 'message', `Lead movido para ${stageLabels[stage]}.${suffix}`);
   } catch {
     redirectWith(res, '/', 'error', 'Não foi possível mover o lead.');
+  }
+});
+
+app.get('/leads/:id/matriculate', async (req, res) => {
+  const parsedId = z.string().uuid().safeParse(req.params.id);
+  if (!parsedId.success) return redirectWith(res, '/', 'error', 'Lead inválido.');
+  try {
+    const lead = await getLeadById(parsedId.data);
+    if (!lead) return redirectWith(res, '/', 'error', 'Lead não encontrado.');
+    if (!allowedPreviousStages.MATRICULATED.includes(lead.stage)) {
+      return redirectWith(res, '/', 'error', 'Este lead não pode ser matriculado nesta etapa.');
+    }
+    return res.send(matriculationConfirmView({
+      lead,
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  } catch {
+    return redirectWith(res, '/', 'error', 'Não foi possível abrir a confirmação de matrícula.');
+  }
+});
+
+app.post('/leads/:id/matriculate', async (req, res) => {
+  const parsedId = z.string().uuid().safeParse(req.params.id);
+  if (!parsedId.success) return redirectWith(res, '/', 'error', 'Lead inválido.');
+  if (req.body.confirmation !== 'MATRICULATION_COMPLETED') {
+    return redirectWith(res, '/', 'error', 'Confirmação de matrícula inválida.');
+  }
+  try {
+    const eventName = getStageEventName('MATRICULATED');
+    const result = await moveLeadStage(parsedId.data, 'MATRICULATED', {
+      origin: 'MANUAL',
+      changedBy: req.user.sub,
+      observation: 'Matrícula concluída por confirmação manual.',
+      allowedPreviousStages: allowedPreviousStages.MATRICULATED,
+      eventName,
+      mode: currentMetaMode(),
+    });
+    if (!result) return redirectWith(res, '/', 'error', 'Lead não encontrado.');
+    if (result.invalidTransition) {
+      return redirectWith(res, '/', 'error', 'Transição para matrícula não permitida.');
+    }
+    const suffix = metaResultSuffix(eventName, result);
+    return redirectWith(res, '/', 'message', `Lead movido para ${stageLabels.MATRICULATED}.${suffix}`);
+  } catch {
+    return redirectWith(res, '/', 'error', 'Não foi possível concluir a matrícula.');
   }
 });
 

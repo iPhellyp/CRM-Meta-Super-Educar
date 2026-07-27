@@ -42,13 +42,44 @@ export function operationStartAt() {
 
 export async function migrate() {
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const sql = await fs.readFile(path.join(here, '..', 'sql', '001_init.sql'), 'utf8');
+  const sqlDirectory = path.join(here, '..', 'sql');
   const client = await pool.connect();
   let locked = false;
   try {
     await client.query("SELECT pg_advisory_lock(hashtext('crm_meta_migrate'))");
     locked = true;
-    await client.query(sql);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        filename TEXT PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    const migrationFiles = (await fs.readdir(sqlDirectory))
+      .filter((file) => /^\d+_.+\.sql$/.test(file))
+      .sort();
+    const appliedResult = await client.query('SELECT filename FROM schema_migrations');
+    const appliedMigrations = new Set(appliedResult.rows.map((row) => row.filename));
+
+    for (const migrationFile of migrationFiles) {
+      if (appliedMigrations.has(migrationFile)) continue;
+      const sql = await fs.readFile(path.join(sqlDirectory, migrationFile), 'utf8');
+      try {
+        await client.query('BEGIN');
+        await client.query(sql);
+        await client.query(
+          'INSERT INTO schema_migrations (filename) VALUES ($1)',
+          [migrationFile],
+        );
+        await client.query('COMMIT');
+      } catch (error) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Preserve the original migration error.
+        }
+        throw error;
+      }
+    }
   } finally {
     try {
       if (locked) {
@@ -91,6 +122,14 @@ export async function listLeads({ stage, search, limit = 200, createdAfter = ope
     values,
   );
   return result.rows;
+}
+
+export async function getLeadById(id) {
+  const result = await pool.query(
+    'SELECT * FROM leads WHERE id = $1 AND tenant_id = $2',
+    [id, tenantId()],
+  );
+  return result.rows[0] || null;
 }
 
 export async function upsertLead(input) {
@@ -193,6 +232,8 @@ async function enqueueConversionJob(client, event) {
 export async function moveLeadStage(id, stage, {
   origin = 'MANUAL',
   changedBy = null,
+  observation = null,
+  allowedPreviousStages = [],
   eventName = null,
   mode = 'live',
 } = {}) {
@@ -209,10 +250,22 @@ export async function moveLeadStage(id, stage, {
     }
 
     const previousLead = current.rows[0];
+    if (
+      previousLead.stage === stage ||
+      !allowedPreviousStages.includes(previousLead.stage)
+    ) {
+      await client.query('ROLLBACK');
+      return {
+        lead: previousLead,
+        invalidTransition: true,
+        stageChanged: false,
+        attributed: Boolean(previousLead.meta_lead_id),
+      };
+    }
     const timestampColumn = {
       CONTACTED: 'first_contact_at',
       QUALIFIED: 'qualified_at',
-      OPPORTUNITY: 'opportunity_at',
+      VESTIBULAR_COMPLETED: 'opportunity_at',
       MATRICULATED: 'converted_at',
       LOST: 'lost_at',
     }[stage];
@@ -222,21 +275,18 @@ export async function moveLeadStage(id, stage, {
       }`
       : '';
 
-    let lead = previousLead;
-    if (previousLead.stage !== stage) {
-      const updated = await client.query(
-        `UPDATE leads SET stage = $2, updated_at = now() ${setTimestamp}
-         WHERE id = $1 RETURNING *`,
-        [id, stage],
-      );
-      lead = updated.rows[0];
-      await client.query(
-        `INSERT INTO lead_stage_history (
-           lead_id, previous_stage, new_stage, origin, changed_by
-         ) VALUES ($1, $2, $3, $4, $5)`,
-        [id, previousLead.stage, stage, origin, changedBy],
-      );
-    }
+    const updated = await client.query(
+      `UPDATE leads SET stage = $2, updated_at = now() ${setTimestamp}
+       WHERE id = $1 AND tenant_id = $3 RETURNING *`,
+      [id, stage, tenantId()],
+    );
+    const lead = updated.rows[0];
+    await client.query(
+      `INSERT INTO lead_stage_history (
+         lead_id, tenant_id, previous_stage, new_stage, origin, changed_by, observation
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [id, lead.tenant_id, previousLead.stage, stage, origin, changedBy, observation],
+    );
 
     let event = null;
     let jobCreated = false;
@@ -255,7 +305,7 @@ export async function moveLeadStage(id, stage, {
       lead,
       event,
       jobCreated,
-      stageChanged: previousLead.stage !== stage,
+      stageChanged: true,
       attributed: Boolean(lead.meta_lead_id),
     };
   } catch (error) {
@@ -329,7 +379,10 @@ export async function getDashboardCounts({ createdAfter = operationStartAt() } =
       count(*)::int AS total,
       count(*) FILTER (WHERE stage = 'NEW')::int AS new,
       count(*) FILTER (WHERE stage = 'QUALIFIED')::int AS qualified,
-      count(*) FILTER (WHERE stage = 'OPPORTUNITY')::int AS opportunity,
+      count(*) FILTER (WHERE stage = 'VESTIBULAR_REGISTERED')::int AS vestibular_registered,
+      count(*) FILTER (
+        WHERE stage IN ('VESTIBULAR_COMPLETED', 'OPPORTUNITY')
+      )::int AS vestibular_completed,
       count(*) FILTER (WHERE stage = 'MATRICULATED')::int AS matriculated,
       count(*) FILTER (WHERE stage = 'LOST')::int AS lost,
       count(*) FILTER (WHERE meta_lead_id IS NOT NULL)::int AS attributed
@@ -337,7 +390,10 @@ export async function getDashboardCounts({ createdAfter = operationStartAt() } =
     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
   `, values), getQueueHealth()]);
   const counts = result.rows[0];
-  const qualifiedJourney = counts.qualified + counts.opportunity + counts.matriculated;
+  const qualifiedJourney = counts.qualified
+    + counts.vestibular_registered
+    + counts.vestibular_completed
+    + counts.matriculated;
   return {
     ...counts,
     qualificationRate: counts.total ? Math.round((qualifiedJourney / counts.total) * 1000) / 10 : 0,

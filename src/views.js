@@ -1,10 +1,12 @@
 const stageLabels = {
   NEW: 'Novo',
-  CONTACTED: 'Em atendimento',
-  QUALIFIED: 'Qualificado',
-  OPPORTUNITY: 'Oportunidade',
-  MATRICULATED: 'Matriculado',
-  LOST: 'Perdido',
+  CONTACTED: 'CRM 01 - Em atendimento',
+  QUALIFIED: 'CRM 02 - Qualificado',
+  VESTIBULAR_REGISTERED: 'CRM 03 - Inscrição no vestibular',
+  VESTIBULAR_COMPLETED: 'CRM 04 - Vestibular concluído',
+  OPPORTUNITY: 'CRM 04 - Vestibular concluído',
+  MATRICULATED: 'CRM 05 - Matriculado',
+  LOST: 'CRM 99 - Perdido',
 };
 
 function esc(value) {
@@ -97,19 +99,32 @@ function metadataValue(value) {
   return esc(value || '—');
 }
 
+function stageBadgeClass(stage) {
+  if (stage === 'VESTIBULAR_REGISTERED') return 'qualified';
+  if (['VESTIBULAR_COMPLETED', 'OPPORTUNITY'].includes(stage)) return 'opportunity';
+  return String(stage || 'NEW').toLowerCase();
+}
+
 function stageActions(lead, csrfToken) {
-  const stages = [
-    ['CONTACTED', 'Atendimento'],
-    ['QUALIFIED', 'Qualificar'],
-    ['OPPORTUNITY', 'Oportunidade'],
-    ['MATRICULATED', 'Matricular'],
-    ['LOST', 'Perder'],
-  ];
-  return stages.map(([stage, label]) => `
-    <form method="post" action="/leads/${lead.id}/stage">
+  const actionsByStage = {
+    NEW: [['CONTACTED', 'Em atendimento']],
+    CONTACTED: [['QUALIFIED', 'Qualificar'], ['LOST', 'Perder']],
+    QUALIFIED: [['VESTIBULAR_REGISTERED', 'Inscrição no vestibular'], ['LOST', 'Perder']],
+    VESTIBULAR_REGISTERED: [['VESTIBULAR_COMPLETED', 'Vestibular concluído'], ['LOST', 'Perder']],
+    VESTIBULAR_COMPLETED: [['MATRICULATED', 'Matricular'], ['LOST', 'Perder']],
+    OPPORTUNITY: [['MATRICULATED', 'Matricular'], ['LOST', 'Perder']],
+    LOST: [['CONTACTED', 'Reativar atendimento']],
+    MATRICULATED: [],
+  };
+  const actions = actionsByStage[lead.stage] || [];
+  if (actions.length === 0) return '<span class="muted">Etapa final</span>';
+  return actions.map(([stage, label]) => stage === 'MATRICULATED'
+    ? `<a class="small button-link success" href="/leads/${esc(lead.id)}/matriculate">${label}</a>`
+    : `
+    <form method="post" action="/leads/${esc(lead.id)}/stage">
       ${csrfField(csrfToken)}
       <input type="hidden" name="stage" value="${stage}">
-      <button class="small ${stage === 'MATRICULATED' ? 'success' : stage === 'LOST' ? 'danger' : ''}" ${lead.stage === stage ? 'disabled' : ''}>${label}</button>
+      <button class="small ${stage === 'LOST' ? 'danger' : ''}">${label}</button>
     </form>`).join('');
 }
 
@@ -142,7 +157,7 @@ export function dashboardView({
           <small>Anúncio: ${metadataValue(lead.meta_ad_id)}</small>
           <small>Formulário: ${metadataValue(lead.meta_form_id)}</small>
         </td>
-        <td data-label="Etapa"><span class="badge ${esc(lead.stage.toLowerCase())}">${esc(stageLabels[lead.stage] || lead.stage)}</span></td>
+        <td data-label="Etapa"><span class="badge ${esc(stageBadgeClass(lead.stage))}">${esc(stageLabels[lead.stage] || lead.stage)}</span></td>
         <td data-label="Ações">
           <div class="actions">
             <div class="whatsapp-action">${whatsappAction(lead.phone)}</div>
@@ -166,7 +181,7 @@ export function dashboardView({
     </section>
 
     <section class="stats">
-      ${stat('Total', counts.total)}${stat('Novos', counts.new)}${stat('Qualificados', counts.qualified)}${stat('Oportunidades', counts.opportunity)}${stat('Matriculados', counts.matriculated)}${stat('Perdidos', counts.lost)}${stat('Taxa de qualificação', `${counts.qualificationRate}%`)}${stat('Taxa de matrícula', `${counts.matriculationRate}%`)}${stat('Eventos pendentes', counts.metaPending)}${stat('Eventos em nova tentativa', counts.metaRetry)}${stat('Eventos com falha', counts.metaFailed)}
+      ${stat('Total', counts.total)}${stat('Novos', counts.new)}${stat('Qualificados', counts.qualified)}${stat('Inscrições vestibular', counts.vestibular_registered)}${stat('Vestibulares concluídos', counts.vestibular_completed)}${stat('Matriculados', counts.matriculated)}${stat('Perdidos', counts.lost)}${stat('Taxa de qualificação', `${counts.qualificationRate}%`)}${stat('Taxa de matrícula', `${counts.matriculationRate}%`)}${stat('Eventos pendentes', counts.metaPending)}${stat('Eventos em nova tentativa', counts.metaRetry)}${stat('Eventos com falha', counts.metaFailed)}
     </section>
 
     <section class="panel">
@@ -194,6 +209,33 @@ export function dashboardView({
         <thead><tr><th>Lead</th><th>Chegada</th><th>Origem</th><th>Campanha</th><th>Etapa</th><th>Ações</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="6" class="empty">Nenhum lead ainda.</td></tr>'}</tbody>
       </table></div>
+    </section>
+  `, { csrfToken });
+}
+
+export function matriculationConfirmView({ lead, csrfToken = '' }) {
+  return layout('Confirmar matrícula', `
+    <section class="hero">
+      <div>
+        <h1>Confirmar matrícula</h1>
+        <p>Revise os dados antes de concluir esta etapa.</p>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>${esc(lead.name)}</h2>
+      <p>Curso/produto: ${esc(lead.course || '—')}</p>
+      <p>
+        Esta ação marcará a matrícula como concluída, ficará registrada no histórico
+        e poderá enfileirar o evento Converted para a Meta quando houver atribuição.
+      </p>
+      <div class="actions">
+        <form method="post" action="/leads/${esc(lead.id)}/matriculate">
+          ${csrfField(csrfToken)}
+          <input type="hidden" name="confirmation" value="MATRICULATION_COMPLETED">
+          <button type="submit" class="success">Confirmar matrícula concluída</button>
+        </form>
+        <a class="small button-link" href="/">Cancelar</a>
+      </div>
     </section>
   `, { csrfToken });
 }

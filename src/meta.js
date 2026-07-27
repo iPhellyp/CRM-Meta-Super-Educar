@@ -3,7 +3,7 @@ import { upsertLead } from './db.js';
 
 const STAGE_EVENT = {
   QUALIFIED: 'Marketing Qualified Lead',
-  OPPORTUNITY: 'Sales Opportunity',
+  VESTIBULAR_COMPLETED: 'Sales Opportunity',
   MATRICULATED: 'Converted',
 };
 

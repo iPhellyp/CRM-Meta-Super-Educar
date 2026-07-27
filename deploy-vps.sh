@@ -22,6 +22,147 @@ require_env() {
   echo "OK: $name presente"
 }
 
+stack_name="crm-meta"
+MIGRATION_NETWORK="${MIGRATION_NETWORK:-${stack_name}_internal}"
+MIGRATION_TIMEOUT_SECONDS="${MIGRATION_TIMEOUT_SECONDS:-300}"
+migration_service=""
+migration_env=""
+
+sanitize_migration_output() {
+  local -a sensitive_values=(
+    "${DATABASE_URL:-}" "${POSTGRES_PASSWORD:-}" "${ADMIN_PASSWORD_HASH:-}"
+    "${SESSION_SECRET:-}" "${META_CAPI_ACCESS_TOKEN:-}" "${META_PAGE_ACCESS_TOKEN:-}"
+    "${META_APP_SECRET:-}" "${META_WEBHOOK_VERIFY_TOKEN:-}" "${WA2_INTERNAL_API_SECRET:-}"
+  )
+  local line
+  local value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    for value in "${sensitive_values[@]}"; do
+      [[ -n "$value" ]] && line="${line//"$value"/[REDACTED]}"
+    done
+    printf '%s\n' "$line"
+  done | sed -E \
+    -e 's#(postgres(ql)?://[^:/[:space:]]+):[^@[:space:]]+@#\1:[REDACTED]@#gI' \
+    -e "s/((secret|password|token|api[_-]?key)[\"']?[[:space:]]*[:=][[:space:]]*[\"']?)[^,\"' }[:space:]]+/\1[REDACTED]/gI" \
+    -e 's/[A-Za-z0-9+\/_=.-]{48,}/[REDACTED_LONG]/g'
+}
+
+cleanup_migration_service() {
+  local cleanup_failed=0
+  if [[ -n "$migration_service" ]] &&
+     docker service inspect "$migration_service" > /dev/null 2>&1; then
+    if ! docker service rm "$migration_service" > /dev/null 2>&1; then
+      echo "Falha ao remover servico temporario de migration" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if [[ -n "$migration_env" ]]; then
+    if ! rm -f -- "$migration_env"; then
+      echo "Falha ao remover arquivo temporario da migration" >&2
+      cleanup_failed=1
+    fi
+  fi
+  return "$cleanup_failed"
+}
+
+cleanup_migration_on_exit() {
+  local status=$?
+  trap - EXIT
+  cleanup_migration_service || true
+  exit "$status"
+}
+
+show_migration_diagnostics() {
+  echo "Diagnostico sanitizado da migration:" >&2
+  docker service ps "$migration_service" --no-trunc \
+    --format 'STATE={{.CurrentState}} ERROR={{.Error}}' 2>&1 |
+    sanitize_migration_output >&2 || true
+  docker service logs "$migration_service" --tail 100 2>&1 |
+    sanitize_migration_output >&2 || true
+}
+
+wait_for_migration_service() {
+  local deadline=$((SECONDS + MIGRATION_TIMEOUT_SECONDS))
+  local task_id=""
+  local state=""
+  local exit_code="-1"
+
+  while (( SECONDS < deadline )); do
+    task_id="$(
+      docker service ps "$migration_service" --no-trunc \
+        --format '{{.ID}}' 2>/dev/null | head -n 1
+    )"
+    if [[ -n "$task_id" ]]; then
+      state="$(docker inspect --type task --format '{{.Status.State}}' "$task_id" 2>/dev/null || true)"
+      if [[ "$state" =~ ^(complete|failed|rejected|shutdown|orphaned|remove)$ ]]; then
+        exit_code="$(
+          docker inspect --type task \
+            --format '{{if .Status.ContainerStatus}}{{.Status.ContainerStatus.ExitCode}}{{else}}-1{{end}}' \
+            "$task_id" 2>/dev/null || printf '%s' '-1'
+        )"
+        if [[ "$state" == "complete" && "$exit_code" == "0" ]]; then
+          echo "Migration concluida: task=${task_id} state=${state} exitCode=${exit_code}"
+          return 0
+        fi
+        echo "Migration falhou: state=${state} exitCode=${exit_code}" >&2
+        show_migration_diagnostics
+        return 1
+      fi
+    fi
+    sleep 2
+  done
+
+  echo "Timeout de ${MIGRATION_TIMEOUT_SECONDS}s aguardando migration" >&2
+  show_migration_diagnostics
+  return 1
+}
+
+run_swarm_migration() {
+  local image="crm-meta-super-educar:${IMAGE_TAG}"
+  local safe_tag
+  local create_output
+
+  [[ "$MIGRATION_NETWORK" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || {
+    echo "MIGRATION_NETWORK invalida" >&2
+    return 1
+  }
+  [[ "$MIGRATION_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] &&
+    (( MIGRATION_TIMEOUT_SECONDS >= 30 && MIGRATION_TIMEOUT_SECONDS <= 3600 )) || {
+      echo "MIGRATION_TIMEOUT_SECONDS deve ficar entre 30 e 3600" >&2
+      return 1
+    }
+  docker network inspect "$MIGRATION_NETWORK" > /dev/null
+
+  safe_tag="$(printf '%s' "$IMAGE_TAG" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-40)"
+  migration_service="${stack_name}_migrate_${safe_tag}_$(date +%s%N)_$$"
+  migration_env="$(mktemp)"
+  chmod 600 "$migration_env"
+  printf 'DATABASE_URL=%s\nDATABASE_SSL=%s\nDEFAULT_TENANT_ID=%s\n' \
+    "$DATABASE_URL" "$DATABASE_SSL" "$DEFAULT_TENANT_ID" > "$migration_env"
+
+  if ! create_output="$(
+    docker service create \
+      --detach \
+      --name "$migration_service" \
+      --replicas 1 \
+      --restart-condition none \
+      --constraint 'node.role==manager' \
+      --network "$MIGRATION_NETWORK" \
+      --env-file "$migration_env" \
+      --env RUN_MIGRATIONS_ON_STARTUP=false \
+      --no-resolve-image \
+      "$image" npm run migrate 2>&1
+  )"; then
+    echo "Falha ao criar servico temporario de migration" >&2
+    printf '%s\n' "$create_output" | sanitize_migration_output >&2
+    return 1
+  fi
+
+  wait_for_migration_service
+}
+
+trap cleanup_migration_on_exit EXIT
+
 wait_for_healthy_service() {
   local service="$1"
   local deadline=$((SECONDS + 300))
@@ -97,20 +238,19 @@ echo "Imagem publicada localmente: crm-meta-super-educar:${IMAGE_TAG}"
 
 export APP_REPLICAS=0
 export WORKER_REPLICAS=0
-docker stack deploy --resolve-image never -c docker-stack.yml crm-meta
+docker stack deploy --resolve-image never -c docker-stack.yml "$stack_name"
 
-docker run --rm \
-  --network crm-meta_internal \
-  --env-file "$env_file" \
-  --env RUN_MIGRATIONS_ON_STARTUP=false \
-  "crm-meta-super-educar:${IMAGE_TAG}" npm run migrate
+run_swarm_migration
+cleanup_migration_service
+migration_service=""
+migration_env=""
 
 export APP_REPLICAS=1
-docker stack deploy --resolve-image never -c docker-stack.yml crm-meta
+docker stack deploy --resolve-image never -c docker-stack.yml "$stack_name"
 wait_for_healthy_service "crm-meta_app"
 
 export WORKER_REPLICAS=1
-docker stack deploy --resolve-image never -c docker-stack.yml crm-meta
+docker stack deploy --resolve-image never -c docker-stack.yml "$stack_name"
 wait_for_healthy_service "crm-meta_worker"
 
 echo "Deploy concluido com tag: ${IMAGE_TAG}"

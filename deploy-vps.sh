@@ -171,23 +171,44 @@ run_swarm_migration() {
 
 trap cleanup_migration_on_exit EXIT
 
-wait_for_healthy_service() {
+wait_for_one_healthy_instance() {
   local service="$1"
   local deadline=$((SECONDS + 300))
-  local -a ids
+  local desired_replicas
+  local -a task_states
+  local -a container_ids
   local health
+
   while (( SECONDS < deadline )); do
-    mapfile -t ids < <(
+    desired_replicas="$(
+      docker service inspect --format '{{.Spec.Mode.Replicated.Replicas}}' \
+        "$service" 2>/dev/null || true
+    )"
+    [[ "$desired_replicas" == "1" ]] || {
+      echo "Esperada exatamente uma replica para ${service}; atual: ${desired_replicas:-indisponivel}" >&2
+      return 1
+    }
+    mapfile -t task_states < <(
+      docker service ps "$service" --filter desired-state=running \
+        --format '{{.CurrentState}}'
+    )
+    mapfile -t container_ids < <(
       docker ps --filter "label=com.docker.swarm.service.name=${service}" \
         --format '{{.ID}}'
     )
-    if [[ "${#ids[@]}" -eq 1 ]]; then
-      health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "${ids[0]}")"
+    if [[ "${#task_states[@]}" -eq 1 &&
+          "${task_states[0]}" == Running* &&
+          "${#container_ids[@]}" -eq 1 ]]; then
+      health="$(
+        docker inspect \
+          --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+          "${container_ids[0]}"
+      )"
       [[ "$health" == "healthy" ]] && return 0
     fi
     sleep 5
   done
-  echo "Timeout aguardando healthcheck de ${service}" >&2
+  echo "Esperada exatamente uma task e um container Running e healthy para ${service}" >&2
   return 1
 }
 
@@ -240,6 +261,9 @@ printf 'silent\nshow-error\nfail\nheader = "Authorization: Bearer %s"\n' "$WA2_I
     "${WA2_INTERNAL_API_BASE_URL%/}/api/internal/v1/health" > /dev/null
 echo "DNS e HTTPS CRM -> WA2 confirmados via Traefik"
 
+wait_for_one_healthy_instance "${stack_name}_postgres"
+echo "PostgreSQL confirmado com uma replica, uma task Running e health healthy"
+
 BACKUP_ROOT="$BACKUP_ROOT" bash ./scripts/backup.sh
 docker build -t "crm-meta-super-educar:${IMAGE_TAG}" .
 echo "Imagem publicada localmente: crm-meta-super-educar:${IMAGE_TAG}"
@@ -248,6 +272,9 @@ export APP_REPLICAS=0
 export WORKER_REPLICAS=0
 docker stack deploy --resolve-image never -c docker-stack.yml "$stack_name"
 
+wait_for_one_healthy_instance "${stack_name}_postgres"
+echo "PostgreSQL permaneceu healthy apos pausar app e worker"
+
 run_swarm_migration
 cleanup_migration_service
 migration_service=""
@@ -255,11 +282,11 @@ migration_env=""
 
 export APP_REPLICAS=1
 docker stack deploy --resolve-image never -c docker-stack.yml "$stack_name"
-wait_for_healthy_service "crm-meta_app"
+wait_for_one_healthy_instance "${stack_name}_app"
 
 export WORKER_REPLICAS=1
 docker stack deploy --resolve-image never -c docker-stack.yml "$stack_name"
-wait_for_healthy_service "crm-meta_worker"
+wait_for_one_healthy_instance "${stack_name}_worker"
 
 echo "Deploy concluido com tag: ${IMAGE_TAG}"
 echo "Inspecao: docker stack services crm-meta"

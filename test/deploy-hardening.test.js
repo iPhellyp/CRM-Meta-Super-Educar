@@ -18,6 +18,20 @@ test('stack usa tag imutável, injeta WA2 e desliga migration no startup', async
   assert.match(stack, /worker:[\s\S]*src\/worker-health\.js/);
 });
 
+test('stack isola as réplicas de postgres, app e worker', async () => {
+  const stack = await read('docker-stack.yml');
+  const postgres = stack.match(/\n  postgres:[\s\S]*?(?=\n  app:)/)?.[0] || '';
+  const app = stack.match(/\n  app:[\s\S]*?(?=\n  worker:)/)?.[0] || '';
+  const worker = stack.match(/\n  worker:[\s\S]*?(?=\nvolumes:)/)?.[0] || '';
+
+  assert.match(postgres, /\n\s+replicas: 1\s*\n/);
+  assert.doesNotMatch(postgres, /APP_REPLICAS|WORKER_REPLICAS/);
+  assert.match(app, /\n\s+replicas: \$\{APP_REPLICAS:-1\}\s*\n/);
+  assert.doesNotMatch(app, /WORKER_REPLICAS/);
+  assert.match(worker, /\n\s+replicas: \$\{WORKER_REPLICAS:-1\}\s*\n/);
+  assert.doesNotMatch(worker, /APP_REPLICAS/);
+});
+
 test('deploy migra uma vez antes de app e worker e não importa leads', async () => {
   const deploy = await read('deploy-vps.sh');
   const stack = await read('docker-stack.yml');
@@ -27,10 +41,21 @@ test('deploy migra uma vez antes de app e worker e não importa leads', async ()
   const workerPaused = deploy.indexOf('WORKER_REPLICAS=0');
   const app = deploy.indexOf('APP_REPLICAS=1');
   const worker = deploy.indexOf('WORKER_REPLICAS=1');
+  const firstStackDeploy = deploy.indexOf(
+    'docker stack deploy --resolve-image never -c docker-stack.yml "$stack_name"',
+    workerPaused,
+  );
+  const postgresAfterPause = deploy.indexOf(
+    'wait_for_one_healthy_instance "${stack_name}_postgres"',
+    firstStackDeploy,
+  );
   assert.ok(
     migration > 0 &&
       appPaused < migrationCall &&
       workerPaused < migrationCall &&
+      workerPaused < firstStackDeploy &&
+      firstStackDeploy < postgresAfterPause &&
+      postgresAfterPause < migrationCall &&
       migrationCall < app &&
       app < worker,
   );
@@ -68,6 +93,37 @@ test('deploy migra uma vez antes de app e worker e não importa leads', async ()
   assert.match(deploy, /\$\{IMAGE_TAG\+x\}/);
   assert.match(deploy, /IMAGE_TAG nao pode ser vazia/);
   assert.match(deploy, /curl --fail/);
+  assert.match(deploy, /docker service inspect --format '\{\{\.Spec\.Mode\.Replicated\.Replicas\}\}'/);
+  assert.match(deploy, /"\$desired_replicas" == "1"/);
+  assert.match(deploy, /desired-state=running/);
+  assert.match(deploy, /"\$\{#task_states\[@\]\}" -eq 1/);
+  assert.match(deploy, /"\$\{task_states\[0\]\}" == Running\*/);
+  assert.match(deploy, /"\$\{#container_ids\[@\]\}" -eq 1/);
+  assert.match(deploy, /"\$health" == "healthy"/);
+  const wa2Health = deploy.indexOf('DNS e HTTPS CRM -> WA2 confirmados via Traefik');
+  const postgresBeforeBackup = deploy.indexOf(
+    'wait_for_one_healthy_instance "${stack_name}_postgres"',
+  );
+  const backup = deploy.indexOf('bash ./scripts/backup.sh');
+  const build = deploy.indexOf('docker build');
+  assert.ok(
+    wa2Health < postgresBeforeBackup &&
+      postgresBeforeBackup < backup &&
+      backup < build &&
+      build < firstStackDeploy,
+  );
+  assert.equal(
+    (
+      deploy
+        .slice(firstStackDeploy, migrationCall)
+        .match(/wait_for_one_healthy_instance "\$\{stack_name\}_postgres"/g) || []
+    ).length,
+    1,
+  );
+  assert.match(
+    deploy,
+    /wait_for_one_healthy_instance "\$\{stack_name\}_postgres"\necho "PostgreSQL permaneceu healthy[\s\S]*?\n\nrun_swarm_migration/,
+  );
   assert.doesNotMatch(deploy, /migrate dev/);
   assert.doesNotMatch(deploy, /import[-_: ]*lead|historical-sync/i);
   assert.doesNotMatch(deploy, /set -x|echo .*\b(SECRET|PASSWORD|TOKEN)\b/);
@@ -87,16 +143,31 @@ test('rollback exige tag e backup é verificável sem remoção automática', as
   );
   assert.match(rollback, /docker service scale "\$\{stack_name\}_app=1"/);
   assert.match(rollback, /wait_for_one_running_instance "\$\{stack_name\}_app"/);
+  assert.match(rollback, /docker service scale "\$\{stack_name\}_postgres=1"/);
+  assert.match(rollback, /wait_for_one_healthy_instance "\$\{stack_name\}_postgres"/);
+  assert.match(rollback, /"\$health" == "healthy"/);
   assert.match(rollback, /desired-state=running/);
   assert.match(rollback, /"\$\{#task_states\[@\]\}" -eq 1/);
   assert.match(rollback, /"\$\{task_states\[0\]\}" == Running\*/);
   assert.match(rollback, /"\$\{#container_ids\[@\]\}" -eq 1/);
-  assert.match(rollback, /trap ensure_app_not_paused_on_exit EXIT/);
+  assert.match(rollback, /trap ensure_recoverable_services_on_exit EXIT/);
+  assert.match(rollback, /"\$postgres_replicas" != "1"/);
   assert.match(
     rollback,
     /"\$app_replicas" == "0" && "\$worker_replicas" == "0"/,
   );
-  assert.doesNotMatch(rollback, /\.State\.Health|app=0/);
+  assert.doesNotMatch(rollback, /app=0/);
+  const postgresScale = rollback.indexOf(
+    'docker service scale "${stack_name}_postgres=1"',
+  );
+  const postgresHealthy = rollback.indexOf(
+    'wait_for_one_healthy_instance "${stack_name}_postgres"',
+    postgresScale,
+  );
+  const appUpdate = rollback.indexOf(
+    'docker service update --detach=true --no-healthcheck --image "$image" "${stack_name}_app"',
+  );
+  assert.ok(postgresScale > 0 && postgresScale < postgresHealthy && postgresHealthy < appUpdate);
   const keepPaused = rollback.indexOf('KEEP_WORKER_PAUSED:-false}" == "true"');
   const appRunning = rollback.indexOf('wait_for_one_running_instance "${stack_name}_app"');
   const workerRunning = rollback.indexOf('docker service scale "${stack_name}_worker=1"');
@@ -107,6 +178,7 @@ test('rollback exige tag e backup é verificável sem remoção automática', as
   assert.match(backup, /pg_restore --list/);
   assert.match(backup, /sha256sum/);
   assert.match(backup, /BACKUP_ROOT="\$\{BACKUP_ROOT:-\/root\/crm-meta-backups\}"/);
+  assert.doesNotMatch(backup, /BACKUP_ROOT="\$\{BACKUP_ROOT:-\.(?:\/|\\)/);
   assert.match(deploy, /BACKUP_ROOT="\$BACKUP_ROOT" bash \.\/scripts\/backup\.sh/);
   assert.match(deploy, /docker service rm "\$migration_service"/);
   assert.doesNotMatch(backup, /find .* -delete|rm .*backup/);

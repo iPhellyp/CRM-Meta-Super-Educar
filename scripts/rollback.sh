@@ -11,26 +11,6 @@ stack_name="${STACK_NAME:-crm-meta}"
 image="crm-meta-super-educar:${target_tag}"
 docker image inspect "$image" > /dev/null
 
-ensure_app_not_paused_on_exit() {
-  local status=$?
-  local app_replicas
-  local worker_replicas
-  trap - EXIT
-  app_replicas="$(
-    docker service inspect --format '{{.Spec.Mode.Replicated.Replicas}}' \
-      "${stack_name}_app" 2>/dev/null || true
-  )"
-  worker_replicas="$(
-    docker service inspect --format '{{.Spec.Mode.Replicated.Replicas}}' \
-      "${stack_name}_worker" 2>/dev/null || true
-  )"
-  if [[ "$app_replicas" == "0" && "$worker_replicas" == "0" ]]; then
-    echo "App e worker estavam pausados; restaurando app para 1" >&2
-    docker service scale "${stack_name}_app=1" > /dev/null || true
-  fi
-  exit "$status"
-}
-
 wait_for_one_running_instance() {
   local service="$1"
   local deadline=$((SECONDS + 300))
@@ -58,10 +38,71 @@ wait_for_one_running_instance() {
   return 1
 }
 
-trap ensure_app_not_paused_on_exit EXIT
+wait_for_one_healthy_instance() {
+  local service="$1"
+  local deadline=$((SECONDS + 300))
+  local -a container_ids
+  local health
+
+  wait_for_one_running_instance "$service"
+  while (( SECONDS < deadline )); do
+    mapfile -t container_ids < <(
+      docker ps --filter "label=com.docker.swarm.service.name=${service}" \
+        --format '{{.ID}}'
+    )
+    if [[ "${#container_ids[@]}" -eq 1 ]]; then
+      health="$(
+        docker inspect \
+          --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+          "${container_ids[0]}"
+      )"
+      [[ "$health" == "healthy" ]] && return 0
+    fi
+    sleep 5
+  done
+
+  echo "Esperado health healthy para ${service}" >&2
+  return 1
+}
+
+ensure_recoverable_services_on_exit() {
+  local status=$?
+  local postgres_replicas
+  local app_replicas
+  local worker_replicas
+  trap - EXIT
+  postgres_replicas="$(
+    docker service inspect --format '{{.Spec.Mode.Replicated.Replicas}}' \
+      "${stack_name}_postgres" 2>/dev/null || true
+  )"
+  if [[ "$postgres_replicas" != "1" ]]; then
+    echo "PostgreSQL nao pode permanecer pausado; restaurando para 1" >&2
+    docker service scale "${stack_name}_postgres=1" > /dev/null || true
+    wait_for_one_healthy_instance "${stack_name}_postgres" || true
+  fi
+  app_replicas="$(
+    docker service inspect --format '{{.Spec.Mode.Replicated.Replicas}}' \
+      "${stack_name}_app" 2>/dev/null || true
+  )"
+  worker_replicas="$(
+    docker service inspect --format '{{.Spec.Mode.Replicated.Replicas}}' \
+      "${stack_name}_worker" 2>/dev/null || true
+  )"
+  if [[ "$app_replicas" == "0" && "$worker_replicas" == "0" ]]; then
+    echo "App e worker estavam pausados; restaurando app para 1" >&2
+    docker service scale "${stack_name}_app=1" > /dev/null || true
+  fi
+  exit "$status"
+}
+
+trap ensure_recoverable_services_on_exit EXIT
 
 echo "Pausando worker CRM"
 docker service scale "${stack_name}_worker=0"
+
+echo "Garantindo PostgreSQL com uma replica healthy"
+docker service scale "${stack_name}_postgres=1"
+wait_for_one_healthy_instance "${stack_name}_postgres"
 
 echo "Atualizando app para ${image}"
 docker service update --detach=true --no-healthcheck --image "$image" "${stack_name}_app"

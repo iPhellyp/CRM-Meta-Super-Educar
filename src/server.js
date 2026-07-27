@@ -48,7 +48,22 @@ import {
   eventsView,
   loginView,
   matriculationConfirmView,
+  wa2DashboardView,
+  wa2InstanceView,
+  wa2QrView,
 } from './views.js';
+import {
+  Wa2Error,
+  connectWa2Instance,
+  disconnectWa2Instance,
+  getWa2Health,
+  getWa2InstanceQr,
+  getWa2InstanceStatus,
+  listWa2Instances,
+  syncWa2Instance,
+  validateWa2InstanceId,
+  wa2ConfigStatus,
+} from './wa2.js';
 
 const app = express();
 const loginAttempts = new Map();
@@ -195,6 +210,162 @@ app.use((req, res, next) => req.method === 'POST' ? requireCsrf(req, res, next) 
 app.post('/logout', (_req, res) => {
   clearSession(res);
   res.redirect('/login');
+});
+
+function noStore(res) {
+  res.set({
+    'Cache-Control': 'private, no-store, max-age=0',
+    Pragma: 'no-cache',
+    Expires: '0',
+    'X-Content-Type-Options': 'nosniff',
+  });
+}
+
+function wa2UnavailableMessage(error) {
+  if (error instanceof Wa2Error && error.code === 'WA2_TIMEOUT') {
+    return 'O WA2 não respondeu dentro do prazo.';
+  }
+  if (error instanceof Wa2Error && error.code === 'WA2_DISABLED') {
+    return 'A integração WA2 está desativada.';
+  }
+  if (error instanceof Wa2Error && error.code === 'WA2_CONFIG_INVALID') {
+    return 'A configuração WA2 está inválida.';
+  }
+  return 'Não foi possível concluir a operação no WA2.';
+}
+
+app.get('/wa2', async (req, res) => {
+  const configStatus = wa2ConfigStatus();
+  let health = null;
+  let instances = [];
+  let unavailable = false;
+  if (configStatus.state === 'configured') {
+    const [healthResult, instancesResult] = await Promise.allSettled([
+      getWa2Health(),
+      listWa2Instances(),
+    ]);
+    if (healthResult.status === 'fulfilled') health = healthResult.value;
+    if (instancesResult.status === 'fulfilled') instances = instancesResult.value;
+    unavailable = healthResult.status === 'rejected' || instancesResult.status === 'rejected';
+  }
+  res.send(wa2DashboardView({
+    configStatus,
+    health,
+    instances,
+    unavailable,
+    message: req.query.message || '',
+    error: req.query.error || '',
+    csrfToken: issueCsrfToken(req, res),
+  }));
+});
+
+app.get('/wa2/instances/:id', async (req, res) => {
+  try {
+    const instanceId = validateWa2InstanceId(req.params.id);
+    const status = await getWa2InstanceStatus(instanceId);
+    return res.send(wa2InstanceView({
+      instanceId,
+      status,
+      message: req.query.message || '',
+      error: req.query.error || '',
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  } catch (error) {
+    return redirectWith(res, '/wa2', 'error', wa2UnavailableMessage(error));
+  }
+});
+
+app.get('/wa2/instances/:id/qr', async (req, res) => {
+  noStore(res);
+  try {
+    const instanceId = validateWa2InstanceId(req.params.id);
+    const status = await getWa2InstanceStatus(instanceId);
+    return res.send(wa2QrView({
+      instanceId,
+      status,
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  } catch (error) {
+    return res.status(503).send(wa2QrView({
+      instanceId: '',
+      status: {},
+      error: wa2UnavailableMessage(error),
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  }
+});
+
+app.get('/wa2/instances/:id/qr/image', async (req, res) => {
+  noStore(res);
+  try {
+    const instanceId = validateWa2InstanceId(req.params.id);
+    const qr = await getWa2InstanceQr(instanceId);
+    return res.type(qr.contentType).send(qr.bytes);
+  } catch (error) {
+    const status = error instanceof Wa2Error && error.code === 'WA2_QR_EXPIRED' ? 410 : 503;
+    return res.status(status).type('text/plain').send(
+      status === 410 ? 'QR expirado.' : 'QR indisponível.',
+    );
+  }
+});
+
+app.post('/wa2/instances/:id/connect', async (req, res) => {
+  let instanceId;
+  try {
+    instanceId = validateWa2InstanceId(req.params.id);
+    const mode = z.enum(['auto', 'resume', 'new_qr']).parse(req.body.mode);
+    await connectWa2Instance(instanceId, mode);
+    return redirectWith(
+      res,
+      `/wa2/instances/${encodeURIComponent(instanceId)}`,
+      'message',
+      'Solicitação de conexão enviada ao WA2.',
+    );
+  } catch (error) {
+    const path = instanceId
+      ? `/wa2/instances/${encodeURIComponent(instanceId)}`
+      : '/wa2';
+    return redirectWith(res, path, 'error', wa2UnavailableMessage(error));
+  }
+});
+
+app.post('/wa2/instances/:id/sync', async (req, res) => {
+  let instanceId;
+  try {
+    instanceId = validateWa2InstanceId(req.params.id);
+    const scope = z.enum(['quick', 'catalog', 'history']).parse(req.body.scope);
+    await syncWa2Instance(instanceId, scope);
+    return redirectWith(
+      res,
+      `/wa2/instances/${encodeURIComponent(instanceId)}`,
+      'message',
+      'Solicitação de sincronização enviada ao WA2.',
+    );
+  } catch (error) {
+    const path = instanceId
+      ? `/wa2/instances/${encodeURIComponent(instanceId)}`
+      : '/wa2';
+    return redirectWith(res, path, 'error', wa2UnavailableMessage(error));
+  }
+});
+
+app.post('/wa2/instances/:id/disconnect', async (req, res) => {
+  let instanceId;
+  try {
+    instanceId = validateWa2InstanceId(req.params.id);
+    await disconnectWa2Instance(instanceId);
+    return redirectWith(
+      res,
+      `/wa2/instances/${encodeURIComponent(instanceId)}`,
+      'message',
+      'Solicitação de desconexão enviada ao WA2 com preservação da sessão.',
+    );
+  } catch (error) {
+    const path = instanceId
+      ? `/wa2/instances/${encodeURIComponent(instanceId)}`
+      : '/wa2';
+    return redirectWith(res, path, 'error', wa2UnavailableMessage(error));
+  }
 });
 
 app.get('/', async (req, res) => {

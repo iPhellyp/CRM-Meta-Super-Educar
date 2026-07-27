@@ -29,7 +29,7 @@ function layout(title, body, { logged = true, csrfToken = '' } = {}) {
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-  ${logged ? `<header><strong>CRM Meta · Super Educar</strong><nav><a href="/">Leads</a><a href="/events">Eventos Meta</a><form method="post" action="/logout">${csrfField(csrfToken)}<button class="link">Sair</button></form></nav></header>` : ''}
+  ${logged ? `<header><strong>CRM Meta · Super Educar</strong><nav><a href="/">Leads</a><a href="/events">Eventos Meta</a><a href="/wa2">WA2</a><form method="post" action="/logout">${csrfField(csrfToken)}<button class="link">Sair</button></form></nav></header>` : ''}
   <main>${body}</main>
 </body>
 </html>`;
@@ -267,5 +267,127 @@ export function eventsView({ events, jobs, message = '', error = '', csrfToken =
       <thead><tr><th>Evento</th><th>Lead</th><th>Status</th><th>Envio/erro</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="4" class="empty">Nenhum evento enviado.</td></tr>'}</tbody>
     </table></div></section>
+  `, { csrfToken });
+}
+
+function wa2StateLabel(status) {
+  const labels = {
+    configured: 'Configurada',
+    disabled: 'Desativada',
+    invalid: 'Inválida',
+  };
+  return labels[status.state] || 'Indisponível';
+}
+
+function detailValue(value) {
+  return value == null || value === '' ? '—' : esc(value);
+}
+
+export function wa2DashboardView({
+  configStatus,
+  health = null,
+  instances = [],
+  unavailable = false,
+  message = '',
+  error = '',
+  csrfToken = '',
+}) {
+  const rows = instances.map((instance) => `
+    <tr>
+      <td><strong>${detailValue(instance.name || instance.id)}</strong><small>${esc(instance.id)}</small></td>
+      <td>${detailValue(instance.role)}</td>
+      <td>${detailValue(instance.phone)}</td>
+      <td><span class="badge ${statusClass(instance.status)}">${detailValue(instance.status)}</span></td>
+      <td>${instance.isDefault ? '<span class="ok">Padrão</span>' : '—'}</td>
+      <td><a class="small button-link" href="/wa2/instances/${encodeURIComponent(instance.id)}">Detalhes</a></td>
+    </tr>`).join('');
+
+  return layout('WA2', `
+    ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
+    ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+    <section class="hero">
+      <div><h1>WA Sender 2</h1><p>Administração server-side de instâncias e sessão.</p></div>
+      <div class="meta-box ${configStatus.state === 'configured' ? 'ready' : 'pending'}">
+        <strong>${esc(wa2StateLabel(configStatus))}</strong>
+        <span>${health ? `Health: ${esc(health.status || (health.ok ? 'ok' : 'indisponível'))}` : 'Health não consultado'}</span>
+        ${unavailable ? '<small>O WA2 não respondeu. Tente novamente mais tarde.</small>' : ''}
+        ${configStatus.errors.length ? `<small>${esc(configStatus.errors.join('. '))}</small>` : ''}
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-title"><h2>Instâncias</h2><span>${instances.length} exibidas</span></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Instância</th><th>Função</th><th>Telefone</th><th>Status</th><th>Principal</th><th>Ação</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="6" class="empty">Nenhuma instância disponível.</td></tr>'}</tbody>
+      </table></div>
+    </section>
+  `, { csrfToken });
+}
+
+export function wa2InstanceView({
+  instanceId,
+  status,
+  message = '',
+  error = '',
+  csrfToken = '',
+}) {
+  return layout('Instância WA2', `
+    ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
+    ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+    <section class="hero">
+      <div><h1>${detailValue(status.name || instanceId)}</h1><p>Estado atual da instância WA2.</p></div>
+      <span class="badge ${statusClass(status.status)}">${detailValue(status.status)}</span>
+    </section>
+    <section class="panel detail-grid">
+      <div><strong>Telefone</strong><span>${detailValue(status.phone)}</span></div>
+      <div><strong>Conectada em</strong><span>${detailValue(status.connectedAt)}</span></div>
+      <div><strong>Última sincronização</strong><span>${detailValue(status.lastSyncAt)}</span></div>
+      <div><strong>Requer QR</strong><span>${status.requiresQr ? 'Sim' : 'Não'}</span></div>
+      <div><strong>Último código de erro</strong><span>${detailValue(status.lastErrorCode)}</span></div>
+      <div><strong>Atualizada em</strong><span>${detailValue(status.updatedAt)}</span></div>
+    </section>
+    <section class="panel">
+      <h2>Ações</h2>
+      <div class="actions">
+        ${status.requiresQr ? `<a class="small button-link" href="/wa2/instances/${encodeURIComponent(instanceId)}/qr">Exibir QR</a>` : ''}
+        ${['auto', 'resume', 'new_qr'].map((mode) => `
+          <form method="post" action="/wa2/instances/${encodeURIComponent(instanceId)}/connect">
+            ${csrfField(csrfToken)}
+            <input type="hidden" name="mode" value="${mode}">
+            <button class="small">Conectar: ${esc(mode)}</button>
+          </form>`).join('')}
+        ${['quick', 'catalog', 'history'].map((scope) => `
+          <form method="post" action="/wa2/instances/${encodeURIComponent(instanceId)}/sync">
+            ${csrfField(csrfToken)}
+            <input type="hidden" name="scope" value="${scope}">
+            <button class="small">Sincronizar: ${esc(scope)}</button>
+          </form>`).join('')}
+        <form method="post" action="/wa2/instances/${encodeURIComponent(instanceId)}/disconnect">
+          ${csrfField(csrfToken)}
+          <button class="small danger">Desconectar preservando sessão</button>
+        </form>
+      </div>
+    </section>
+    <a href="/wa2">Voltar para instâncias</a>
+  `, { csrfToken });
+}
+
+export function wa2QrView({ instanceId, status, error = '', csrfToken = '' }) {
+  return layout('QR WA2', `
+    ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+    <section class="hero">
+      <div><h1>QR da instância</h1><p>O QR é consultado no WA2 e não é armazenado pelo CRM.</p></div>
+      <span class="badge ${statusClass(status.status)}">${detailValue(status.status)}</span>
+    </section>
+    <section class="panel qr-panel">
+      ${status.requiresQr
+        ? `<img class="qr-image" src="/wa2/instances/${encodeURIComponent(instanceId)}/qr/image" alt="QR temporário da instância WA2" referrerpolicy="no-referrer">`
+        : '<p>Esta instância não solicita QR no momento.</p>'}
+      <p class="muted">O QR pode expirar. Atualize esta página para consultar novamente o estado da instância.</p>
+      <div class="actions">
+        <a class="small button-link" href="/wa2/instances/${encodeURIComponent(instanceId)}/qr">Atualizar estado</a>
+        <a class="small button-link" href="/wa2/instances/${encodeURIComponent(instanceId)}">Voltar aos detalhes</a>
+      </div>
+    </section>
   `, { csrfToken });
 }

@@ -66,9 +66,27 @@ META_TEST_MODE=true
 META_TEST_EVENT_CODE=
 
 DEFAULT_TENANT_ID=super-educar
+
+WA2_INTERNAL_API_BASE_URL=
+WA2_INTERNAL_API_SECRET=
+WA2_INTERNAL_API_TIMEOUT_MS=5000
 ```
 
 `OPERATION_START_AT` deve ser uma data ISO 8601 com fuso. A tela principal e seus indicadores mostram, por padrão, apenas leads criados a partir dela. Leads anteriores continuam armazenados sem alteração.
+
+### WA Sender 2 opcional
+
+A integração administrativa com o WA2 é opcional. Para ativá-la, configure juntos
+`WA2_INTERNAL_API_BASE_URL` e `WA2_INTERNAL_API_SECRET`. Se ambos estiverem vazios,
+o CRM inicia normalmente e mostra a integração como desativada. O timeout server-side
+é definido por `WA2_INTERNAL_API_TIMEOUT_MS`.
+
+Health, instâncias, status, QR, conexão, sincronização e desconexão são consultados
+somente pelo servidor do CRM. O segredo Bearer nunca é enviado ao navegador. Os
+comandos são assíncronos: o painel confirma apenas que a solicitação foi enviada.
+
+O QR é validado, convertido em imagem por uma rota autenticada com cache desativado
+e nunca é persistido pelo CRM. Ele não deve aparecer em logs, URLs, cookies ou banco.
 
 Em produção HTTPS, `COOKIE_SECURE=true` é obrigatório. Use `COOKIE_SECURE=false` apenas no acesso local por `http://localhost`.
 

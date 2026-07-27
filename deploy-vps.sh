@@ -23,8 +23,10 @@ require_env() {
 }
 
 stack_name="crm-meta"
+BACKUP_ROOT="${BACKUP_ROOT:-/root/crm-meta-backups}"
 MIGRATION_NETWORK="${MIGRATION_NETWORK:-${stack_name}_internal}"
 MIGRATION_TIMEOUT_SECONDS="${MIGRATION_TIMEOUT_SECONDS:-300}"
+MIGRATION_SERVICE_NAME_MAX_LENGTH=63
 migration_service=""
 migration_env=""
 
@@ -120,6 +122,7 @@ wait_for_migration_service() {
 run_swarm_migration() {
   local image="crm-meta-super-educar:${IMAGE_TAG}"
   local safe_tag
+  local epoch
   local create_output
 
   [[ "$MIGRATION_NETWORK" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || {
@@ -133,8 +136,13 @@ run_swarm_migration() {
     }
   docker network inspect "$MIGRATION_NETWORK" > /dev/null
 
-  safe_tag="$(printf '%s' "$IMAGE_TAG" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-40)"
-  migration_service="${stack_name}_migrate_${safe_tag}_$(date +%s%N)_$$"
+  safe_tag="$(printf '%s' "$IMAGE_TAG" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-12)"
+  epoch="$(date +%s)"
+  migration_service="crmm_${safe_tag}_${epoch}_$$"
+  (( ${#migration_service} <= MIGRATION_SERVICE_NAME_MAX_LENGTH )) || {
+    echo "Nome do servico temporario de migration excede 63 caracteres" >&2
+    return 1
+  }
   migration_env="$(mktemp)"
   chmod 600 "$migration_env"
   printf 'DATABASE_URL=%s\nDATABASE_SSL=%s\nDEFAULT_TENANT_ID=%s\n' \
@@ -232,7 +240,7 @@ printf 'silent\nshow-error\nfail\nheader = "Authorization: Bearer %s"\n' "$WA2_I
     "${WA2_INTERNAL_API_BASE_URL%/}/api/internal/v1/health" > /dev/null
 echo "DNS e HTTPS CRM -> WA2 confirmados via Traefik"
 
-bash ./scripts/backup.sh
+BACKUP_ROOT="$BACKUP_ROOT" bash ./scripts/backup.sh
 docker build -t "crm-meta-super-educar:${IMAGE_TAG}" .
 echo "Imagem publicada localmente: crm-meta-super-educar:${IMAGE_TAG}"
 

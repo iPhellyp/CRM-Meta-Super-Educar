@@ -20,8 +20,12 @@ arquivo de ambiente da VPS, nunca no Git.
 a imagem; pausa app/worker; executa um único `npm run migrate`; atualiza o app;
 atualiza o worker; e aguarda as atualizações do Swarm.
 
-A migration usa o runner SQL existente e advisory lock PostgreSQL. Qualquer
-falha interrompe o script antes da atualização. Localmente, a ausência de
+A migration usa o runner SQL existente em um serviço Swarm temporário, com uma
+única tarefa no manager, sem exigir rede overlay attachable. O serviço aguarda
+estado `complete` e exit code `0`, tem timeout de 300 segundos e é removido em
+sucesso ou falha. `MIGRATION_NETWORK` permite substituir a rede interna e
+`MIGRATION_TIMEOUT_SECONDS` permite ajustar o timeout. Qualquer falha interrompe
+o script antes da atualização. Localmente, a ausência de
 `RUN_MIGRATIONS_ON_STARTUP` mantém a compatibilidade anterior; defina `false`
 quando quiser executar `npm run migrate` separadamente. No Compose local,
 somente o app migra no startup; o worker aguarda o mesmo banco e não concorre.

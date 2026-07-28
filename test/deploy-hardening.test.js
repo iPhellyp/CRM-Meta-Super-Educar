@@ -122,7 +122,7 @@ test('deploy migra uma vez antes de app e worker e não importa leads', async ()
   );
   assert.match(
     deploy,
-    /wait_for_one_healthy_instance "\$\{stack_name\}_postgres"\necho "PostgreSQL permaneceu healthy[\s\S]*?\n\nrun_swarm_migration/,
+    /wait_for_one_healthy_instance "\$\{stack_name\}_postgres"\r?\necho "PostgreSQL permaneceu healthy[\s\S]*?\r?\n\r?\nrun_swarm_migration/,
   );
   assert.doesNotMatch(deploy, /migrate dev/);
   assert.doesNotMatch(deploy, /import[-_: ]*lead|historical-sync/i);

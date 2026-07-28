@@ -1,13 +1,15 @@
 import {
+  LOST_REASON_LABELS,
   STAGE_LABELS,
   STAGES,
   getStageActions,
   getStageBadgeClass,
 } from './funnel.js';
-import { getWhatsAppUrl } from './phone.js';
+import { selectBestLeadPhone } from './phone.js';
 import {
   WA2_LABEL_STAGES,
   getWa2StageLabelName,
+  normalizeWa2LabelName,
 } from './wa2-label-sync.js';
 
 function esc(value) {
@@ -31,9 +33,10 @@ function layout(title, body, { logged = true, csrfToken = '' } = {}) {
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>${esc(title)} · CRM Super Educar</title>
   <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
 </head>
 <body>
-  ${logged ? `<header><strong>CRM Meta · Super Educar</strong><nav><a href="/">Leads</a><a href="/events">Eventos Meta</a><a href="/wa2">WA2</a><a href="/wa2/labels">Etiquetas WA2</a><a href="/wa2/label-jobs">Jobs WA2</a><a href="/operations">Importação e reconciliação</a><form method="post" action="/logout">${csrfField(csrfToken)}<button class="link">Sair</button></form></nav></header>` : ''}
+  ${logged ? `<header><strong>CRM Meta · Super Educar</strong><nav><a href="/">Leads</a><a href="/meta/connections">Conexões Meta</a><a href="/events">Eventos Meta</a><a href="/wa2">WA2</a><a href="/wa2/labels">Etiquetas WA2</a><a href="/wa2/label-jobs">Jobs WA2</a><a href="/operations">Importação e reconciliação</a><form method="post" action="/logout">${csrfField(csrfToken)}<button class="link">Sair</button></form></nav></header>` : ''}
   <main>${body}</main>
 </body>
 </html>`;
@@ -58,9 +61,21 @@ function stat(label, value) {
   return `<div class="stat"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
 }
 
+function operationDuration(startedAt, completedAt) {
+  if (!startedAt) return '—';
+  const start = new Date(startedAt).getTime();
+  const end = completedAt ? new Date(completedAt).getTime() : Date.now();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return '—';
+  const seconds = Math.floor((end - start) / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return minutes < 60 ? `${minutes}min ${seconds % 60}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}min`;
+}
+
 export function historicalOperationsView({
   operations,
   instances,
+  metaForms = [],
   message = '',
   error = '',
   csrfToken = '',
@@ -71,12 +86,17 @@ export function historicalOperationsView({
       <p>Operações retomáveis por tenant, executadas em lotes pelo worker.</p></div></section>
     ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
     ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
-    <section class="card">
+    <section class="panel">
       <h2>Importação Meta</h2>
       <form method="post" action="/operations/meta-imports" class="stack">
         ${csrfField(csrfToken)}
-        <label>Page ID<input name="pageId" inputmode="numeric" maxlength="100" required></label>
-        <label>Form ID<input name="formId" inputmode="numeric" maxlength="100" required></label>
+        <label>Conexão, página e formulários
+          <select name="formRecordIds" multiple required size="${Math.min(Math.max(metaForms.length, 3), 8)}">
+            ${metaForms.map((form) => `<option value="${esc(form.id)}">${esc(form.connection_name)} · ${esc(form.page_name)} · ${esc(form.name)}</option>`).join('')}
+          </select>
+        </label>
+        <label>Início do período<input type="date" name="periodStart"></label>
+        <label>Fim do período<input type="date" name="periodEnd"></label>
         <button type="submit">Iniciar importação</button>
       </form>
       <table><thead><tr><th>Form</th><th>Status</th><th>Recebidos</th>
@@ -90,14 +110,14 @@ export function historicalOperationsView({
           ${['PENDING', 'PAUSED'].includes(run.status) ? `<form method="post" action="/operations/meta-imports/${esc(run.id)}/cancel">${csrfField(csrfToken)}<button>Cancelar</button></form>` : ''}
           </td></tr>`).join('')}</tbody></table>
     </section>
-    <section class="card">
+    <section class="panel">
       <h2>Eventos WhatsApp</h2>
       <p>Cursor: ${esc(cursor?.cursor_value || 'inicial')} · Status: ${esc(cursor?.status || 'IDLE')}</p>
-      <p>Processados: ${esc(cursor?.processed_count || 0)} · Ignorados INTERNAL_API/REMOVE:
-        ${esc(cursor?.ignored_count || 0)} · Conflitos: ${esc(cursor?.conflict_count || 0)} ·
-        Pendências: ${esc(cursor?.pending_count || 0)}</p>
+      <p><strong>${esc(cursor?.ignored_count || 0)} eventos internos ignorados por não representarem alteração comercial.</strong></p>
+      <p>Processados: ${esc(cursor?.processed_count || 0)} · Conflitos: ${esc(cursor?.conflict_count || 0)} ·
+        Pendências: ${esc(cursor?.pending_count || 0)} · Erro atual: ${detailValue(cursor?.last_error_code)}</p>
     </section>
-    <section class="card">
+    <section class="panel">
       <h2>Reconciliação WA2</h2>
       <form method="post" action="/operations/reconciliations" class="stack">
         ${csrfField(csrfToken)}
@@ -109,35 +129,74 @@ export function historicalOperationsView({
       <table><thead><tr><th>Instância</th><th>Status</th><th>Progresso</th>
         <th>Resultados</th><th>Ação</th></tr></thead><tbody>
         ${operations.reconciliations.map((run) => `<tr>
-          <td>${esc(run.instance_name)}</td><td>${esc(run.status)}</td>
-          <td>${esc(run.processed_count)}/${esc(run.total_count)}</td>
-          <td>${esc(JSON.stringify(run.results || {}))}</td>
+          <td><strong>${esc(run.instance_name)}</strong><small>Job ${esc(run.id)}</small><small>Criado: ${detailValue(run.created_at)}</small><small>Tenant: ${detailValue(run.tenant_id)}</small></td><td>${esc({
+            PENDING: 'Pendente', RUNNING: 'Processando', COMPLETED: 'Concluído',
+            PARTIAL: 'Concluído com pendências', FAILED: 'Falhou', CANCELLED: 'Cancelado',
+          }[run.status] || run.status)}<small>Início: ${detailValue(run.started_at)} · Fim: ${detailValue(run.completed_at)}</small><small>Lock: ${detailValue(run.locked_at)} · Heartbeat: ${detailValue(run.heartbeat_at)}</small></td>
+          <td>${esc(run.processed_count)}/${esc(run.total_count)}<small>Duração: ${esc(operationDuration(run.started_at, run.completed_at))} · ${esc(run.retry_count || 0)} retry(s)</small>${run.last_error ? `<small class="error-text">${esc(run.last_error)}</small>` : ''}</td>
+          <td>${Object.entries(run.results || {}).map(([result, count]) => `<div><strong>${esc(count)}</strong> · <a href="/operations/reconciliations/${esc(run.id)}/items?result=${esc(result)}">${esc({
+            MATCHED: 'Correspondências encontradas', UPDATED: 'Leads atualizados',
+            PHONE_EMPTY: 'Telefone vazio', PHONE_INVALID: 'Telefone inválido',
+            NOT_FOUND_IN_WA2: 'Não encontrado no WA2', LID_UNRESOLVED: 'LID não resolvido',
+            LABEL_UNMAPPED: 'Etiqueta sem vínculo', CONFLICT: 'Conflito', ERROR: 'Erro',
+          }[result] || result)}</a></div>`).join('') || 'Sem resultados'}<small><a href="/operations/reconciliations/${esc(run.id)}/errors.csv">Exportar erros CSV</a></small></td>
           <td><form method="post" action="/operations/reconciliations/${esc(run.id)}/retry">
-            ${csrfField(csrfToken)}<button>Retry falhas</button></form></td></tr>`).join('')}
+            ${csrfField(csrfToken)}<button${!['PARTIAL','FAILED'].includes(run.status) ? ' disabled title="Não há falhas elegíveis para retry"' : ''}>Retry falhas</button></form></td></tr>`).join('')}
       </tbody></table>
     </section>
-    <section class="card"><h2>Conflitos abertos</h2><ul>
+    <section class="panel"><h2>Conflitos abertos</h2><ul>
       ${operations.conflicts.map((item) =>
         `<li>${esc(item.conflict_type)} — ${item.lead_id ? `<a href="/leads/${esc(item.lead_id)}">${esc(item.lead_name || item.lead_id)}</a>` : 'sem lead'}</li>`).join('') || '<li>Nenhum.</li>'}
     </ul></section>
-    <section class="card"><h2>Confirmações de matrícula</h2><ul>
+    <section class="panel"><h2>Solicitações antigas de matrícula</h2><ul>
       ${operations.confirmations.map((item) => `<li>${esc(item.lead_name)}
         <a href="/leads/${esc(item.lead_id)}">Abrir lead</a>
-        <form method="post" action="/operations/confirmations/${esc(item.id)}/confirm">${csrfField(csrfToken)}<button>Confirmar</button></form>
         <form method="post" action="/operations/confirmations/${esc(item.id)}/reject">${csrfField(csrfToken)}<button>Rejeitar</button></form>
       </li>`).join('') || '<li>Nenhuma.</li>'}
     </ul></section>
   `, { csrfToken });
 }
 
-function whatsappAction(phone) {
-  const whatsappUrl = getWhatsAppUrl(phone);
-  if (!whatsappUrl) {
+export function reconciliationItemsView({
+  runId,
+  result = '',
+  items = [],
+  csrfToken = '',
+}) {
+  const labels = {
+    MATCHED: 'Correspondência encontrada',
+    UPDATED: 'Lead atualizado',
+    PHONE_EMPTY: 'Telefone vazio',
+    PHONE_INVALID: 'Telefone inválido',
+    NOT_FOUND_IN_WA2: 'Não encontrado no WA2',
+    LID_UNRESOLVED: 'LID não resolvido',
+    LABEL_UNMAPPED: 'Etiqueta sem vínculo',
+    CONFLICT: 'Conflito',
+    ERROR: 'Erro',
+  };
+  return layout('Registros da reconciliação', `
+    <section class="hero"><div><h1>Registros da reconciliação</h1><p>Job ${esc(runId)}${result ? ` · ${esc(labels[result] || result)}` : ''}</p></div></section>
+    <section class="panel">
+      <div class="panel-title"><h2>Registros</h2><span>${items.length} exibidos</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Lead</th><th>Resultado</th><th>Tentativas</th><th>Erro sanitizado</th><th>Finalizado</th></tr></thead><tbody>
+        ${items.map((item) => `<tr><td><a href="/leads/${esc(item.lead_id)}">${esc(item.lead_name)}</a><small>${esc(item.lead_id)}</small></td><td>${esc(labels[item.result] || item.result || 'Pendente')}</td><td>${esc(item.attempts)}</td><td>${detailValue(item.last_error_code)}</td><td>${detailValue(item.finished_at)}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">Nenhum registro.</td></tr>'}
+      </tbody></table></div>
+    </section>
+    <div class="actions"><a class="button-link secondary" href="/operations">Voltar</a><a class="button-link" href="/operations/reconciliations/${esc(runId)}/errors.csv">Exportar erros CSV</a></div>
+  `, { csrfToken });
+}
+
+function whatsappAction(lead, csrfToken) {
+  const phone = selectBestLeadPhone(lead);
+  if (!phone.phoneNormalized) {
     return `
-      <span class="small button-link whatsapp disabled" aria-disabled="true">Conversar</span>
+      <span class="action-button whatsapp disabled" aria-disabled="true" title="Telefone inválido">◉ Abrir WhatsApp</span>
       <small class="action-note error-text">Telefone inválido</small>`;
   }
-  return `<a class="small button-link whatsapp" href="${esc(whatsappUrl)}" target="_blank" rel="noopener noreferrer">Conversar</a>`;
+  return `<form method="post" action="/leads/${esc(lead.id)}/whatsapp" target="_blank" rel="noopener noreferrer">
+    ${csrfField(csrfToken)}
+    <button class="action-button whatsapp primary-action" title="Abrir conversa sem alterar a etapa">◉ Abrir WhatsApp</button>
+  </form>`;
 }
 
 function formatArrival(value) {
@@ -165,17 +224,46 @@ function metadataValue(value) {
   return esc(value || '—');
 }
 
+function dashboardFilterQuery(filters, overrides = {}) {
+  const source = { ...filters, ...overrides };
+  const params = new URLSearchParams();
+  for (const key of [
+    'search', 'course', 'city', 'stage', 'lostReason', 'instanceId', 'labelId',
+    'metaConnectionId', 'businessId', 'pageId', 'formId', 'campaignId',
+    'adsetId', 'adId', 'attributed', 'validPhone', 'unattended',
+    'dateFrom', 'dateTo', 'sort', 'page',
+  ]) {
+    if (source[key] != null && String(source[key]) !== '') {
+      params.set(key, String(source[key]));
+    }
+  }
+  return params.toString();
+}
+
 function stageActions(lead, csrfToken) {
   const actions = getStageActions(lead.stage);
   if (actions.length === 0) return '<span class="muted">Etapa final</span>';
-  return actions.map(({ stage, label }) => stage === STAGES.MATRICULATED
-    ? `<a class="small button-link success" href="/leads/${esc(lead.id)}/matriculate">${label}</a>`
-    : `
+  return actions.map(({ stage, label }) => {
+    if (['LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED'].includes(stage)) {
+      return `<button type="button" class="action-button stage-lost" data-lost-lead="${esc(lead.id)}" title="Registrar perda e motivo">✕ ${esc(label)}</button>`;
+    }
+    const actionClass = {
+      CONTACT_STARTED: 'stage-contact',
+      IN_SERVICE: 'stage-contact',
+      QUALIFIED: 'stage-qualified',
+      OPPORTUNITY: 'stage-opportunity',
+      NEGOTIATING: 'stage-opportunity',
+      AWAITING_ENROLLMENT: 'stage-enrollment',
+      AWAITING_PAYMENT: 'stage-enrollment',
+      NO_RESPONSE: 'stage-secondary',
+    }[stage] || 'stage-secondary';
+    return `
     <form method="post" action="/leads/${esc(lead.id)}/stage">
       ${csrfField(csrfToken)}
       <input type="hidden" name="stage" value="${stage}">
-      <button class="small ${stage === 'LOST' ? 'danger' : ''}">${label}</button>
-    </form>`).join('');
+      <button class="action-button ${actionClass}" title="Mover para ${esc(label)}">→ ${esc(label)}</button>
+    </form>`;
+  }).join('');
 }
 
 export function dashboardView({
@@ -185,34 +273,48 @@ export function dashboardView({
   message = '',
   error = '',
   operationStartAt = null,
+  filters = {},
+  pagination = { page: 1, hasNext: false },
+  wa2Instances = [],
+  metaConnections = [],
+  whatsappMessage = '',
   csrfToken = '',
 }) {
   const rows = leads.map((lead) => {
     const arrival = formatArrival(lead.received_at || lead.created_at);
     return `
       <tr>
+        <td data-label="Selecionar"><input class="lead-select" form="bulk-leads" type="checkbox" name="leadIds" value="${esc(lead.id)}" aria-label="Selecionar ${esc(lead.name)}"></td>
         <td data-label="Lead">
-          <strong>${esc(lead.name)}</strong>
+          <strong><a href="/leads/${esc(lead.id)}">${esc(lead.name)}</a></strong>
           <small>${esc(lead.phone || 'Sem telefone')}${lead.email ? `<br>${esc(lead.email)}` : ''}</small>
-          <small>Curso/produto: ${esc(lead.course || '—')}${lead.city ? `<br>Cidade: ${esc(lead.city)}` : ''}</small>
         </td>
+        <td data-label="Interesse"><strong>${esc(lead.course || '—')}</strong><small>${esc(lead.city || 'Cidade não informada')}</small></td>
         <td data-label="Chegada">${esc(arrival.date)}${arrival.time ? `<small>${esc(arrival.time)}</small>` : ''}</td>
         <td data-label="Origem">
           ${esc(sourceLabel(lead.source))}
           <small>${lead.meta_lead_id ? `Lead Meta: ${esc(lead.meta_lead_id)}` : 'Sem atribuição Meta'}</small>
+          <small>Conexão: ${metadataValue(lead.meta_connection_name)}</small>
+          <small>BM: ${metadataValue(lead.meta_business_id || lead.business_id)}</small>
         </td>
         <td data-label="Campanha" class="metadata-cell">
           <span>Campanha: ${metadataValue(lead.meta_campaign_id)}</span>
           <small>Conjunto: ${metadataValue(lead.meta_adset_id)}</small>
           <small>Anúncio: ${metadataValue(lead.meta_ad_id)}</small>
-          <small>Formulário: ${metadataValue(lead.meta_form_id)}</small>
         </td>
-        <td data-label="Etapa"><span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span></td>
-        <td data-label="Ações">
+        <td data-label="Página/formulário" class="metadata-cell">
+          <span>Página: ${metadataValue(lead.meta_page_name || lead.meta_page_id)}</span>
+          <small>Formulário: ${metadataValue(lead.meta_form_name || lead.meta_form_id)}</small>
+          <small>Instância WA2: ${metadataValue(lead.wa2_instance_name)}</small>
+        </td>
+        <td data-label="Etapa"><span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span>${lead.lost_reason ? `<small>Motivo: ${esc(LOST_REASON_LABELS[lead.lost_reason] || lead.lost_reason)}</small>` : ''}</td>
+        <td data-label="Ações" class="actions-cell">
           <div class="actions">
-            <div class="whatsapp-action">${whatsappAction(lead.phone)}</div>
-            <a class="small button-link" href="/leads/${esc(lead.id)}/wa2">WhatsApp/WA2</a>
-            ${stageActions(lead, csrfToken)}
+            <div class="whatsapp-action">${whatsappAction(lead, csrfToken)}</div>
+            <div class="secondary-actions">
+              <a class="action-button stage-secondary" href="/leads/${esc(lead.id)}/wa2" title="Vínculo e detalhes WA2">⚙ WA2</a>
+              ${stageActions(lead, csrfToken)}
+            </div>
           </div>
         </td>
       </tr>`;
@@ -223,7 +325,7 @@ export function dashboardView({
     ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
 
     <section class="hero">
-      <div><h1>Leads e conversões</h1><p>Marque o lead como qualificado ou matriculado para enviar o estágio à Meta.</p></div>
+      <div><h1>Leads e conversões</h1><p>Atendimento comercial, WhatsApp, WA2 e atribuição Meta por origem.</p></div>
       <div class="meta-box ${metaStatus.configured ? 'ready' : 'pending'}">
         <strong>${metaStatus.configured ? 'Meta configurada' : 'Meta pendente'}</strong>
         <span>Graph ${esc(metaStatus.graphVersion)} · ${metaStatus.testMode ? 'MODO TESTE' : 'PRODUÇÃO'}</span>
@@ -231,8 +333,36 @@ export function dashboardView({
       </div>
     </section>
 
+    <section class="panel">
+      <div class="panel-title"><div><h2>Filtros</h2><small>Consultas paginadas e isoladas por tenant.</small></div></div>
+      <form method="get" action="/" class="filter-grid">
+        <label>Busca<input name="search" value="${esc(filters.search || '')}" placeholder="Nome, telefone, e-mail ou curso"></label>
+        <label>Curso/interesse<input name="course" value="${esc(filters.course || '')}"></label>
+        <label>Cidade<input name="city" value="${esc(filters.city || '')}"></label>
+        <label>Etapa<select name="stage"><option value="">Todas</option>${Object.entries(STAGE_LABELS).map(([value, label]) => `<option value="${value}"${filters.stage === value ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
+        <label>Motivo da perda<select name="lostReason"><option value="">Todos</option>${Object.entries(LOST_REASON_LABELS).map(([value, label]) => `<option value="${value}"${filters.lostReason === value ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
+        <label>Instância WA2<select name="instanceId"><option value="">Todas</option>${wa2Instances.map((instance) => `<option value="${esc(instance.id)}"${filters.instanceId === instance.id ? ' selected' : ''}>${detailValue(instance.name || instance.remote_instance_id)}</option>`).join('')}</select></label>
+        <label>Etiqueta WA2 (ID)<input name="labelId" value="${esc(filters.labelId || '')}"></label>
+        <label>Conexão Meta<select name="metaConnectionId"><option value="">Todas</option>${metaConnections.map((connection) => `<option value="${esc(connection.id)}"${filters.metaConnectionId === connection.id ? ' selected' : ''}>${esc(connection.name)}</option>`).join('')}</select></label>
+        <label>BM<input name="businessId" value="${esc(filters.businessId || '')}" inputmode="numeric"></label>
+        <label>Página<input name="pageId" value="${esc(filters.pageId || '')}"></label>
+        <label>Formulário<input name="formId" value="${esc(filters.formId || '')}"></label>
+        <label>Campanha<input name="campaignId" value="${esc(filters.campaignId || '')}"></label>
+        <label>Conjunto<input name="adsetId" value="${esc(filters.adsetId || '')}"></label>
+        <label>Anúncio<input name="adId" value="${esc(filters.adId || '')}"></label>
+        <label>Atribuição Meta<select name="attributed"><option value="">Todas</option><option value="yes"${filters.attributed === 'yes' ? ' selected' : ''}>Atribuído</option><option value="no"${filters.attributed === 'no' ? ' selected' : ''}>Não atribuído</option></select></label>
+        <label>Telefone<select name="validPhone"><option value="">Todos</option><option value="yes"${filters.validPhone === 'yes' ? ' selected' : ''}>Válido</option><option value="no"${filters.validPhone === 'no' ? ' selected' : ''}>Inválido/ausente</option></select></label>
+        <label>Atendimento<select name="unattended"><option value="">Todos</option><option value="yes"${filters.unattended === 'yes' ? ' selected' : ''}>Sem atendimento</option></select></label>
+        <label>Entrada desde<input type="date" name="dateFrom" value="${esc(filters.dateFrom || '')}"></label>
+        <label>Entrada até<input type="date" name="dateTo" value="${esc(filters.dateTo || '')}"></label>
+        <label>Ordenar<select name="sort">${[['recent','Mais recentes'],['oldest','Mais antigos'],['stage','Etapa'],['unattended','Sem atendimento'],['updated','Última atualização'],['conversation','Última conversa']].map(([value, label]) => `<option value="${value}"${filters.sort === value ? ' selected' : ''}>${label}</option>`).join('')}</select></label>
+        <button type="submit">Aplicar filtros</button>
+        <a class="button-link secondary" href="/">Limpar</a>
+      </form>
+    </section>
+
     <section class="stats">
-      ${stat('Total', counts.total)}${stat('Novos', counts.new)}${stat('Qualificados', counts.qualified)}${stat('Inscrições vestibular', counts.vestibular_registered)}${stat('Vestibulares concluídos', counts.vestibular_completed)}${stat('Matriculados', counts.matriculated)}${stat('Perdidos', counts.lost)}${stat('Taxa de qualificação', `${counts.qualificationRate}%`)}${stat('Taxa de matrícula', `${counts.matriculationRate}%`)}${stat('Eventos pendentes', counts.metaPending)}${stat('Eventos em nova tentativa', counts.metaRetry)}${stat('Eventos com falha', counts.metaFailed)}
+      ${stat('Total', counts.total)}${stat('Novos', counts.new)}${stat('Em atendimento', counts.in_service)}${stat('Qualificados', counts.qualified)}${stat('Oportunidades', counts.opportunities)}${stat('Matriculados', counts.enrolled)}${stat('Pagos', counts.paid)}${stat('Perdidos', counts.lost)}${stat('Taxa de qualificação', `${counts.qualificationRate}%`)}${stat('Taxa de matrícula', `${counts.matriculationRate}%`)}${stat('Eventos pendentes', counts.metaPending)}${stat('Eventos em nova tentativa', counts.metaRetry)}${stat('Eventos com falha', counts.metaFailed)}
     </section>
 
     <section class="panel">
@@ -249,6 +379,15 @@ export function dashboardView({
     </section>
 
     <section class="panel">
+      <div class="panel-title"><div><h2>Mensagem inicial do WhatsApp</h2><small>Configuração isolada deste tenant. Use {{nome}} para personalizar.</small></div></div>
+      <form method="post" action="/settings/whatsapp-message" class="compact-form stack">
+        ${csrfField(csrfToken)}
+        <textarea name="message" required maxlength="1000">${esc(whatsappMessage)}</textarea>
+        <button>Salvar mensagem</button>
+      </form>
+    </section>
+
+    <section class="panel">
       <div class="panel-title">
         <div>
           <h2>Leads recentes</h2>
@@ -256,55 +395,184 @@ export function dashboardView({
         </div>
         <span>${leads.length} exibidos</span>
       </div>
+      <form id="bulk-leads" method="post" action="/leads/bulk" class="bulk-toolbar" data-confirm="Aplicar esta ação a todos os leads selecionados?">
+        ${csrfField(csrfToken)}
+        <strong>Ações em lote</strong>
+        <select name="bulkAction" required><option value="stage">Alterar etapa</option><option value="sync">Sincronizar etiqueta WA2</option></select>
+        <select name="stage"><option value="">Selecione a etapa...</option>${Object.entries(STAGE_LABELS).filter(([stage]) => !['ENROLLED','PAID'].includes(stage)).map(([stage, label]) => `<option value="${stage}">${esc(label)}</option>`).join('')}</select>
+        <select name="lostReason"><option value="">Motivo da perda...</option>${Object.entries(LOST_REASON_LABELS).map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join('')}</select>
+        <input name="lostNotes" maxlength="1000" placeholder="Observação quando Outro">
+        <button>Aplicar aos selecionados</button>
+        <a class="button-link secondary" href="/leads/export.csv?${esc(dashboardFilterQuery(filters))}">Exportar CSV</a>
+      </form>
       <div class="table-wrap"><table class="leads-table">
-        <thead><tr><th>Lead</th><th>Chegada</th><th>Origem</th><th>Campanha</th><th>Etapa</th><th>Ações</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="6" class="empty">Nenhum lead ainda.</td></tr>'}</tbody>
+        <thead><tr><th><span class="sr-only">Selecionar</span></th><th>Lead</th><th>Interesse</th><th>Chegada</th><th>Origem/Meta</th><th>Campanha</th><th>Página/formulário</th><th>Etapa</th><th>Ações</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="9" class="empty">Nenhum lead encontrado.</td></tr>'}</tbody>
       </table></div>
+      <nav class="pagination" aria-label="Paginação de leads">
+        ${pagination.page > 1 ? `<a class="button-link secondary" href="/?${esc(dashboardFilterQuery(filters, { page: pagination.page - 1 }))}">← Anterior</a>` : ''}
+        <span>Página ${esc(pagination.page)}</span>
+        ${pagination.hasNext ? `<a class="button-link secondary" href="/?${esc(dashboardFilterQuery(filters, { page: pagination.page + 1 }))}">Próxima →</a>` : ''}
+      </nav>
     </section>
+    <dialog id="lost-dialog" class="modal">
+      <form method="post" id="lost-form">
+        ${csrfField(csrfToken)}
+        <h2>Registrar perda</h2>
+        <p>Escolha o motivo. Nenhum evento positivo será enviado à Meta.</p>
+        <label>Motivo<select name="lostReason" required><option value="">Selecione</option>${Object.entries(LOST_REASON_LABELS).map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join('')}</select></label>
+        <label class="lost-notes">Observação<textarea name="lostNotes" maxlength="1000"></textarea></label>
+        <div class="actions"><button class="danger">Confirmar perda</button><button type="button" class="secondary" data-close-dialog>Cancelar</button></div>
+      </form>
+    </dialog>
   `, { csrfToken });
 }
 
-export function matriculationConfirmView({ lead, csrfToken = '' }) {
-  return layout('Confirmar matrícula', `
+export function leadDetailView({
+  lead,
+  history = [],
+  csrfToken = '',
+}) {
+  const activityLabels = {
+    LEAD_RECEIVED: 'Lead recebido',
+    HISTORICAL_IMPORT: 'Importado historicamente',
+    WHATSAPP_OPENED: 'WhatsApp aberto',
+    STAGE_CHANGED: 'Etapa alterada',
+    LABEL_SYNC_REQUESTED: 'Sincronização de etiqueta solicitada',
+    LABEL_APPLIED: 'Etiqueta aplicada',
+    LABEL_REMOVED: 'Etiqueta removida',
+    META_EVENT_QUEUED: 'Evento Meta enfileirado',
+    META_EVENT_SENT: 'Evento Meta enviado',
+    META_EVENT_FAILED: 'Erro no evento Meta',
+    SYNC_CONFLICT: 'Conflito de sincronização',
+    LOST: 'Lead perdido',
+  };
+  const timeline = history.map((item) => `
+    <li>
+      <strong>${esc(activityLabels[item.activity_type] || 'Atividade')}</strong>
+      <small>${esc(new Date(item.changed_at).toLocaleString('pt-BR'))} · ${esc(item.origin || '—')} · ${esc(item.changed_by || 'Sistema')}</small>
+      ${item.previous_stage !== item.new_stage ? `<div>${esc(STAGE_LABELS[item.previous_stage] || item.previous_stage)} → <strong>${esc(STAGE_LABELS[item.new_stage] || item.new_stage)}</strong></div>` : ''}
+      ${item.reason ? `<div>Motivo: ${esc(LOST_REASON_LABELS[item.reason] || item.reason)}</div>` : ''}
+      ${item.observation ? `<div>${esc(item.observation)}</div>` : ''}
+      ${item.meta_event_id ? `<small>Evento Meta: ${esc(item.meta_event_id)}</small>` : ''}
+    </li>`).join('');
+  return layout(`Lead ${lead.name}`, `
     <section class="hero">
-      <div>
-        <h1>Confirmar matrícula</h1>
-        <p>Revise os dados antes de concluir esta etapa.</p>
-      </div>
+      <div><h1>${esc(lead.name)}</h1><p>Detalhes administrativos e histórico auditável.</p></div>
+      <span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span>
+    </section>
+    <section class="panel detail-grid">
+      <div><strong>Telefone recebido</strong><span>${detailValue(lead.phone)}</span></div>
+      <div><strong>Telefone normalizado</strong><span>${detailValue(lead.phone_normalized)}</span></div>
+      <div><strong>E-mail</strong><span>${detailValue(lead.email)}</span></div>
+      <div><strong>Curso/interesse</strong><span>${detailValue(lead.course)}</span></div>
+      <div><strong>Cidade</strong><span>${detailValue(lead.city)}</span></div>
+      <div><strong>Meta Lead ID</strong><span>${detailValue(lead.meta_lead_id)}</span></div>
+      <div><strong>Página</strong><span>${detailValue(lead.meta_page_id)}</span></div>
+      <div><strong>Formulário</strong><span>${detailValue(lead.meta_form_id)}</span></div>
+      <div><strong>Campanha</strong><span>${detailValue(lead.meta_campaign_id)}</span></div>
+      <div><strong>Conjunto</strong><span>${detailValue(lead.meta_adset_id)}</span></div>
+      <div><strong>Anúncio</strong><span>${detailValue(lead.meta_ad_id)}</span></div>
+      <div><strong>Dataset</strong><span>${detailValue(lead.dataset_id)}</span></div>
+      <div><strong>Motivo da perda</strong><span>${detailValue(LOST_REASON_LABELS[lead.lost_reason] || lead.lost_reason)}</span></div>
+      <div><strong>Observação da perda</strong><span>${detailValue(lead.lost_notes)}</span></div>
     </section>
     <section class="panel">
-      <h2>${esc(lead.name)}</h2>
-      <p>Curso/produto: ${esc(lead.course || '—')}</p>
-      <p>
-        Esta ação marcará a matrícula como concluída, ficará registrada no histórico
-        e poderá enfileirar o evento Converted para a Meta quando houver atribuição.
-      </p>
-      <div class="actions">
-        <form method="post" action="/leads/${esc(lead.id)}/matriculate">
-          ${csrfField(csrfToken)}
-          <input type="hidden" name="confirmation" value="MATRICULATION_COMPLETED">
-          <button type="submit" class="success">Confirmar matrícula concluída</button>
-        </form>
-        <a class="small button-link" href="/">Cancelar</a>
-      </div>
+      <div class="panel-title"><h2>Linha do tempo</h2><span>${history.length} evento(s)</span></div>
+      <ol class="timeline">${timeline || '<li>Nenhuma atividade registrada.</li>'}</ol>
     </section>
+    <a class="button-link secondary" href="/">Voltar aos leads</a>
+  `, { csrfToken });
+}
+
+export function metaConnectionsView({
+  connections = [],
+  selected = null,
+  remotePages = [],
+  remoteForms = [],
+  selectedPageId = '',
+  message = '',
+  error = '',
+  csrfToken = '',
+}) {
+  const rows = connections.map((connection) => `
+    <tr>
+      <td><strong>${esc(connection.name)}</strong><small>BM ${esc(connection.business_id)}</small></td>
+      <td><span class="badge ${connection.status === 'VALID' ? 'paid' : connection.status === 'ERROR' ? 'lost' : 'new'}">${esc({
+        PENDING: 'Pendente', VALID: 'Válida', INVALID: 'Inválida', ERROR: 'Erro',
+      }[connection.status] || connection.status)}</span><small>${connection.active ? 'Ativa' : 'Inativa'}</small></td>
+      <td>${esc(connection.page_count)} página(s)<small>${esc(connection.form_count)} formulário(s) · ${esc(connection.dataset_count)} dataset(s)</small></td>
+      <td>${connection.last_error ? `<small class="error-text">${esc(connection.last_error)}</small>` : '—'}</td>
+      <td><div class="actions"><a class="action-button stage-secondary" href="/meta/connections?connectionId=${esc(connection.id)}">Configurar</a>
+        <form method="post" action="/meta/connections/${esc(connection.id)}/active"${connection.active ? ' data-confirm="Desativar esta conexão Meta? O histórico será preservado."' : ''}>${csrfField(csrfToken)}<input type="hidden" name="active" value="${connection.active ? 'false' : 'true'}">${connection.active ? '<input type="hidden" name="confirmation" value="DEACTIVATE_META_CONNECTION">' : ''}<button class="action-button ${connection.active ? 'danger' : 'success'}">${connection.active ? 'Desativar' : 'Ativar'}</button></form>
+      </div></td>
+    </tr>`).join('');
+  const pageOptions = remotePages.map((page) => `<option value="${esc(page.id)}">${esc(page.name)} · ${esc(page.id)}</option>`).join('');
+  const savedPageOptions = (selected?.pages || []).map((page) => `<option value="${esc(page.id)}">${esc(page.name)} · ${esc(page.page_id)}</option>`).join('');
+  const formOptions = remoteForms.map((form) => `<option value="${esc(form.id)}">${esc(form.name)} · ${esc(form.id)}</option>`).join('');
+  return layout('Conexões Meta', `
+    ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
+    ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+    <section class="hero"><div><h1>Conexões Meta</h1><p>Múltiplos BMs, páginas, formulários e datasets, sempre isolados por tenant.</p></div></section>
+    <section class="panel">
+      <h2>Adicionar conexão</h2>
+      <form method="post" action="/meta/connections" class="filter-grid">
+        ${csrfField(csrfToken)}
+        <label>Nome<input name="name" required maxlength="200"></label>
+        <label>Business ID<input name="businessId" required inputmode="numeric"></label>
+        <label>Ad Account ID<input name="adAccountId" inputmode="numeric"></label>
+        <label>App ID<input name="appId" inputmode="numeric"></label>
+        <label>Access token<input name="accessToken" type="password" required autocomplete="new-password"></label>
+        <label>App Secret opcional<input name="appSecret" type="password" autocomplete="new-password"></label>
+        <button>Validar e salvar</button>
+      </form>
+      <small>Credenciais são criptografadas no servidor e nunca retornam ao navegador.</small>
+    </section>
+    <section class="panel">
+      <div class="panel-title"><h2>Conexões cadastradas</h2><span>${connections.length}</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Conexão/BM</th><th>Status</th><th>Recursos</th><th>Último erro</th><th>Ações</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">Nenhuma conexão cadastrada.</td></tr>'}</tbody></table></div>
+    </section>
+    ${selected ? `
+      <section class="panel">
+        <div class="panel-title"><div><h2>${esc(selected.name)}</h2><small>Token: •••••••• · segredo nunca exibido</small></div><a class="button-link secondary" href="/meta/connections?connectionId=${esc(selected.id)}&discover=pages">Listar páginas acessíveis</a></div>
+        <form method="post" action="/meta/connections/${esc(selected.id)}/name" class="compact-form stack">${csrfField(csrfToken)}<label>Nome da conexão<input name="name" value="${esc(selected.name)}" required maxlength="200"></label><button>Atualizar nome</button></form>
+        ${remotePages.length ? `<form method="post" action="/meta/connections/${esc(selected.id)}/pages" class="compact-form stack">${csrfField(csrfToken)}<label>Página acessível<select name="pageId" required><option value="">Selecione</option>${pageOptions}</select></label><button>Adicionar página</button></form>` : ''}
+        <div class="table-wrap"><table><thead><tr><th>Página</th><th>ID</th><th>Estado</th><th>Formulários</th></tr></thead><tbody>${selected.pages.map((page) => `<tr><td>${esc(page.name)}</td><td>${esc(page.page_id)}</td><td>${page.active ? 'Ativa' : 'Inativa'}</td><td><a href="/meta/connections?connectionId=${esc(selected.id)}&discover=forms&pageId=${esc(page.page_id)}">Listar formulários</a></td></tr>`).join('') || '<tr><td colspan="4" class="empty">Nenhuma página selecionada.</td></tr>'}</tbody></table></div>
+      </section>
+      ${remoteForms.length ? `<section class="panel"><h2>Formulários da página ${esc(selectedPageId)}</h2><form method="post" action="/meta/connections/${esc(selected.id)}/forms" class="compact-form stack">${csrfField(csrfToken)}<input type="hidden" name="pageId" value="${esc(selectedPageId)}"><label>Página salva<select name="pageRecordId" required>${savedPageOptions}</select></label><label>Formulário<select name="formId" required><option value="">Selecione</option>${formOptions}</select></label><button>Adicionar formulário</button></form></section>` : ''}
+      <section class="panel"><h2>Dataset/pixel</h2><form method="post" action="/meta/connections/${esc(selected.id)}/datasets" class="filter-grid">${csrfField(csrfToken)}<label>Nome<input name="name" required maxlength="200"></label><label>Dataset ID<input name="datasetId" required inputmode="numeric"></label><label>Test Event Code opcional<input name="testEventCode" type="password"></label><button>Salvar dataset</button></form>
+        <div class="table-wrap"><table><thead><tr><th>Dataset</th><th>ID</th><th>Estado</th><th>Última validação</th><th>Erro/ação</th></tr></thead><tbody>${selected.datasets.map((dataset) => `<tr><td>${esc(dataset.name)}</td><td>${esc(dataset.dataset_id)}</td><td>${dataset.active ? 'Ativo' : 'Inativo'}</td><td>${dataset.last_test_at ? esc(new Date(dataset.last_test_at).toLocaleString('pt-BR')) : '—'}</td><td>${detailValue(dataset.last_error)}${dataset.active ? `<form method="post" action="/meta/connections/${esc(selected.id)}/datasets/${esc(dataset.id)}/validate">${csrfField(csrfToken)}<button class="small">Validar dataset</button></form>` : ''}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">Nenhum dataset configurado.</td></tr>'}</tbody></table></div>
+      </section>
+      <section class="panel"><h2>Renovar token</h2><form method="post" action="/meta/connections/${esc(selected.id)}/token" class="compact-form stack">${csrfField(csrfToken)}<label>Novo access token<input name="accessToken" type="password" required autocomplete="new-password"></label><button>Validar e substituir</button></form></section>
+    ` : ''}
   `, { csrfToken });
 }
 
 function statusClass(status) {
-  if (['SENT', 'COMPLETED', 'DONE'].includes(status)) return 'matriculated';
+  if (['SENT', 'COMPLETED', 'DONE'].includes(status)) return 'paid';
   if (status === 'FAILED') return 'lost';
-  if (status === 'RETRY') return 'contacted';
+  if (status === 'RETRY') return 'contact-started';
   if (['PROCESSING', 'RUNNING'].includes(status)) return 'opportunity';
   return 'new';
 }
 
 export function eventsView({ events, jobs, message = '', error = '', csrfToken = '' }) {
+  const statusLabels = {
+    PENDING: 'Pendente',
+    PROCESSING: 'Processando',
+    RUNNING: 'Processando',
+    RETRY: 'Nova tentativa',
+    SENT: 'Enviado',
+    COMPLETED: 'Concluído',
+    DONE: 'Concluído',
+    FAILED: 'Falhou',
+    CANCELLED: 'Cancelado',
+  };
   const rows = events.map((event) => `
     <tr>
       <td><strong>${esc(event.event_name)}</strong><small>${event.event_id.endsWith(':test') ? 'TESTE' : 'PRODUÇÃO'} · ${esc(event.event_id)}</small></td>
       <td>${esc(event.lead_name)}<small>${esc(event.meta_lead_id || 'sem lead_id')}</small></td>
-      <td><span class="badge ${statusClass(event.status)}">${esc(event.status)}</span><small>${esc(event.attempts)} tentativa(s)</small></td>
+      <td><span class="badge ${statusClass(event.status)}">${esc(statusLabels[event.status] || event.status)}</span><small>${esc(event.attempts)} tentativa(s)</small></td>
       <td>${event.sent_at ? esc(new Date(event.sent_at).toLocaleString('pt-BR')) : '—'}${event.last_error ? `<small class="error-text">${esc(event.last_error)}</small>` : ''}</td>
     </tr>`).join('');
 
@@ -316,7 +584,7 @@ export function eventsView({ events, jobs, message = '', error = '', csrfToken =
       </td>
       <td>${esc(job.lead_name || '—')}<small>${esc(new Date(job.created_at).toLocaleString('pt-BR'))}</small></td>
       <td>
-        <span class="badge ${statusClass(job.status)}">${esc(job.status)}</span>
+        <span class="badge ${statusClass(job.status)}">${esc(statusLabels[job.status] || job.status)}</span>
         <small>${esc(job.attempts)} tentativa(s)${job.status === 'RETRY' ? `<br>Próxima: ${esc(new Date(job.next_attempt_at).toLocaleString('pt-BR'))}` : ''}</small>
       </td>
       <td>
@@ -356,6 +624,16 @@ function wa2StateLabel(status) {
   return labels[status.state] || 'Indisponível';
 }
 
+function wa2RemoteStatusLabel(status) {
+  return {
+    CONNECTED: 'Conectada',
+    DISCONNECTED: 'Desconectada',
+    CONNECTING: 'Conectando',
+    QR_REQUIRED: 'QR necessário',
+    ERROR: 'Erro',
+  }[String(status || '').toUpperCase()] || status || 'Indisponível';
+}
+
 function detailValue(value) {
   return value == null || value === '' ? '—' : esc(value);
 }
@@ -378,7 +656,7 @@ export function wa2DashboardView({
       <td><strong>${detailValue(instance.name || instance.id)}</strong><small>${esc(instance.id)}</small></td>
       <td>${detailValue(instance.role)}</td>
       <td>${detailValue(instance.phone)}</td>
-      <td><span class="badge ${statusClass(instance.status)}">${detailValue(instance.status)}</span></td>
+      <td><span class="badge ${statusClass(instance.status)}">${esc(wa2RemoteStatusLabel(instance.status))}</span></td>
       <td>${instance.isDefault ? '<span class="ok">Padrão</span>' : '—'}</td>
       <td>
         <a class="small button-link" href="/wa2/instances/${encodeURIComponent(instance.id)}">Detalhes</a>
@@ -474,7 +752,9 @@ export function wa2LabelBindingsView({
     ? WA2_LABEL_STAGES.map((stage) => {
       const expectedName = getWa2StageLabelName(stage);
       const binding = bindingByStage.get(stage) || null;
-      const suggestion = labels.find((label) => label.name === expectedName) || null;
+      const suggestion = labels.find(
+        (label) => normalizeWa2LabelName(label.name) === normalizeWa2LabelName(expectedName),
+      ) || null;
       const selectedLabelId = binding?.remote_label_id || suggestion?.id || '';
       const labelOptions = labels.map((label) => `
         <option value="${esc(label.id)}"${selectedLabelId === label.id ? ' selected' : ''}>
@@ -482,7 +762,7 @@ export function wa2LabelBindingsView({
         </option>`).join('');
       return `
         <tr>
-          <td><strong>${esc(stage)}</strong><small>${esc(expectedName)}</small></td>
+          <td><strong>${esc(STAGE_LABELS[stage] || stage)}</strong><small>${esc(expectedName)}</small></td>
           <td>
             ${binding
               ? `${detailValue(binding.remote_label_name)}<small>${esc(binding.remote_label_id)}</small>`
@@ -490,11 +770,14 @@ export function wa2LabelBindingsView({
           </td>
           <td>
             ${binding
-              ? `<span class="badge ${binding.enabled ? 'matriculated' : 'new'}">${binding.enabled ? 'ATIVO' : 'DESABILITADO'}</span>
-                 <small>Verificado: ${detailValue(binding.last_verified_at)}</small>`
+              ? `<span class="badge ${binding.enabled ? 'enrolled' : 'new'}">${binding.enabled ? 'ATIVO' : 'DESABILITADO'}</span>
+                 <small>${esc(binding.lead_count || 0)} lead(s)</small>
+                 <small>Verificado: ${detailValue(binding.last_verified_at)}</small>
+                 <small>Última sincronização: ${detailValue(binding.last_sync_at)}</small>
+                 ${binding.last_error ? `<small class="error-text">${esc(binding.last_error)}</small>` : ''}`
               : suggestion
-                ? '<span class="ok">Correspondência exata sugerida</span>'
-                : '<span class="error-text">Sem correspondência exata</span>'}
+                ? '<span class="ok">Correspondência equivalente sugerida; confirme antes de salvar</span>'
+                : '<span class="error-text">Sem sugestão automática</span>'}
           </td>
           <td>
             ${labels.length ? `
@@ -544,7 +827,7 @@ export function wa2LabelBindingsView({
     </section>
     ${selectedInstance ? `
       <section class="panel">
-        <div class="panel-title"><h2>Bindings oficiais</h2><span>${bindings.length} salvos</span></div>
+        <div class="panel-title"><h2>Bindings oficiais</h2><div class="actions"><span>${bindings.length} salvos</span><form method="post" action="/wa2/labels/sync">${csrfField(csrfToken)}<input type="hidden" name="instanceId" value="${esc(selectedInstance.id)}"><button>Sincronizar agora</button></form></div></div>
         <div class="table-wrap"><table>
           <thead><tr><th>Etapa/nome oficial</th><th>Binding atual</th><th>Estado</th><th>Configuração</th></tr></thead>
           <tbody>${stageRows}</tbody>
@@ -560,14 +843,20 @@ export function wa2LabelJobsView({
   error = '',
   csrfToken = '',
 }) {
+  const statusLabels = {
+    PENDING: 'Pendente',
+    RUNNING: 'Processando',
+    DONE: 'Concluído',
+    FAILED: 'Falhou',
+  };
   const rows = jobs.map((job) => `
     <tr>
       <td><strong>${esc(job.lead_name)}</strong><small>${esc(job.id)}</small></td>
       <td>${detailValue(job.target_stage)}<small>${detailValue(job.target_remote_label_id)}</small></td>
       <td>${detailValue(job.instance_name || job.remote_instance_id)}<small>${detailValue(job.created_at)}</small></td>
       <td>
-        <span class="badge ${statusClass(job.status)}">${esc(job.status)}</span>
-        ${job.stale ? '<small class="error-text">RUNNING abandonado</small>' : ''}
+        <span class="badge ${statusClass(job.status)}">${esc(statusLabels[job.status] || job.status)}</span>
+        ${job.stale ? '<small class="error-text">Processamento travado; elegível para recuperação</small>' : ''}
         <small>${esc(job.attempts)}/${esc(job.max_attempts)} tentativa(s)</small>
         ${job.status === 'PENDING' ? `<small>Próxima: ${detailValue(job.available_at)}</small>` : ''}
       </td>
@@ -585,10 +874,10 @@ export function wa2LabelJobsView({
     ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
     <section class="hero"><div><h1>Fila de etiquetas WA2</h1><p>Processamento, retries e falhas da sincronização CRM → WA2.</p></div></section>
     <section class="stats">
-      ${stat('PENDING', counts.pending || 0)}
-      ${stat('RUNNING', counts.running || 0)}
-      ${stat('DONE', counts.done || 0)}
-      ${stat('FAILED', counts.failed || 0)}
+      ${stat('Pendentes', counts.pending || 0)}
+      ${stat('Processando', counts.running || 0)}
+      ${stat('Concluídos', counts.done || 0)}
+      ${stat('Falhos', counts.failed || 0)}
       ${stat('Travados', counts.stale || 0)}
     </section>
     <section class="panel">
@@ -612,7 +901,7 @@ export function wa2InstanceView({
     ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
     <section class="hero">
       <div><h1>${detailValue(status.name || instanceId)}</h1><p>Estado atual da instância WA2.</p></div>
-      <span class="badge ${statusClass(status.status)}">${detailValue(status.status)}</span>
+      <span class="badge ${statusClass(status.status)}">${esc(wa2RemoteStatusLabel(status.status))}</span>
     </section>
     <section class="panel detail-grid">
       <div><strong>Telefone</strong><span>${detailValue(status.phone)}</span></div>

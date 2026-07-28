@@ -13,6 +13,11 @@ O app e o worker recebem `WA2_INTERNAL_API_BASE_URL`,
 recebem `RUN_MIGRATIONS_ON_STARTUP=false`. Valores reais ficam somente no
 arquivo de ambiente da VPS, nunca no Git.
 
+As credenciais das conexões Meta são cifradas com
+`META_CREDENTIALS_ENCRYPTION_KEY` (32 bytes em Base64). Essa chave deve ficar
+no ambiente seguro do app e do worker e não deve ser rotacionada sem um plano
+de recifragem das credenciais existentes.
+
 ## Ordem oficial
 
 `./deploy-vps.sh` valida variáveis, Git limpo, branch e commit; escolhe

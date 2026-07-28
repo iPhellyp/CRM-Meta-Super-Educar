@@ -106,6 +106,40 @@ test('backfill é limitado, tenant-safe, reutiliza importação e não roda auto
   assert.doesNotMatch(script, /DELETE|TRUNCATE|UPDATE\s+leads/i);
 });
 
+test('Dockerfile inclui somente o script autorizado de backfill Meta', async () => {
+  const dockerfile = await readFile(
+    new URL('../Dockerfile', import.meta.url),
+    'utf8',
+  );
+  const copyInstructions = dockerfile
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^COPY\s+/i.test(line));
+
+  assert.ok(copyInstructions.includes(
+    'COPY --chown=node:node scripts/backfill-meta-phones.js ./scripts/backfill-meta-phones.js',
+  ));
+
+  const copiedScriptSources = copyInstructions.flatMap((instruction) => {
+    const body = instruction
+      .replace(/^COPY\s+/i, '')
+      .replace(/^(?:--\S+\s+)*/, '');
+    const paths = body.startsWith('[')
+      ? JSON.parse(body)
+      : body.split(/\s+/);
+    return paths.slice(0, -1).filter((source) => (
+      source.replace(/^\.\//, '').startsWith('scripts')
+    ));
+  });
+
+  assert.deepEqual(copiedScriptSources, [
+    'scripts/backfill-meta-phones.js',
+  ]);
+  assert.equal(copiedScriptSources.some((source) => (
+    /^\.?\/?scripts\/?$/.test(source)
+  )), false);
+});
+
 test('falha de token não interrompe os demais candidatos no dry-run', async () => {
   const previousLegacyToken = process.env.META_PAGE_ACCESS_TOKEN;
   process.env.META_PAGE_ACCESS_TOKEN = 'token-de-teste-nao-impresso';

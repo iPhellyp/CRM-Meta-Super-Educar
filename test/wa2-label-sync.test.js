@@ -16,39 +16,51 @@ import {
   wa2LabelRetryDelayMs,
 } from '../src/wa2-label-sync.js';
 
-test('mapeamento usa todas as etapas e nomes oficiais exatos', () => {
+test('mapeamento usa as seis etiquetas oficiais em todas as etapas', () => {
   assert.deepEqual(WA2_STAGE_LABEL_NAMES, {
-    NEW: 'CRM 01 Em atendimento',
-    CONTACT_STARTED: 'CRM 01 Em atendimento',
-    NO_RESPONSE: 'CRM 01 Em atendimento',
-    IN_SERVICE: 'CRM 01 Em atendimento',
-    QUALIFIED: 'CRM 02 Qualificado',
-    OPPORTUNITY: 'CRM 04 Oportunidade',
-    NEGOTIATING: 'CRM 04 Oportunidade',
-    AWAITING_ENROLLMENT: 'CRM 04 Oportunidade',
-    AWAITING_PAYMENT: 'CRM 04 Oportunidade',
-    LOST: 'CRM 99 Perdido',
-    NO_INTEREST: 'CRM 99 Perdido',
-    INVALID_PHONE: 'CRM 99 Perdido',
-    DUPLICATED: 'CRM 99 Perdido',
+    NEW: 'CRM 01 - Em atendimento',
+    CONTACT_STARTED: 'CRM 01 - Em atendimento',
+    NO_RESPONSE: 'CRM 01 - Em atendimento',
+    IN_SERVICE: 'CRM 01 - Em atendimento',
+    QUALIFIED: 'CRM 02 - Qualificado',
+    OPPORTUNITY: 'CRM 04 - Vestibular concluído',
+    NEGOTIATING: 'CRM 03 - Inscrição no vestibular',
+    AWAITING_ENROLLMENT: 'CRM 04 - Vestibular concluído',
+    AWAITING_PAYMENT: 'CRM 04 - Vestibular concluído',
+    ENROLLED: 'CRM 05 - Matriculado',
+    PAID: 'CRM 05 - Matriculado',
+    LOST: 'CRM 99 - Perdido',
+    NO_INTEREST: 'CRM 99 - Perdido',
+    INVALID_PHONE: 'CRM 99 - Perdido',
+    DUPLICATED: 'CRM 99 - Perdido',
   });
-  assert.equal(WA2_LABEL_STAGES.length, 13);
+  assert.equal(WA2_LABEL_STAGES.length, 15);
   assert.equal(getWa2StageLabelName('UNKNOWN'), null);
 });
 
-test('etapas compartilham somente quatro etiquetas comerciais', () => {
-  assert.equal(
-    getWa2StageLabelName('NEW'),
-    getWa2StageLabelName('IN_SERVICE'),
+test('etapas compartilham as seis etiquetas comerciais oficiais', () => {
+  assert.deepEqual(
+    stagesSharingWa2Label('NEW'),
+    ['NEW', 'CONTACT_STARTED', 'NO_RESPONSE', 'IN_SERVICE'],
   );
-  assert.equal(new Set(Object.values(WA2_STAGE_LABEL_NAMES)).size, 4);
   assert.deepEqual(stagesSharingWa2Label('QUALIFIED'), ['QUALIFIED']);
+  assert.deepEqual(stagesSharingWa2Label('NEGOTIATING'), ['NEGOTIATING']);
+  assert.deepEqual(
+    stagesSharingWa2Label('OPPORTUNITY'),
+    ['OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT'],
+  );
+  assert.deepEqual(stagesSharingWa2Label('ENROLLED'), ['ENROLLED', 'PAID']);
+  assert.deepEqual(
+    stagesSharingWa2Label('LOST'),
+    ['LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED'],
+  );
+  assert.equal(new Set(Object.values(WA2_STAGE_LABEL_NAMES)).size, 6);
 });
 
 test('sugestão de etiqueta ignora acento, caixa e espaços', () => {
   assert.equal(
-    normalizeWa2LabelName('  CRM 04  OPORTUNIDADE  '),
-    normalizeWa2LabelName('crm 04 oportunidade'),
+    normalizeWa2LabelName('  CRM 04 - VESTIBULAR CONCLUÍDO  '),
+    normalizeWa2LabelName('crm 04 - vestibular concluido'),
   );
 });
 

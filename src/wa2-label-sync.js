@@ -1,19 +1,21 @@
 import crypto from 'node:crypto';
 
 export const WA2_STAGE_LABEL_NAMES = Object.freeze({
-  NEW: 'CRM 01 Em atendimento',
-  CONTACT_STARTED: 'CRM 01 Em atendimento',
-  NO_RESPONSE: 'CRM 01 Em atendimento',
-  IN_SERVICE: 'CRM 01 Em atendimento',
-  QUALIFIED: 'CRM 02 Qualificado',
-  OPPORTUNITY: 'CRM 04 Oportunidade',
-  NEGOTIATING: 'CRM 04 Oportunidade',
-  AWAITING_ENROLLMENT: 'CRM 04 Oportunidade',
-  AWAITING_PAYMENT: 'CRM 04 Oportunidade',
-  LOST: 'CRM 99 Perdido',
-  NO_INTEREST: 'CRM 99 Perdido',
-  INVALID_PHONE: 'CRM 99 Perdido',
-  DUPLICATED: 'CRM 99 Perdido',
+  NEW: 'CRM 01 - Em atendimento',
+  CONTACT_STARTED: 'CRM 01 - Em atendimento',
+  NO_RESPONSE: 'CRM 01 - Em atendimento',
+  IN_SERVICE: 'CRM 01 - Em atendimento',
+  QUALIFIED: 'CRM 02 - Qualificado',
+  OPPORTUNITY: 'CRM 04 - Vestibular concluído',
+  NEGOTIATING: 'CRM 03 - Inscrição no vestibular',
+  AWAITING_ENROLLMENT: 'CRM 04 - Vestibular concluído',
+  AWAITING_PAYMENT: 'CRM 04 - Vestibular concluído',
+  ENROLLED: 'CRM 05 - Matriculado',
+  PAID: 'CRM 05 - Matriculado',
+  LOST: 'CRM 99 - Perdido',
+  NO_INTEREST: 'CRM 99 - Perdido',
+  INVALID_PHONE: 'CRM 99 - Perdido',
+  DUPLICATED: 'CRM 99 - Perdido',
 });
 
 export const WA2_LABEL_STAGES = Object.freeze(Object.keys(WA2_STAGE_LABEL_NAMES));

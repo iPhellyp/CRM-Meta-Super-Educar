@@ -2,17 +2,28 @@ import { canTransition } from './funnel.js';
 
 const STAGE_ORDER = Object.freeze({
   NEW: 0,
-  CONTACTED: 1,
-  QUALIFIED: 2,
-  VESTIBULAR_REGISTERED: 3,
-  VESTIBULAR_COMPLETED: 4,
-  MATRICULATED: 5,
+  CONTACT_STARTED: 1,
+  NO_RESPONSE: 1,
+  IN_SERVICE: 2,
+  QUALIFIED: 3,
+  OPPORTUNITY: 4,
+  NEGOTIATING: 5,
+  AWAITING_ENROLLMENT: 6,
+  AWAITING_PAYMENT: 7,
+  ENROLLED: 8,
+  PAID: 9,
 });
 
 export function canonicalInboundStage(stages) {
   const unique = [...new Set(stages)];
-  if (unique.length === 2 && unique.includes('NEW') && unique.includes('CONTACTED')) {
-    return 'CONTACTED';
+  const groups = [
+    [['NEW', 'CONTACT_STARTED', 'NO_RESPONSE', 'IN_SERVICE'], 'IN_SERVICE'],
+    [['QUALIFIED'], 'QUALIFIED'],
+    [['OPPORTUNITY', 'NEGOTIATING', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT'], 'OPPORTUNITY'],
+    [['LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED'], 'LOST'],
+  ];
+  for (const [members, canonical] of groups) {
+    if (unique.length > 0 && unique.every((stage) => members.includes(stage))) return canonical;
   }
   return unique.length === 1 ? unique[0] : null;
 }
@@ -55,10 +66,10 @@ export function decideInboundLabelAction({
   if (activeStages.length === 1 && activeStages[0] !== desiredStage) {
     return { action: 'CONFLICT', code: 'CRM_LABEL_STATE_DIVERGENT' };
   }
-  if (desiredStage === 'MATRICULATED') {
+  if (['ENROLLED', 'PAID'].includes(desiredStage)) {
     return {
-      action: 'PENDING_CONFIRMATION',
-      code: 'MATRICULATION_REQUIRES_CONFIRMATION',
+      action: 'CONFLICT',
+      code: 'PROTECTED_STAGE_REQUIRES_SOURCE_CONFIRMATION',
       targetStage: desiredStage,
     };
   }
@@ -66,7 +77,7 @@ export function decideInboundLabelAction({
     return { action: 'NOOP', code: 'STAGE_ALREADY_CORRECT', targetStage: desiredStage };
   }
   if (
-    desiredStage !== 'LOST' &&
+    !['LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED'].includes(desiredStage) &&
     STAGE_ORDER[currentStage] != null &&
     STAGE_ORDER[desiredStage] <= STAGE_ORDER[currentStage]
   ) {
@@ -99,13 +110,13 @@ export function sanitizeHistoricalError(error, fallbackCode) {
 
 export function reconciliationFailureResult(error) {
   return {
-    WA2_CONTACT_NOT_FOUND: 'CONTACT_NOT_FOUND',
-    CONTACT_NOT_FOUND: 'CONTACT_NOT_FOUND',
-    WA2_CONTACT_AMBIGUOUS: 'AMBIGUOUS',
-    CONTACT_AMBIGUOUS: 'AMBIGUOUS',
-    WA2_LID_UNRESOLVED: 'LID',
-    WA2_GROUP_UNSUPPORTED: 'GROUP',
-    WA2_BROADCAST_UNSUPPORTED: 'GROUP',
+    WA2_CONTACT_NOT_FOUND: 'NOT_FOUND_IN_WA2',
+    CONTACT_NOT_FOUND: 'NOT_FOUND_IN_WA2',
+    WA2_CONTACT_AMBIGUOUS: 'CONFLICT',
+    CONTACT_AMBIGUOUS: 'CONFLICT',
+    WA2_LID_UNRESOLVED: 'LID_UNRESOLVED',
+    WA2_GROUP_UNSUPPORTED: 'ERROR',
+    WA2_BROADCAST_UNSUPPORTED: 'ERROR',
     WA2_PHONE_INVALID: 'PHONE_INVALID',
-  }[error?.remoteCode || error?.code] || 'FAILED';
+  }[error?.remoteCode || error?.code] || 'ERROR';
 }

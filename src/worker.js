@@ -16,6 +16,8 @@ import {
   failWa2ReconciliationItem,
   failJob,
   getMetaEventContext,
+  getMetaSourceContext,
+  enqueueDailyWa2Reconciliations,
   getWa2LabelJobContext,
   markMetaEventFailed,
   markMetaEventProcessing,
@@ -58,12 +60,15 @@ import {
   reconciliationFailureResult,
   sanitizeHistoricalError,
 } from './historical-sync.js';
+import { PHONE_CLASSIFICATIONS, selectBestLeadPhone } from './phone.js';
+import { decryptSecret } from './secret-crypto.js';
 
 const MAX_ATTEMPTS = 6;
 const IDLE_DELAY_MS = 2_000;
 const HEARTBEAT_INTERVAL_MS = 10_000;
 let stopping = false;
 let lastHeartbeatAt = 0;
+let lastDailyScheduleCheckAt = 0;
 
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -76,11 +81,22 @@ function retryAt(attempts) {
 
 async function processJob(job) {
   if (job.job_type === 'LEAD_IMPORT') {
+    const sourceContext = await getMetaSourceContext({
+      sourceTenantId: job.tenant_id,
+      pageId: job.payload.webhookValue?.page_id,
+      formId: job.payload.webhookValue?.form_id,
+    });
     await importLeadgenId(
       job.payload.metaLeadId,
       job.payload.webhookValue,
       job.payload.receivedAt,
       job.tenant_id,
+      sourceContext
+        ? {
+          accessToken: decryptSecret(sourceContext.encrypted_access_token),
+          sourceContext,
+        }
+        : {},
     );
     await completeJob(job.id);
     return;
@@ -201,9 +217,22 @@ async function processMetaHistoricalImport() {
   const run = await claimMetaHistoricalImport();
   if (!run) return false;
   try {
+    const sourceContext = run.meta_connection_id
+      ? await getMetaSourceContext({
+        sourceTenantId: run.tenant_id,
+        pageId: run.page_id,
+        formId: run.form_id,
+      })
+      : null;
+    const accessToken = sourceContext
+      ? decryptSecret(sourceContext.encrypted_access_token)
+      : process.env.META_PAGE_ACCESS_TOKEN;
     const page = await listMetaFormLeadsPage(run.form_id, {
       after: run.cursor_value,
       limit: 100,
+      accessToken,
+      since: run.period_start,
+      until: run.period_end,
     });
     for (const [index, payload] of page.leads.entries()) {
       if (!await metaHistoricalImportIsActive(run.id)) return false;
@@ -218,6 +247,8 @@ async function processMetaHistoricalImport() {
           run.tenant_id,
           {
             upsert: (leadInput) => recordMetaHistoricalLead(run.id, leadInput),
+            accessToken,
+            sourceContext,
           },
         );
       } catch (error) {
@@ -240,11 +271,16 @@ async function processMetaHistoricalImport() {
 async function processWa2Reconciliation() {
   const item = await claimWa2ReconciliationItem();
   if (!item) return false;
-  if (!item.phone_normalized) {
+  const phone = selectBestLeadPhone(item);
+  if (!phone.phoneNormalized) {
+    const result = {
+      [PHONE_CLASSIFICATIONS.PHONE_EMPTY]: 'PHONE_EMPTY',
+      [PHONE_CLASSIFICATIONS.LID_UNRESOLVED]: 'LID_UNRESOLVED',
+    }[phone.status] || 'PHONE_INVALID';
     await failWa2ReconciliationItem(
       item,
-      'PHONE_INVALID',
-      'WA2_PHONE_INVALID',
+      result,
+      `WA2_${result}`,
       false,
     );
     return true;
@@ -252,12 +288,12 @@ async function processWa2Reconciliation() {
   try {
     const resolved = await getWa2ContactByPhone(
       item.remote_instance_id,
-      item.phone_normalized,
+      phone.phoneNormalized,
     );
     if (!resolved.chat) {
       await failWa2ReconciliationItem(
         item,
-        'CONTACT_WITHOUT_CHAT',
+        'ERROR',
         'WA2_CONTACT_WITHOUT_CHAT',
         false,
       );
@@ -291,6 +327,27 @@ async function heartbeatIfNeeded() {
   lastHeartbeatAt = Date.now();
 }
 
+async function scheduleDailyReconciliationIfNeeded() {
+  if (Date.now() - lastDailyScheduleCheckAt < 60_000) return;
+  lastDailyScheduleCheckAt = Date.now();
+  try {
+    const scheduled = await enqueueDailyWa2Reconciliations();
+    if (scheduled > 0) {
+      console.log(JSON.stringify({
+        level: 'info',
+        msg: 'Reconciliação diária WA2 enfileirada',
+        scheduled,
+      }));
+    }
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: 'error',
+      msg: 'Falha ao agendar reconciliação diária WA2',
+      error: error?.name || 'Error',
+    }));
+  }
+}
+
 async function run() {
   validateDatabaseConfig();
   validateMetaConfig();
@@ -302,6 +359,7 @@ async function run() {
 
   while (!stopping) {
     await heartbeatIfNeeded();
+    await scheduleDailyReconciliationIfNeeded();
     if (stopping) break;
     const metaJob = await claimNextJob();
     if (metaJob) {

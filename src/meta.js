@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 import { upsertLead } from './db.js';
+import { normalizeBrazilianPhone } from './phone.js';
+import { decryptSecret } from './secret-crypto.js';
 
 const TEMPORARY_META_CODES = new Set([1, 2, 4, 17, 32, 341, 613]);
 
@@ -30,10 +32,6 @@ export function validateMetaConfig() {
     errors.push('META_TEST_MODE=true ou false');
   }
   for (const key of [
-    'META_DATASET_ID',
-    'META_CAPI_ACCESS_TOKEN',
-    'META_PAGE_ACCESS_TOKEN',
-    'META_APP_SECRET',
     'META_WEBHOOK_VERIFY_TOKEN',
     'META_LEAD_EVENT_SOURCE',
   ]) {
@@ -60,12 +58,6 @@ function sha256(value) {
 
 function normalizeEmail(value) {
   return String(value || '').trim().toLowerCase();
-}
-
-function normalizePhone(value) {
-  const digits = String(value || '').replace(/\D/g, '');
-  if (!digits) return '';
-  return digits.startsWith('55') ? digits : `55${digits}`;
 }
 
 function safeMetaError(payload, status) {
@@ -160,8 +152,8 @@ export function metaConfigStatus() {
   };
 }
 
-export function verifyMetaSignature(req) {
-  const appSecret = process.env.META_APP_SECRET;
+export function verifyMetaSignature(req, configuredAppSecret = null) {
+  const appSecret = configuredAppSecret || process.env.META_APP_SECRET;
   const signature = req.get('x-hub-signature-256');
   if (!appSecret || !signature || !req.rawBody) return false;
   if (!signature.startsWith('sha256=')) return false;
@@ -203,7 +195,11 @@ export async function importLeadPayload(
   webhookValue = {},
   receivedAt = null,
   tenantId = null,
-  { upsert = upsertLead } = {},
+  {
+    upsert = upsertLead,
+    accessToken = process.env.META_PAGE_ACCESS_TOKEN,
+    sourceContext = null,
+  } = {},
 ) {
   const metaLeadId = String(leadPayload?.id || webhookValue.leadgen_id || '');
   if (!/^\d{1,100}$/.test(metaLeadId)) {
@@ -218,7 +214,7 @@ export async function importLeadPayload(
     try {
       adPayload = await graphRequest(String(leadPayload.ad_id), {
         fields: 'id,name,adset_id,campaign_id',
-        token: process.env.META_PAGE_ACCESS_TOKEN,
+        token: accessToken,
       });
     } catch (error) {
       if (error?.temporary === true) throw error;
@@ -259,6 +255,10 @@ export async function importLeadPayload(
         : null,
     metaAdsetId: adPayload.adset_id ? String(adPayload.adset_id) : null,
     metaCampaignId: adPayload.campaign_id ? String(adPayload.campaign_id) : null,
+    metaConnectionId: sourceContext?.id || null,
+    businessId: sourceContext?.business_id || null,
+    adAccountId: sourceContext?.ad_account_id || null,
+    datasetId: sourceContext?.dataset_id || null,
     metaCreatedAt: metaCreatedAt(leadPayload.created_time, webhookValue.created_time),
     receivedAt,
     rawMeta: {
@@ -283,17 +283,21 @@ export async function importLeadgenId(
   webhookValue = {},
   receivedAt = null,
   tenantId = null,
+  options = {},
 ) {
   const leadPayload = await graphRequest(String(metaLeadId), {
     fields: 'id,created_time,ad_id,form_id,field_data',
-    token: process.env.META_PAGE_ACCESS_TOKEN,
+    token: options.accessToken || process.env.META_PAGE_ACCESS_TOKEN,
   });
-  return importLeadPayload(leadPayload, webhookValue, receivedAt, tenantId);
+  return importLeadPayload(leadPayload, webhookValue, receivedAt, tenantId, options);
 }
 
 export async function listMetaFormLeadsPage(formId, {
   after = null,
   limit = 100,
+  accessToken = process.env.META_PAGE_ACCESS_TOKEN,
+  since = null,
+  until = null,
 } = {}) {
   const normalizedFormId = String(formId || '').trim();
   if (!/^\d{1,100}$/.test(normalizedFormId)) {
@@ -308,8 +312,13 @@ export async function listMetaFormLeadsPage(formId, {
   }
   const payload = await graphRequest(`${normalizedFormId}/leads`, {
     fields: 'id,created_time,ad_id,form_id,field_data',
-    query: { limit, after },
-    token: process.env.META_PAGE_ACCESS_TOKEN,
+    query: {
+      limit,
+      after,
+      since: since ? Math.floor(new Date(since).getTime() / 1000) : null,
+      until: until ? Math.floor(new Date(until).getTime() / 1000) : null,
+    },
+    token: accessToken,
   });
   if (!Array.isArray(payload.data)) {
     throw new MetaGraphError('Página de leads Meta inválida');
@@ -328,15 +337,51 @@ function buildUserData(lead) {
   const userData = {};
   if (lead.meta_lead_id) userData.lead_id = String(lead.meta_lead_id);
   const email = normalizeEmail(lead.email);
-  const phone = normalizePhone(lead.phone);
+  const phone = normalizeBrazilianPhone(
+    lead.phone_normalized || lead.whatsapp_normalized || lead.phone || lead.whatsapp,
+  );
   if (email) userData.em = [sha256(email)];
   if (phone) userData.ph = [sha256(phone)];
   return userData;
 }
 
+export async function validateMetaDataset(datasetId, accessToken) {
+  const normalizedDatasetId = String(datasetId || '').trim();
+  if (!/^\d{1,100}$/.test(normalizedDatasetId)) {
+    const error = new MetaGraphError('Dataset ID inválido');
+    error.code = 'META_DATASET_ID_INVALID';
+    throw error;
+  }
+  const payload = await graphRequest(normalizedDatasetId, {
+    fields: 'id,name',
+    token: accessToken,
+  });
+  if (String(payload.id || '') !== normalizedDatasetId) {
+    throw new MetaGraphError('Dataset não confirmado pela Meta');
+  }
+  return {
+    id: normalizedDatasetId,
+    name: String(payload.name || '').slice(0, 200),
+  };
+}
+
 export async function sendMetaConversion(event) {
-  const datasetId = process.env.META_DATASET_ID;
-  const accessToken = process.env.META_CAPI_ACCESS_TOKEN;
+  if (
+    event.lead_meta_connection_id &&
+    (
+      !event.meta_connection_id ||
+      !event.meta_dataset_id ||
+      event.connection_active !== true ||
+      event.connection_status !== 'VALID' ||
+      event.dataset_active !== true
+    )
+  ) {
+    throw new MetaGraphError('Conexão ou dataset de origem do lead está indisponível');
+  }
+  const datasetId = event.dataset_id || process.env.META_DATASET_ID;
+  const accessToken = event.encrypted_access_token
+    ? decryptSecret(event.encrypted_access_token)
+    : process.env.META_CAPI_ACCESS_TOKEN;
   if (!datasetId || !accessToken) {
     throw new MetaGraphError('META_DATASET_ID ou META_CAPI_ACCESS_TOKEN não configurado');
   }
@@ -354,7 +399,10 @@ export async function sendMetaConversion(event) {
         : 'Evento de produção bloqueado porque o ambiente está em modo teste',
     );
   }
-  if (testMode && !process.env.META_TEST_EVENT_CODE) {
+  const testEventCode = event.encrypted_test_event_code
+    ? decryptSecret(event.encrypted_test_event_code)
+    : process.env.META_TEST_EVENT_CODE;
+  if (testMode && !testEventCode) {
     throw new MetaGraphError('Evento de teste pendente, mas META_TEST_EVENT_CODE está vazio');
   }
 
@@ -374,13 +422,58 @@ export async function sendMetaConversion(event) {
       },
     ],
   };
-  if (testMode) body.test_event_code = process.env.META_TEST_EVENT_CODE;
+  if (testMode) body.test_event_code = testEventCode;
 
   return graphRequest(`${datasetId}/events`, {
     method: 'POST',
     body,
     token: accessToken,
   });
+}
+
+export async function validateMetaAccessToken(accessToken) {
+  const profile = await graphRequest('me', {
+    fields: 'id,name',
+    token: accessToken,
+  });
+  return {
+    id: String(profile.id || ''),
+    name: String(profile.name || '').slice(0, 200),
+  };
+}
+
+export async function listAccessibleMetaPages(accessToken) {
+  const payload = await graphRequest('me/accounts', {
+    fields: 'id,name',
+    query: { limit: 100 },
+    token: accessToken,
+  });
+  if (!Array.isArray(payload.data)) throw new MetaGraphError('Lista de páginas Meta inválida');
+  return payload.data
+    .filter((page) => /^\d{1,100}$/.test(String(page?.id || '')))
+    .map((page) => ({
+      id: String(page.id),
+      name: String(page.name || page.id).slice(0, 200),
+    }));
+}
+
+export async function listAccessibleMetaForms(pageId, accessToken) {
+  if (!/^\d{1,100}$/.test(String(pageId || ''))) {
+    throw new MetaGraphError('Page ID inválido');
+  }
+  const payload = await graphRequest(`${pageId}/leadgen_forms`, {
+    fields: 'id,name,status',
+    query: { limit: 100 },
+    token: accessToken,
+  });
+  if (!Array.isArray(payload.data)) throw new MetaGraphError('Lista de formulários Meta inválida');
+  return payload.data
+    .filter((form) => /^\d{1,100}$/.test(String(form?.id || '')))
+    .map((form) => ({
+      id: String(form.id),
+      name: String(form.name || form.id).slice(0, 200),
+      status: String(form.status || '').slice(0, 40),
+    }));
 }
 
 export function isTemporaryMetaError(error) {

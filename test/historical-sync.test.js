@@ -13,86 +13,69 @@ const baseEvent = {
   eligibleForCrm: true,
 };
 
-test('CRM 01 transforma NEW em CONTACTED e não repete CONTACTED', () => {
-  assert.equal(canonicalInboundStage(['NEW', 'CONTACTED']), 'CONTACTED');
-  assert.deepEqual(
-    decideInboundLabelAction({
-      event: baseEvent,
-      currentStage: 'NEW',
-      eventBindingStages: ['NEW', 'CONTACTED'],
-      currentCrmLabelStages: [['NEW', 'CONTACTED']],
-    }),
-    {
-      action: 'STAGE_CHANGED',
-      code: 'OFFICIAL_TRANSITION',
-      targetStage: 'CONTACTED',
-    },
+test('grupo CRM 01 converge para Em atendimento', () => {
+  assert.equal(
+    canonicalInboundStage(['NEW', 'CONTACT_STARTED', 'NO_RESPONSE', 'IN_SERVICE']),
+    'IN_SERVICE',
   );
   assert.equal(
     decideInboundLabelAction({
       event: baseEvent,
-      currentStage: 'CONTACTED',
-      eventBindingStages: ['NEW', 'CONTACTED'],
-      currentCrmLabelStages: [['NEW', 'CONTACTED']],
+      currentStage: 'CONTACT_STARTED',
+      eventBindingStages: ['NEW', 'CONTACT_STARTED', 'NO_RESPONSE', 'IN_SERVICE'],
+      currentCrmLabelStages: [['NEW', 'CONTACT_STARTED', 'NO_RESPONSE', 'IN_SERVICE']],
     }).action,
-    'NOOP',
+    'STAGE_CHANGED',
   );
 });
 
-test('CRM 02, 03 e 04 avançam somente por transições oficiais', () => {
-  for (const [currentStage, targetStage] of [
-    ['CONTACTED', 'QUALIFIED'],
-    ['QUALIFIED', 'VESTIBULAR_REGISTERED'],
-    ['VESTIBULAR_REGISTERED', 'VESTIBULAR_COMPLETED'],
-  ]) {
-    assert.equal(
-      decideInboundLabelAction({
-        event: baseEvent,
-        currentStage,
-        eventBindingStages: [targetStage],
-        currentCrmLabelStages: [[targetStage]],
-      }).action,
-      'STAGE_CHANGED',
-    );
+test('grupos qualificado e oportunidade avançam por transições oficiais', () => {
+  assert.equal(
+    decideInboundLabelAction({
+      event: baseEvent,
+      currentStage: 'IN_SERVICE',
+      eventBindingStages: ['QUALIFIED'],
+      currentCrmLabelStages: [['QUALIFIED']],
+    }).targetStage,
+    'QUALIFIED',
+  );
+  assert.equal(
+    canonicalInboundStage([
+      'OPPORTUNITY', 'NEGOTIATING', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT',
+    ]),
+    'OPPORTUNITY',
+  );
+});
+
+test('duas etiquetas comerciais conflitantes exigem revisão', () => {
+  assert.equal(
+    decideInboundLabelAction({
+      event: baseEvent,
+      currentStage: 'IN_SERVICE',
+      eventBindingStages: ['QUALIFIED'],
+      currentCrmLabelStages: [['QUALIFIED'], ['OPPORTUNITY']],
+    }).code,
+    'MULTIPLE_CRM_STAGE_LABELS',
+  );
+});
+
+test('ENROLLED e PAID nunca são atualizados automaticamente pelo WA2', () => {
+  for (const target of ['ENROLLED', 'PAID']) {
+    const result = decideInboundLabelAction({
+      event: baseEvent,
+      currentStage: 'AWAITING_PAYMENT',
+      eventBindingStages: [target],
+      currentCrmLabelStages: [[target]],
+    });
+    assert.equal(result.action, 'CONFLICT');
+    assert.equal(result.code, 'PROTECTED_STAGE_REQUIRES_SOURCE_CONFIRMATION');
   }
   assert.equal(
     decideInboundLabelAction({
       event: baseEvent,
-      currentStage: 'NEW',
-      eventBindingStages: ['QUALIFIED'],
-      currentCrmLabelStages: [['QUALIFIED']],
-    }).code,
-    'OFFICIAL_TRANSITION_NOT_ALLOWED',
-  );
-});
-
-test('CRM 05 cria confirmação e nunca matricula automaticamente', () => {
-  const result = decideInboundLabelAction({
-    event: baseEvent,
-    currentStage: 'VESTIBULAR_COMPLETED',
-    eventBindingStages: ['MATRICULATED'],
-    currentCrmLabelStages: [['MATRICULATED']],
-  });
-  assert.equal(result.action, 'PENDING_CONFIRMATION');
-  assert.equal(result.targetStage, 'MATRICULATED');
-});
-
-test('CRM 99 respeita transição oficial e conflito quando bloqueada', () => {
-  assert.equal(
-    decideInboundLabelAction({
-      event: baseEvent,
-      currentStage: 'QUALIFIED',
-      eventBindingStages: ['LOST'],
-      currentCrmLabelStages: [['LOST']],
-    }).action,
-    'STAGE_CHANGED',
-  );
-  assert.equal(
-    decideInboundLabelAction({
-      event: baseEvent,
-      currentStage: 'MATRICULATED',
-      eventBindingStages: ['LOST'],
-      currentCrmLabelStages: [['LOST']],
+      currentStage: 'PAID',
+      eventBindingStages: ['LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED'],
+      currentCrmLabelStages: [['LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED']],
     }).action,
     'CONFLICT',
   );
@@ -122,24 +105,12 @@ test('INTERNAL_API evita loop, REMOVE não retrocede e UNKNOWN conflita', () => 
   );
 });
 
-test('múltiplas etiquetas CRM não escolhem etapa automaticamente', () => {
-  assert.equal(
-    decideInboundLabelAction({
-      event: baseEvent,
-      currentStage: 'CONTACTED',
-      eventBindingStages: ['QUALIFIED'],
-      currentCrmLabelStages: [['QUALIFIED'], ['VESTIBULAR_REGISTERED']],
-    }).code,
-    'MULTIPLE_CRM_STAGE_LABELS',
-  );
-});
-
-test('backoff é limitado e erros de reconciliação são categorizados', () => {
+test('backoff é limitado e resultados de reconciliação são legíveis', () => {
   assert.deepEqual(
     [1, 2, 3, 4, 8].map(historicalRetryDelayMs),
     [60_000, 300_000, 900_000, 3_600_000, 3_600_000],
   );
-  assert.equal(reconciliationFailureResult({ remoteCode: 'WA2_LID_UNRESOLVED' }), 'LID');
-  assert.equal(reconciliationFailureResult({ remoteCode: 'WA2_CONTACT_AMBIGUOUS' }), 'AMBIGUOUS');
-  assert.equal(reconciliationFailureResult({ code: 'other' }), 'FAILED');
+  assert.equal(reconciliationFailureResult({ remoteCode: 'WA2_LID_UNRESOLVED' }), 'LID_UNRESOLVED');
+  assert.equal(reconciliationFailureResult({ remoteCode: 'WA2_CONTACT_NOT_FOUND' }), 'NOT_FOUND_IN_WA2');
+  assert.equal(reconciliationFailureResult({ code: 'other' }), 'ERROR');
 });

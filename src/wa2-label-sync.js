@@ -2,12 +2,18 @@ import crypto from 'node:crypto';
 
 export const WA2_STAGE_LABEL_NAMES = Object.freeze({
   NEW: 'CRM 01 Em atendimento',
-  CONTACTED: 'CRM 01 Em atendimento',
+  CONTACT_STARTED: 'CRM 01 Em atendimento',
+  NO_RESPONSE: 'CRM 01 Em atendimento',
+  IN_SERVICE: 'CRM 01 Em atendimento',
   QUALIFIED: 'CRM 02 Qualificado',
-  VESTIBULAR_REGISTERED: 'CRM 03 Inscrição no vestibular',
-  VESTIBULAR_COMPLETED: 'CRM 04 Vestibular concluído',
-  MATRICULATED: 'CRM 05 Matriculado',
+  OPPORTUNITY: 'CRM 04 Oportunidade',
+  NEGOTIATING: 'CRM 04 Oportunidade',
+  AWAITING_ENROLLMENT: 'CRM 04 Oportunidade',
+  AWAITING_PAYMENT: 'CRM 04 Oportunidade',
   LOST: 'CRM 99 Perdido',
+  NO_INTEREST: 'CRM 99 Perdido',
+  INVALID_PHONE: 'CRM 99 Perdido',
+  DUPLICATED: 'CRM 99 Perdido',
 });
 
 export const WA2_LABEL_STAGES = Object.freeze(Object.keys(WA2_STAGE_LABEL_NAMES));
@@ -15,6 +21,15 @@ export const WA2_REMOTE_CONFIRM_DELAY_MS = 15_000;
 
 export function getWa2StageLabelName(stage) {
   return WA2_STAGE_LABEL_NAMES[stage] || null;
+}
+
+export function normalizeWa2LabelName(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLocaleLowerCase('pt-BR');
 }
 
 export function isWa2LabelStage(stage) {

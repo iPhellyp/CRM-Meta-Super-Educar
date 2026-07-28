@@ -919,7 +919,7 @@ test('painel de jobs permite retry somente para FAILED e escapa erro', () => {
     html.includes('/wa2/label-jobs/22222222-2222-4222-8222-222222222222/retry'),
     false,
   );
-  assert.equal(html.includes('RUNNING abandonado'), true);
+  assert.equal(html.includes('Processamento travado; elegível para recuperação'), true);
 });
 
 test('token de resolução aceita CREATE sem vínculo e REPLACE com vínculo assinado', () => {

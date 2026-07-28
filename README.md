@@ -3,36 +3,35 @@
 Serviço enxuto e separado do SR Gestão para:
 
 - receber leads de Formulários Instantâneos da Meta;
-- importar os dados do lead pela Graph API;
-- controlar as etapas operacionais básicas;
+- importar os dados do lead pela Graph API com múltiplas conexões, páginas e formulários;
+- controlar o funil comercial e abrir conversas no WhatsApp;
+- sincronizar etapas e etiquetas com o WA Sender 2;
 - enviar `Marketing Qualified Lead`, `Sales Opportunity` e `Converted` pela Conversions API;
 - manter fila persistente, tentativas e histórico de movimentações.
 
 ## Limite deste projeto
 
-Este é um bridge operacional, não um CRM completo. Ele não inclui WhatsApp, IA, múltiplos vendedores, importação de listas antigas, automações avançadas ou integração com o SR Gestão.
+Este é um bridge operacional. Matrícula e pagamento continuam dependendo de confirmação do sistema de origem; o CRM não os confirma por clique manual.
 
 ## Limitações conhecidas desta versão
 
-- WhatsApp;
 - integração automática com o SR Gestão;
 - Ads Insights API;
 - gastos, CPM, CTR e CPC no CRM;
 - Pixel para website;
 - Conversions API para Web;
-- listas antigas;
 - importação CSV;
 - automações comerciais avançadas.
 
 ## Como o fluxo funciona
 
 1. A Meta envia o webhook para `POST /webhooks/meta/leadgen`.
-2. O app valida obrigatoriamente `X-Hub-Signature-256` com `META_APP_SECRET`.
+2. O app identifica a conexão pela página/formulário e valida `X-Hub-Signature-256` com o segredo cifrado da conexão (com fallback legado controlado).
 3. O payload é registrado no PostgreSQL com status `PENDING`.
 4. O app devolve HTTP 200 depois da persistência, sem chamar a Graph API.
 5. O worker importa o lead e conclui o job somente após sucesso.
 6. Falhas temporárias usam backoff automático e podem terminar em `FAILED`.
-7. Mudanças para qualificado, oportunidade ou matriculado criam um job de conversão para o worker.
+7. Qualificado e oportunidade criam os eventos correspondentes; somente pagamento confirmado cria `Converted`.
 
 Os estados da fila são `PENDING`, `PROCESSING`, `COMPLETED`, `RETRY` e `FAILED`. O painel **Eventos Meta** permite reenfileirar somente jobs `FAILED`.
 
@@ -57,6 +56,7 @@ COOKIE_SECURE=true
 OPERATION_START_AT=2026-07-23T00:00:00-03:00
 
 META_GRAPH_VERSION=v25.0
+META_CREDENTIALS_ENCRYPTION_KEY=
 META_DATASET_ID=
 META_CAPI_ACCESS_TOKEN=
 META_PAGE_ACCESS_TOKEN=
@@ -110,7 +110,9 @@ nem altera etapas a partir de etiquetas recebidas do WA2.
 
 A migration aditiva `004_wa2_label_sync.sql` cria os bindings por instância e a fila
 local de etiquetas. O administrador escolhe IDs de etiquetas que o servidor confirma
-novamente no WA2; `NEW` e `CONTACTED` compartilham `CRM 01 Em atendimento`.
+novamente no WA2. As etapas equivalentes convergem para quatro etiquetas:
+`CRM 01 Em atendimento`, `CRM 02 Qualificado`, `CRM 04 Oportunidade` e
+`CRM 99 Perdido`.
 
 Quando uma etapa muda, o histórico e o job WA2 são gravados na mesma transação local.
 O worker consulta o chat depois do commit, aplica a etiqueta desejada e remove somente

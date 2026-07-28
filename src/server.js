@@ -7,6 +7,7 @@ import cookieParser from 'cookie-parser';
 import { z } from 'zod';
 import {
   Wa2DataError,
+  createMetaConnection,
   createMetaHistoricalImport,
   createWa2Reconciliation,
   createWa2ContactLink,
@@ -14,10 +15,13 @@ import {
   disableWa2Instance,
   enableWa2Instance,
   enqueueLeadgenJobs,
+  enqueueLeadWa2Resync,
   closePool,
   getActiveWa2ContactLinkForLead,
   getDashboardCounts,
   getLeadById,
+  getMetaConnectionById,
+  getMetaSourceContext,
   getWa2ContactLinkById,
   getWa2InstanceLocalById,
   getWa2LabelBindingById,
@@ -25,10 +29,14 @@ import {
   getWa2LabelSyncStatusForLead,
   healthcheck,
   listLeads,
+  listLeadHistory,
+  listMetaConnections,
+  listMetaImportForms,
   listHistoricalOperations,
   listWa2InstancesLocal,
   listWa2LabelBindings,
   listWa2LabelJobs,
+  listWa2ReconciliationItems,
   listRecentJobs,
   listRecentMetaEvents,
   moveLeadStage,
@@ -37,16 +45,27 @@ import {
   retryFailedJob,
   retryFailedWa2LabelJob,
   retryWa2ReconciliationFailures,
+  recordWhatsAppOpened,
+  replaceMetaConnectionAccessToken,
   setMetaHistoricalImportStatus,
+  setMetaConnectionActive,
+  setTenantWhatsAppMessage,
   setDefaultWa2Instance,
   setWa2LabelBindingEnabled,
   unlinkWa2ContactLink,
   upsertLead,
+  upsertMetaDataset,
+  upsertMetaForm,
+  upsertMetaPage,
   upsertVerifiedWa2Instance,
   upsertWa2LabelBinding,
   validateDatabaseConfig,
   verifyWa2ContactLink,
   verifyWa2LabelBinding,
+  getTenantWhatsAppMessage,
+  updateMetaConnectionValidation,
+  updateMetaConnectionName,
+  updateMetaDatasetValidation,
 } from './db.js';
 import { runStartupMigrations } from './startup-migrations.js';
 import {
@@ -60,14 +79,18 @@ import {
 } from './auth.js';
 import {
   currentMetaMode,
+  listAccessibleMetaForms,
+  listAccessibleMetaPages,
   metaConfigStatus,
+  validateMetaAccessToken,
+  validateMetaDataset,
   validateMetaConfig,
   verifyMetaSignature,
 } from './meta.js';
 import {
+  LOST_REASON_LABELS,
   STAGE_LABELS,
   STAGES,
-  canTransition,
   getStageEventName,
   isDirectStageTarget,
 } from './funnel.js';
@@ -75,8 +98,10 @@ import {
   dashboardView,
   eventsView,
   historicalOperationsView,
+  leadDetailView,
   loginView,
-  matriculationConfirmView,
+  metaConnectionsView,
+  reconciliationItemsView,
   leadWa2View,
   wa2DashboardView,
   wa2InstanceView,
@@ -99,7 +124,12 @@ import {
   validateWa2InstanceId,
   wa2ConfigStatus,
 } from './wa2.js';
-import { normalizeWhatsAppPhone } from './phone.js';
+import {
+  getWhatsAppUrl,
+  normalizeWhatsAppPhone,
+  selectBestLeadPhone,
+} from './phone.js';
+import { decryptSecret, encryptSecret } from './secret-crypto.js';
 import {
   createWa2ResolutionToken,
   wa2ResolutionTokenIsValid,
@@ -129,6 +159,12 @@ function validateServerConfig() {
     errors.push('PORT');
   }
   if (!String(process.env.DEFAULT_TENANT_ID || '').trim()) errors.push('DEFAULT_TENANT_ID');
+  if (
+    process.env.NODE_ENV === 'production' &&
+    Buffer.from(process.env.META_CREDENTIALS_ENCRYPTION_KEY || '', 'base64').length !== 32
+  ) {
+    errors.push('META_CREDENTIALS_ENCRYPTION_KEY com 32 bytes em Base64');
+  }
   if (!process.env.OPERATION_START_AT || Number.isNaN(new Date(process.env.OPERATION_START_AT).getTime())) {
     errors.push('OPERATION_START_AT em ISO 8601');
   }
@@ -147,6 +183,29 @@ function redirectWith(res, path, type, message) {
   const url = new URL(path, process.env.APP_URL || 'http://localhost:3000');
   url.searchParams.set(type, message);
   res.redirect(`${url.pathname}${url.search}`);
+}
+
+function parseCalendarDate(value, { endOfDay = false } = {}) {
+  const raw = String(value || '');
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (!match) return { raw: '', date: null };
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const check = new Date(Date.UTC(year, month - 1, day));
+  if (
+    check.getUTCFullYear() !== year ||
+    check.getUTCMonth() !== month - 1 ||
+    check.getUTCDate() !== day
+  ) {
+    return { raw: '', date: null };
+  }
+  return {
+    raw,
+    date: new Date(
+      `${raw}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}-03:00`,
+    ),
+  };
 }
 
 function textIsEqual(a, b) {
@@ -229,10 +288,21 @@ app.get('/webhooks/meta/leadgen', (req, res) => {
 });
 
 app.post('/webhooks/meta/leadgen', async (req, res) => {
-  if (!verifyMetaSignature(req)) {
-    return res.status(401).json({ error: 'Assinatura Meta inválida' });
-  }
   try {
+    const leadgenChange = (req.body?.entry || [])
+      .flatMap((entry) => (entry.changes || []).map((change) => ({ entry, change })))
+      .find(({ change }) => change.field === 'leadgen');
+    const pageId = leadgenChange?.change?.value?.page_id || leadgenChange?.entry?.id || null;
+    const formId = leadgenChange?.change?.value?.form_id || null;
+    const sourceContext = pageId
+      ? await getMetaSourceContext({ pageId, formId })
+      : null;
+    const connectionSecret = sourceContext?.encrypted_app_secret
+      ? decryptSecret(sourceContext.encrypted_app_secret)
+      : null;
+    if (!verifyMetaSignature(req, connectionSecret)) {
+      return res.status(401).json({ error: 'Assinatura Meta inválida' });
+    }
     const queued = await enqueueLeadgenJobs(req.body);
     console.log(JSON.stringify({ level: 'info', msg: 'Webhook leadgen registrado', queued }));
     return res.status(200).json({ received: true, queued });
@@ -255,19 +325,35 @@ app.post('/logout', (_req, res) => {
 });
 
 const metaHistoricalIdsSchema = z.object({
-  pageId: z.string().regex(/^[0-9]{1,100}$/),
-  formId: z.string().regex(/^[0-9]{1,100}$/),
+  formRecordIds: z.union([
+    z.string().uuid().transform((value) => [value]),
+    z.array(z.string().uuid()).min(1).max(20),
+  ]),
+  periodStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().or(z.literal('')),
+  periodEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().or(z.literal('')),
+}).superRefine((value, context) => {
+  if (value.periodStart && !parseCalendarDate(value.periodStart).date) {
+    context.addIssue({ code: 'custom', path: ['periodStart'], message: 'Data inicial inválida' });
+  }
+  if (value.periodEnd && !parseCalendarDate(value.periodEnd).date) {
+    context.addIssue({ code: 'custom', path: ['periodEnd'], message: 'Data final inválida' });
+  }
+  if (value.periodStart && value.periodEnd && value.periodEnd < value.periodStart) {
+    context.addIssue({ code: 'custom', path: ['periodEnd'], message: 'Período inválido' });
+  }
 });
 
 app.get('/operations', async (req, res) => {
   try {
-    const [operations, instances] = await Promise.all([
+    const [operations, instances, metaForms] = await Promise.all([
       listHistoricalOperations(),
       listWa2InstancesLocal(),
+      listMetaImportForms(),
     ]);
     return res.send(historicalOperationsView({
       operations,
       instances,
+      metaForms,
       message: req.query.message || '',
       error: req.query.error || '',
       csrfToken: issueCsrfToken(req, res),
@@ -280,10 +366,16 @@ app.get('/operations', async (req, res) => {
 app.post('/operations/meta-imports', async (req, res) => {
   const parsed = metaHistoricalIdsSchema.safeParse(req.body);
   if (!parsed.success) {
-    return redirectWith(res, '/operations', 'error', 'Page ID ou Form ID inválido.');
+    return redirectWith(res, '/operations', 'error', 'Formulário ou período inválido.');
   }
   await createMetaHistoricalImport({
-    ...parsed.data,
+    formRecordIds: parsed.data.formRecordIds,
+    periodStart: parsed.data.periodStart
+      ? new Date(`${parsed.data.periodStart}T00:00:00.000Z`)
+      : null,
+    periodEnd: parsed.data.periodEnd
+      ? new Date(`${parsed.data.periodEnd}T23:59:59.999Z`)
+      : null,
     actor: req.user.sub,
   });
   return redirectWith(res, '/operations', 'message', 'Importação Meta enfileirada.');
@@ -1028,14 +1120,73 @@ app.post('/leads/:id/wa2/unlink', async (req, res) => {
 });
 
 app.get('/', async (req, res) => {
-  const [leads, counts] = await Promise.all([listLeads(), getDashboardCounts()]);
+  const page = Math.min(Math.max(Number.parseInt(req.query.page, 10) || 1, 1), 10_000);
+  const dateFrom = parseCalendarDate(req.query.dateFrom);
+  const dateTo = parseCalendarDate(req.query.dateTo, { endOfDay: true });
+  const filters = {
+    search: String(req.query.search || '').trim().slice(0, 200),
+    course: String(req.query.course || '').trim().slice(0, 200),
+    city: String(req.query.city || '').trim().slice(0, 200),
+    stage: String(req.query.stage || ''),
+    lostReason: String(req.query.lostReason || ''),
+    instanceId: String(req.query.instanceId || ''),
+    labelId: String(req.query.labelId || '').trim().slice(0, 200),
+    metaConnectionId: String(req.query.metaConnectionId || ''),
+    businessId: String(req.query.businessId || '').trim().slice(0, 100),
+    pageId: String(req.query.pageId || '').trim().slice(0, 100),
+    formId: String(req.query.formId || '').trim().slice(0, 100),
+    campaignId: String(req.query.campaignId || '').trim().slice(0, 200),
+    adsetId: String(req.query.adsetId || '').trim().slice(0, 200),
+    adId: String(req.query.adId || '').trim().slice(0, 200),
+    attributed: ['yes', 'no'].includes(req.query.attributed) ? req.query.attributed : '',
+    validPhone: ['yes', 'no'].includes(req.query.validPhone) ? req.query.validPhone : '',
+    unattended: req.query.unattended === 'yes' ? 'yes' : '',
+    dateFrom: dateFrom.raw,
+    dateTo: dateTo.raw,
+    createdAfter: dateFrom.date || operationStartAt(),
+    createdBefore: dateTo.date,
+    sort: ['recent', 'oldest', 'stage', 'unattended', 'updated', 'conversation'].includes(req.query.sort)
+      ? req.query.sort
+      : 'recent',
+    page,
+    limit: 101,
+    offset: (page - 1) * 100,
+  };
+  if (!Object.hasOwn(STAGE_LABELS, filters.stage)) filters.stage = '';
+  if (!Object.hasOwn(LOST_REASON_LABELS, filters.lostReason)) filters.lostReason = '';
+  if (!z.string().uuid().safeParse(filters.instanceId).success) filters.instanceId = '';
+  if (!z.string().uuid().safeParse(filters.metaConnectionId).success) {
+    filters.metaConnectionId = '';
+  }
+  const [leadRows, counts, wa2Instances, metaConnections, whatsappMessage] = await Promise.all([
+    listLeads(filters),
+    getDashboardCounts(),
+    listWa2InstancesLocal({ enabledOnly: true }),
+    listMetaConnections(),
+    getTenantWhatsAppMessage(),
+  ]);
+  const leads = leadRows.slice(0, 100);
+  const baseMetaStatus = metaConfigStatus();
+  const hasValidMetaConnection = metaConnections.some(
+    (connection) => connection.active && connection.status === 'VALID',
+  );
   res.send(dashboardView({
     leads,
     counts,
-    metaStatus: metaConfigStatus(),
+    metaStatus: hasValidMetaConnection
+      ? { ...baseMetaStatus, configured: true, missing: [] }
+      : baseMetaStatus,
     message: req.query.message || '',
     error: req.query.error || '',
     operationStartAt: operationStartAt(),
+    filters,
+    pagination: {
+      page,
+      hasNext: leadRows.length > 100,
+    },
+    wa2Instances,
+    metaConnections,
+    whatsappMessage,
     csrfToken: issueCsrfToken(req, res),
   }));
 });
@@ -1091,6 +1242,9 @@ app.post('/leads/:id/stage', async (req, res) => {
   if (!isDirectStageTarget(stage)) {
     return redirectWith(res, '/', 'error', 'Etapa inválida.');
   }
+  if (['LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED'].includes(stage)) {
+    return redirectWith(res, '/', 'error', 'Use a ação Perder e informe o motivo obrigatório.');
+  }
   try {
     const eventName = getStageEventName(stage);
     const result = await moveLeadStage(parsedId.data, stage, {
@@ -1115,53 +1269,546 @@ app.post('/leads/:id/stage', async (req, res) => {
   }
 });
 
-app.get('/leads/:id/matriculate', async (req, res) => {
-  const parsedId = z.string().uuid().safeParse(req.params.id);
-  if (!parsedId.success) return redirectWith(res, '/', 'error', 'Lead inválido.');
-  try {
-    const lead = await getLeadById(parsedId.data);
-    if (!lead) return redirectWith(res, '/', 'error', 'Lead não encontrado.');
-    if (!canTransition(lead.stage, STAGES.MATRICULATED)) {
-      return redirectWith(res, '/', 'error', 'Este lead não pode ser matriculado nesta etapa.');
-    }
-    return res.send(matriculationConfirmView({
-      lead,
-      csrfToken: issueCsrfToken(req, res),
-    }));
-  } catch {
-    return redirectWith(res, '/', 'error', 'Não foi possível abrir a confirmação de matrícula.');
-  }
-});
-
-app.post('/leads/:id/matriculate', async (req, res) => {
-  const parsedId = z.string().uuid().safeParse(req.params.id);
-  if (!parsedId.success) return redirectWith(res, '/', 'error', 'Lead inválido.');
-  if (req.body.confirmation !== 'MATRICULATION_COMPLETED') {
-    return redirectWith(res, '/', 'error', 'Confirmação de matrícula inválida.');
-  }
-  try {
-    const eventName = getStageEventName(STAGES.MATRICULATED);
-    const result = await moveLeadStage(parsedId.data, STAGES.MATRICULATED, {
-      origin: 'MANUAL',
-      changedBy: req.user.sub,
-      observation: 'Matrícula concluída por confirmação manual.',
-      mode: currentMetaMode(),
-    });
-    if (!result) return redirectWith(res, '/', 'error', 'Lead não encontrado.');
-    if (result.invalidTransition) {
-      return redirectWith(res, '/', 'error', 'Transição para matrícula não permitida.');
-    }
-    const suffix = metaResultSuffix(eventName, result);
-    const wa2Suffix = wa2LabelResultSuffix(result);
+app.post('/settings/whatsapp-message', async (req, res) => {
+  const message = z.string().trim().min(1).max(1000).safeParse(req.body.message);
+  if (!message.success || !message.data.includes('{{nome}}')) {
     return redirectWith(
       res,
       '/',
+      'error',
+      'A mensagem deve ter até 1.000 caracteres e incluir {{nome}}.',
+    );
+  }
+  await setTenantWhatsAppMessage(message.data);
+  return redirectWith(res, '/', 'message', 'Mensagem inicial do WhatsApp atualizada.');
+});
+
+const reconciliationResults = new Set([
+  'MATCHED', 'UPDATED', 'PHONE_EMPTY', 'PHONE_INVALID', 'NOT_FOUND_IN_WA2',
+  'LID_UNRESOLVED', 'LABEL_UNMAPPED', 'CONFLICT', 'ERROR',
+]);
+
+app.get('/operations/reconciliations/:id/items', async (req, res) => {
+  const id = z.string().uuid().safeParse(req.params.id);
+  const result = String(req.query.result || '');
+  if (!id.success || (result && !reconciliationResults.has(result))) {
+    return redirectWith(res, '/operations', 'error', 'Filtro de reconciliação inválido.');
+  }
+  const items = await listWa2ReconciliationItems({
+    runId: id.data,
+    result: result || null,
+  });
+  return res.send(reconciliationItemsView({
+    runId: id.data,
+    result,
+    items,
+    csrfToken: issueCsrfToken(req, res),
+  }));
+});
+
+app.get('/operations/reconciliations/:id/errors.csv', async (req, res) => {
+  const id = z.string().uuid().safeParse(req.params.id);
+  if (!id.success) return res.status(400).send('Job inválido.');
+  const items = await listWa2ReconciliationItems({ runId: id.data, limit: 1000 });
+  const errors = items.filter((item) => [
+    'PHONE_EMPTY', 'PHONE_INVALID', 'NOT_FOUND_IN_WA2', 'LID_UNRESOLVED',
+    'LABEL_UNMAPPED', 'CONFLICT', 'ERROR',
+  ].includes(item.result));
+  const rows = [
+    ['Job', 'Lead ID', 'Lead', 'Resultado', 'Código', 'Tentativas'],
+    ...errors.map((item) => [
+      item.run_id, item.lead_id, item.lead_name, item.result,
+      item.last_error_code, item.attempts,
+    ]),
+  ];
+  res.set('content-type', 'text/csv; charset=utf-8');
+  res.set('content-disposition', `attachment; filename="reconciliacao-${id.data}.csv"`);
+  return res.send(`\ufeff${rows.map((row) => row.map(csvCell).join(';')).join('\n')}`);
+});
+
+app.post('/wa2/labels/sync', async (req, res) => {
+  const parsedInstanceId = z.string().uuid().safeParse(req.body.instanceId);
+  if (!parsedInstanceId.success) {
+    return redirectWith(res, '/wa2/labels', 'error', 'Instância inválida.');
+  }
+  try {
+    await createWa2Reconciliation({
+      instanceId: parsedInstanceId.data,
+      actor: req.user.sub,
+    });
+    return redirectWith(
+      res,
+      `/wa2/labels?instanceId=${parsedInstanceId.data}`,
       'message',
-      `Lead movido para ${STAGE_LABELS.MATRICULATED}.${suffix}${wa2Suffix}`,
+      'Sincronização WA2 enfileirada.',
+    );
+  } catch (error) {
+    return redirectWith(
+      res,
+      `/wa2/labels?instanceId=${parsedInstanceId.data}`,
+      'error',
+      wa2LinkErrorMessage(error),
+    );
+  }
+});
+
+const metaConnectionSchema = z.object({
+  name: z.string().trim().min(2).max(200),
+  businessId: z.string().regex(/^[0-9]{1,100}$/),
+  adAccountId: z.string().regex(/^[0-9]{1,100}$/).or(z.literal('')).optional(),
+  appId: z.string().regex(/^[0-9]{1,100}$/).or(z.literal('')).optional(),
+  accessToken: z.string().trim().min(20).max(10_000),
+  appSecret: z.string().trim().max(10_000).optional(),
+});
+
+app.get('/meta/connections', async (req, res) => {
+  try {
+    const connections = await listMetaConnections();
+    const parsedId = z.string().uuid().safeParse(req.query.connectionId);
+    const selected = parsedId.success ? await getMetaConnectionById(parsedId.data) : null;
+    let remotePages = [];
+    let remoteForms = [];
+    const selectedPageId = String(req.query.pageId || '');
+    if (selected && req.query.discover === 'pages') {
+      remotePages = await listAccessibleMetaPages(
+        decryptSecret(selected.encrypted_access_token),
+      );
+    }
+    if (
+      selected &&
+      req.query.discover === 'forms' &&
+      /^\d{1,100}$/.test(selectedPageId) &&
+      selected.pages.some((page) => page.page_id === selectedPageId)
+    ) {
+      remoteForms = await listAccessibleMetaForms(
+        selectedPageId,
+        decryptSecret(selected.encrypted_access_token),
+      );
+    }
+    return res.send(metaConnectionsView({
+      connections,
+      selected,
+      remotePages,
+      remoteForms,
+      selectedPageId,
+      message: req.query.message || '',
+      error: req.query.error || '',
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  } catch {
+    return res.send(metaConnectionsView({
+      connections: await listMetaConnections(),
+      error: 'Não foi possível consultar a Meta. Nenhuma credencial foi exibida.',
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  }
+});
+
+app.post('/meta/connections', async (req, res) => {
+  const parsed = metaConnectionSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return redirectWith(res, '/meta/connections', 'error', 'Dados da conexão inválidos.');
+  }
+  try {
+    await validateMetaAccessToken(parsed.data.accessToken);
+    const connection = await createMetaConnection({
+      ...parsed.data,
+      encryptedAccessToken: encryptSecret(parsed.data.accessToken),
+      encryptedAppSecret: parsed.data.appSecret
+        ? encryptSecret(parsed.data.appSecret)
+        : null,
+    });
+    await updateMetaConnectionValidation(connection.id, {
+      status: 'VALID',
+      validated: true,
+    });
+    return redirectWith(
+      res,
+      `/meta/connections?connectionId=${connection.id}`,
+      'message',
+      'Conexão Meta validada e salva com credenciais criptografadas.',
     );
   } catch {
-    return redirectWith(res, '/', 'error', 'Não foi possível concluir a matrícula.');
+    return redirectWith(
+      res,
+      '/meta/connections',
+      'error',
+      'Não foi possível validar ou salvar a conexão Meta.',
+    );
   }
+});
+
+app.post('/meta/connections/:id/active', async (req, res) => {
+  const parsedId = z.string().uuid().safeParse(req.params.id);
+  const active = req.body.active === 'true';
+  if (!parsedId.success || (!active && req.body.confirmation !== 'DEACTIVATE_META_CONNECTION')) {
+    return redirectWith(res, '/meta/connections', 'error', 'Confirmação inválida.');
+  }
+  await setMetaConnectionActive(parsedId.data, active);
+  return redirectWith(res, '/meta/connections', 'message', active
+    ? 'Conexão Meta ativada.'
+    : 'Conexão Meta desativada sem apagar o histórico.');
+});
+
+app.post('/meta/connections/:id/name', async (req, res) => {
+  const parsedId = z.string().uuid().safeParse(req.params.id);
+  const name = z.string().trim().min(2).max(200).safeParse(req.body.name);
+  if (!parsedId.success || !name.success) {
+    return redirectWith(res, '/meta/connections', 'error', 'Nome da conexão inválido.');
+  }
+  const updated = await updateMetaConnectionName(parsedId.data, name.data);
+  if (!updated) return redirectWith(res, '/meta/connections', 'error', 'Conexão não encontrada.');
+  return redirectWith(
+    res,
+    `/meta/connections?connectionId=${updated.id}`,
+    'message',
+    'Nome da conexão atualizado.',
+  );
+});
+
+app.post('/meta/connections/:id/pages', async (req, res) => {
+  const parsedId = z.string().uuid().safeParse(req.params.id);
+  const pageId = String(req.body.pageId || '');
+  if (!parsedId.success || !/^\d{1,100}$/.test(pageId)) {
+    return redirectWith(res, '/meta/connections', 'error', 'Página inválida.');
+  }
+  try {
+    const connection = await getMetaConnectionById(parsedId.data);
+    if (!connection?.active) throw new Error('Conexão inativa');
+    const pages = await listAccessibleMetaPages(decryptSecret(connection.encrypted_access_token));
+    const page = pages.find((candidate) => candidate.id === pageId);
+    if (!page) throw new Error('Página não pertence ao token');
+    await upsertMetaPage({ connectionId: connection.id, pageId: page.id, name: page.name });
+    return redirectWith(
+      res,
+      `/meta/connections?connectionId=${connection.id}`,
+      'message',
+      'Página confirmada na Meta e vinculada.',
+    );
+  } catch {
+    return redirectWith(res, '/meta/connections', 'error', 'Não foi possível validar a página.');
+  }
+});
+
+app.post('/meta/connections/:id/forms', async (req, res) => {
+  const parsedId = z.string().uuid().safeParse(req.params.id);
+  const pageRecordId = z.string().uuid().safeParse(req.body.pageRecordId);
+  const pageId = String(req.body.pageId || '');
+  const formId = String(req.body.formId || '');
+  if (
+    !parsedId.success ||
+    !pageRecordId.success ||
+    !/^\d{1,100}$/.test(pageId) ||
+    !/^\d{1,100}$/.test(formId)
+  ) {
+    return redirectWith(res, '/meta/connections', 'error', 'Formulário inválido.');
+  }
+  try {
+    const connection = await getMetaConnectionById(parsedId.data);
+    const page = connection?.pages.find(
+      (candidate) => candidate.id === pageRecordId.data && candidate.page_id === pageId,
+    );
+    if (!connection?.active || !page) throw new Error('Página inválida');
+    const forms = await listAccessibleMetaForms(
+      pageId,
+      decryptSecret(connection.encrypted_access_token),
+    );
+    const form = forms.find((candidate) => candidate.id === formId);
+    if (!form) throw new Error('Formulário não pertence à página');
+    await upsertMetaForm({ pageRecordId: page.id, formId: form.id, name: form.name });
+    return redirectWith(
+      res,
+      `/meta/connections?connectionId=${connection.id}`,
+      'message',
+      'Formulário confirmado na Meta e vinculado.',
+    );
+  } catch {
+    return redirectWith(res, '/meta/connections', 'error', 'Não foi possível validar o formulário.');
+  }
+});
+
+app.post('/meta/connections/:id/datasets', async (req, res) => {
+  const parsedId = z.string().uuid().safeParse(req.params.id);
+  const parsed = z.object({
+    datasetId: z.string().regex(/^[0-9]{1,100}$/),
+    name: z.string().trim().min(1).max(200),
+    testEventCode: z.string().trim().max(100).optional(),
+  }).safeParse(req.body);
+  if (!parsedId.success || !parsed.success) {
+    return redirectWith(res, '/meta/connections', 'error', 'Dataset inválido.');
+  }
+  try {
+    await upsertMetaDataset({
+      connectionId: parsedId.data,
+      datasetId: parsed.data.datasetId,
+      name: parsed.data.name,
+      encryptedTestEventCode: parsed.data.testEventCode
+        ? encryptSecret(parsed.data.testEventCode)
+        : null,
+    });
+    return redirectWith(
+      res,
+      `/meta/connections?connectionId=${parsedId.data}`,
+      'message',
+      'Dataset salvo para esta conexão.',
+    );
+  } catch {
+    return redirectWith(res, '/meta/connections', 'error', 'Não foi possível salvar o dataset.');
+  }
+});
+
+app.post('/meta/connections/:connectionId/datasets/:datasetId/validate', async (req, res) => {
+  const connectionId = z.string().uuid().safeParse(req.params.connectionId);
+  const datasetRecordId = z.string().uuid().safeParse(req.params.datasetId);
+  if (!connectionId.success || !datasetRecordId.success) {
+    return redirectWith(res, '/meta/connections', 'error', 'Dataset inválido.');
+  }
+  let dataset = null;
+  try {
+    const connection = await getMetaConnectionById(connectionId.data);
+    dataset = connection?.datasets.find(
+      (candidate) => candidate.id === datasetRecordId.data && candidate.active,
+    );
+    if (!connection?.active || connection.status !== 'VALID' || !dataset) {
+      throw new Error('Conexão ou dataset indisponível');
+    }
+    await validateMetaDataset(
+      dataset.dataset_id,
+      decryptSecret(connection.encrypted_access_token),
+    );
+    await updateMetaDatasetValidation(dataset.id, { valid: true });
+    return redirectWith(
+      res,
+      `/meta/connections?connectionId=${connection.id}`,
+      'message',
+      'Dataset validado com a Meta sem enviar evento fictício.',
+    );
+  } catch {
+    if (dataset) {
+      await updateMetaDatasetValidation(dataset.id, {
+        valid: false,
+        errorMessage: 'Não foi possível confirmar o dataset com esta conexão.',
+      });
+    }
+    return redirectWith(
+      res,
+      `/meta/connections?connectionId=${connectionId.data}`,
+      'error',
+      'Não foi possível validar o dataset.',
+    );
+  }
+});
+
+app.post('/meta/connections/:id/token', async (req, res) => {
+  const parsedId = z.string().uuid().safeParse(req.params.id);
+  const token = z.string().trim().min(20).max(10_000).safeParse(req.body.accessToken);
+  if (!parsedId.success || !token.success) {
+    return redirectWith(res, '/meta/connections', 'error', 'Token inválido.');
+  }
+  try {
+    await validateMetaAccessToken(token.data);
+    await replaceMetaConnectionAccessToken(parsedId.data, encryptSecret(token.data));
+    return redirectWith(
+      res,
+      `/meta/connections?connectionId=${parsedId.data}`,
+      'message',
+      'Token validado e renovado.',
+    );
+  } catch {
+    return redirectWith(res, '/meta/connections', 'error', 'Não foi possível renovar o token.');
+  }
+});
+
+const lostLeadSchema = z.object({
+  lostReason: z.enum(Object.keys(LOST_REASON_LABELS)),
+  lostNotes: z.string().trim().max(1000).optional(),
+}).superRefine((value, context) => {
+  if (value.lostReason === 'OTHER' && !value.lostNotes) {
+    context.addIssue({ code: 'custom', path: ['lostNotes'], message: 'Observação obrigatória' });
+  }
+});
+
+app.post('/leads/:id/lost', async (req, res) => {
+  const parsedId = z.string().uuid().safeParse(req.params.id);
+  const parsed = lostLeadSchema.safeParse(req.body);
+  if (!parsedId.success || !parsed.success) {
+    return redirectWith(res, '/', 'error', 'Informe um motivo de perda válido.');
+  }
+  try {
+    const stageByReason = {
+      NO_INTEREST: STAGES.NO_INTEREST,
+      NO_RESPONSE: STAGES.LOST,
+      INVALID_PHONE: STAGES.INVALID_PHONE,
+      DUPLICATED: STAGES.DUPLICATED,
+    };
+    const stage = stageByReason[parsed.data.lostReason] || STAGES.LOST;
+    const result = await moveLeadStage(parsedId.data, stage, {
+      origin: 'MANUAL',
+      changedBy: req.user.sub,
+      lostReason: parsed.data.lostReason,
+      lostNotes: parsed.data.lostNotes || null,
+      observation: `Perda registrada: ${LOST_REASON_LABELS[parsed.data.lostReason]}.`,
+      mode: currentMetaMode(),
+    });
+    if (!result || result.invalidTransition) {
+      return redirectWith(res, '/', 'error', 'Transição para perda não permitida.');
+    }
+    return redirectWith(res, '/', 'message', 'Perda registrada com motivo e sem evento positivo.');
+  } catch {
+    return redirectWith(res, '/', 'error', 'Não foi possível registrar a perda.');
+  }
+});
+
+app.post('/leads/:id/whatsapp', async (req, res) => {
+  const parsedId = z.string().uuid().safeParse(req.params.id);
+  if (!parsedId.success) return res.status(404).send('Lead inválido.');
+  try {
+    const [lead, template] = await Promise.all([
+      getLeadById(parsedId.data),
+      getTenantWhatsAppMessage(),
+    ]);
+    if (!lead) return res.status(404).send('Lead não encontrado.');
+    const phone = selectBestLeadPhone(lead);
+    if (!phone.phoneNormalized) return res.status(422).send('Telefone inválido.');
+    const message = template.replaceAll('{{nome}}', String(lead.name || '').trim());
+    const url = getWhatsAppUrl(phone.phoneNormalized, message);
+    await recordWhatsAppOpened(lead.id, req.user.sub);
+    return res.redirect(303, url);
+  } catch {
+    return res.status(503).send('Não foi possível abrir o WhatsApp.');
+  }
+});
+
+app.get('/leads/:id', async (req, res, next) => {
+  if (req.params.id === 'export.csv') return next();
+  const parsedId = z.string().uuid().safeParse(req.params.id);
+  if (!parsedId.success) return redirectWith(res, '/', 'error', 'Lead inválido.');
+  const [lead, history] = await Promise.all([
+    getLeadById(parsedId.data),
+    listLeadHistory(parsedId.data),
+  ]);
+  if (!lead) return redirectWith(res, '/', 'error', 'Lead não encontrado.');
+  return res.send(leadDetailView({
+    lead,
+    history,
+    csrfToken: issueCsrfToken(req, res),
+  }));
+});
+
+app.post('/leads/bulk', async (req, res) => {
+  const rawIds = Array.isArray(req.body.leadIds)
+    ? req.body.leadIds
+    : req.body.leadIds
+      ? [req.body.leadIds]
+      : [];
+  const parsedIds = z.array(z.string().uuid()).min(1).max(100).safeParse(rawIds);
+  const stage = String(req.body.stage || '');
+  const bulkAction = String(req.body.bulkAction || 'stage');
+  const lostReason = String(req.body.lostReason || '');
+  const lostNotes = String(req.body.lostNotes || '').trim().slice(0, 1000);
+  const lossStage = [
+    STAGES.LOST, STAGES.NO_INTEREST, STAGES.INVALID_PHONE, STAGES.DUPLICATED,
+  ].includes(stage);
+  if (
+    !parsedIds.success ||
+    !['stage', 'sync'].includes(bulkAction) ||
+    (bulkAction === 'stage' && !isDirectStageTarget(stage)) ||
+    (lossStage && !Object.hasOwn(LOST_REASON_LABELS, lostReason)) ||
+    (lossStage && lostReason === 'OTHER' && !lostNotes)
+  ) {
+    return redirectWith(res, '/', 'error', 'Seleção ou etapa em lote inválida.');
+  }
+  let changed = 0;
+  for (const id of parsedIds.data) {
+    if (bulkAction === 'sync') {
+      const sync = await enqueueLeadWa2Resync(id, req.user.sub);
+      if (sync?.scheduled > 0) changed += 1;
+      continue;
+    }
+    const result = await moveLeadStage(id, stage, {
+      origin: 'MANUAL',
+      changedBy: req.user.sub,
+      observation: 'Alteração comercial em lote.',
+      metadata: { bulk: true },
+      lostReason: lossStage ? lostReason : null,
+      lostNotes: lossStage ? lostNotes || null : null,
+      mode: currentMetaMode(),
+    });
+    if (result?.stageChanged) changed += 1;
+  }
+  return redirectWith(
+    res,
+    '/',
+    'message',
+    bulkAction === 'sync'
+      ? `${changed} sincronização(ões) WA2 enfileirada(s).`
+      : `${changed} lead(s) atualizado(s) em lote.`,
+  );
+});
+
+function csvCell(value) {
+  return `"${String(value ?? '').replaceAll('"', '""').replace(/[\r\n]+/g, ' ')}"`;
+}
+
+app.get('/leads/export.csv', async (req, res) => {
+  const instanceId = z.string().uuid().safeParse(req.query.instanceId);
+  const metaConnectionId = z.string().uuid().safeParse(req.query.metaConnectionId);
+  const dateFrom = parseCalendarDate(req.query.dateFrom);
+  const dateTo = parseCalendarDate(req.query.dateTo, { endOfDay: true });
+  const leads = await listLeads({
+    search: String(req.query.search || '').slice(0, 200),
+    course: String(req.query.course || '').slice(0, 200),
+    city: String(req.query.city || '').slice(0, 200),
+    stage: Object.hasOwn(STAGE_LABELS, req.query.stage) ? req.query.stage : '',
+    lostReason: Object.hasOwn(LOST_REASON_LABELS, req.query.lostReason)
+      ? req.query.lostReason
+      : '',
+    instanceId: instanceId.success ? instanceId.data : '',
+    labelId: String(req.query.labelId || '').slice(0, 200),
+    metaConnectionId: metaConnectionId.success ? metaConnectionId.data : '',
+    businessId: String(req.query.businessId || '').slice(0, 100),
+    pageId: String(req.query.pageId || '').slice(0, 100),
+    formId: String(req.query.formId || '').slice(0, 100),
+    campaignId: String(req.query.campaignId || '').slice(0, 200),
+    adsetId: String(req.query.adsetId || '').slice(0, 200),
+    adId: String(req.query.adId || '').slice(0, 200),
+    attributed: ['yes', 'no'].includes(req.query.attributed) ? req.query.attributed : '',
+    validPhone: ['yes', 'no'].includes(req.query.validPhone) ? req.query.validPhone : '',
+    unattended: req.query.unattended === 'yes' ? 'yes' : '',
+    createdAfter: dateFrom.date || operationStartAt(),
+    createdBefore: dateTo.date,
+    limit: 200,
+  });
+  const rows = [
+    ['Nome', 'Telefone', 'E-mail', 'Curso', 'Cidade', 'Etapa', 'Motivo da perda', 'Meta Lead ID'],
+    ...leads.map((lead) => [
+      lead.name, lead.phone, lead.email, lead.course, lead.city,
+      STAGE_LABELS[lead.stage] || lead.stage,
+      LOST_REASON_LABELS[lead.lost_reason] || lead.lost_reason,
+      lead.meta_lead_id,
+    ]),
+  ];
+  res.set('content-type', 'text/csv; charset=utf-8');
+  res.set('content-disposition', 'attachment; filename="leads.csv"');
+  return res.send(`\ufeff${rows.map((row) => row.map(csvCell).join(';')).join('\n')}`);
+});
+
+app.get('/leads/:id/matriculate', async (req, res) => {
+  return redirectWith(
+    res,
+    '/',
+    'error',
+    'Matrícula só pode ser confirmada pelo sistema de origem. Use Aguardando matrícula.',
+  );
+});
+
+app.post('/leads/:id/matriculate', async (req, res) => {
+  return redirectWith(
+    res,
+    '/',
+    'error',
+    'Confirmação manual de matrícula foi desativada por segurança.',
+  );
 });
 
 app.get('/events', async (req, res) => {
@@ -1192,7 +1839,16 @@ app.use((error, _req, res, _next) => {
   console.error(JSON.stringify({
     level: 'error',
     msg: 'Erro não tratado',
-    error: error?.name || 'Error',
+    errorName: error?.name || 'Error',
+    errorMessage: process.env.NODE_ENV === 'development'
+      ? error?.message || String(error)
+      : undefined,
+    errorCode: process.env.NODE_ENV === 'development'
+      ? error?.code || null
+      : undefined,
+    stack: process.env.NODE_ENV === 'development'
+      ? error?.stack
+      : undefined,
   }));
   if (error?.type === 'entity.too.large') {
     return res.status(413).send('Payload excede o limite permitido.');

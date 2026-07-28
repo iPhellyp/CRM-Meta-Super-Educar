@@ -5,6 +5,7 @@ import {
   WA2_REMOTE_CONFIRM_DELAY_MS,
   WA2_STAGE_LABEL_NAMES,
   getWa2StageLabelName,
+  normalizeWa2LabelName,
   isTemporaryWa2LabelError,
   planWa2LabelMutations,
   sanitizeWa2LabelJobError,
@@ -18,24 +19,37 @@ import {
 test('mapeamento usa todas as etapas e nomes oficiais exatos', () => {
   assert.deepEqual(WA2_STAGE_LABEL_NAMES, {
     NEW: 'CRM 01 Em atendimento',
-    CONTACTED: 'CRM 01 Em atendimento',
+    CONTACT_STARTED: 'CRM 01 Em atendimento',
+    NO_RESPONSE: 'CRM 01 Em atendimento',
+    IN_SERVICE: 'CRM 01 Em atendimento',
     QUALIFIED: 'CRM 02 Qualificado',
-    VESTIBULAR_REGISTERED: 'CRM 03 Inscrição no vestibular',
-    VESTIBULAR_COMPLETED: 'CRM 04 Vestibular concluído',
-    MATRICULATED: 'CRM 05 Matriculado',
+    OPPORTUNITY: 'CRM 04 Oportunidade',
+    NEGOTIATING: 'CRM 04 Oportunidade',
+    AWAITING_ENROLLMENT: 'CRM 04 Oportunidade',
+    AWAITING_PAYMENT: 'CRM 04 Oportunidade',
     LOST: 'CRM 99 Perdido',
+    NO_INTEREST: 'CRM 99 Perdido',
+    INVALID_PHONE: 'CRM 99 Perdido',
+    DUPLICATED: 'CRM 99 Perdido',
   });
-  assert.equal(WA2_LABEL_STAGES.length, 7);
-  assert.equal(getWa2StageLabelName('OPPORTUNITY'), null);
+  assert.equal(WA2_LABEL_STAGES.length, 13);
+  assert.equal(getWa2StageLabelName('UNKNOWN'), null);
 });
 
-test('NEW e CONTACTED compartilham a mesma etiqueta oficial', () => {
+test('etapas compartilham somente quatro etiquetas comerciais', () => {
   assert.equal(
     getWa2StageLabelName('NEW'),
-    getWa2StageLabelName('CONTACTED'),
+    getWa2StageLabelName('IN_SERVICE'),
   );
-  assert.deepEqual(stagesSharingWa2Label('NEW'), ['NEW', 'CONTACTED']);
-  assert.deepEqual(stagesSharingWa2Label('CONTACTED'), ['NEW', 'CONTACTED']);
+  assert.equal(new Set(Object.values(WA2_STAGE_LABEL_NAMES)).size, 4);
+  assert.deepEqual(stagesSharingWa2Label('QUALIFIED'), ['QUALIFIED']);
+});
+
+test('sugestão de etiqueta ignora acento, caixa e espaços', () => {
+  assert.equal(
+    normalizeWa2LabelName('  CRM 04  OPORTUNIDADE  '),
+    normalizeWa2LabelName('crm 04 oportunidade'),
+  );
 });
 
 test('plano aplica desejada, remove apenas CRM conhecida e preserva externa', () => {

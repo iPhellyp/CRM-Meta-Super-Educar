@@ -52,12 +52,12 @@ test('eventId, cursor e ações são persistidos antes de avançar o feed', () =
   assert.match(db, /INTERNAL_API_LOOP_GUARD|decideInboundLabelAction/);
 });
 
-test('CRM 05 gera pendência sem Converted automático no consumidor', () => {
+test('etapas protegidas geram conflito sem Converted automático no consumidor', () => {
   const inboundStart = db.indexOf('export async function processWa2LabelEvent');
   const inboundEnd = db.indexOf('export async function completeWa2LabelEventPage');
   const inbound = db.slice(inboundStart, inboundEnd);
-  assert.match(inbound, /wa2_stage_confirmations/);
   assert.doesNotMatch(inbound, /eventName:\s*'Converted'/);
+  assert.match(read('src/historical-sync.js'), /PROTECTED_STAGE_REQUIRES_SOURCE_CONFIRMATION/);
 });
 
 test('importação reutiliza parser e upsert, preservando stage e identidade Meta', () => {
@@ -77,7 +77,8 @@ test('importação reutiliza parser e upsert, preservando stage e identidade Met
 
 test('importação Meta usa paginação Graph por formulário e cursor retomável', () => {
   assert.match(meta, /graphRequest\(`\$\{normalizedFormId\}\/leads`/);
-  assert.match(meta, /query: \{ limit, after \}/);
+  assert.match(meta, /since: since \? Math\.floor\(new Date\(since\)\.getTime\(\) \/ 1000\) : null/);
+  assert.match(meta, /until: until \? Math\.floor\(new Date\(until\)\.getTime\(\) \/ 1000\) : null/);
   assert.match(meta, /payload\.paging\?\.cursors\?\.after/);
   assert.match(meta, /hasMore: Boolean\(payload\.paging\?\.next && nextCursor\)/);
   assert.match(worker, /after: run\.cursor_value/);

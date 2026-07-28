@@ -83,11 +83,14 @@ test('deploy migra uma vez antes de app e worker e não importa leads', async ()
   assert.ok(`crmm_${'a'.repeat(12)}_${'9'.repeat(10)}_${'9'.repeat(7)}`.length <= 63);
   assert.match(deploy, /MIGRATION_TIMEOUT_SECONDS="\$\{MIGRATION_TIMEOUT_SECONDS:-300\}"/);
   assert.match(deploy, /state" == "complete" && "\$exit_code" == "0"/);
-  assert.match(deploy, /trap cleanup_migration_on_exit EXIT/);
+  assert.match(deploy, /trap cleanup_deploy_on_exit EXIT/);
   assert.match(deploy, /local status=\$\?/);
   assert.match(deploy, /docker service rm "\$migration_service"/);
   assert.match(deploy, /cleanup_failed=1/);
-  assert.match(deploy, /run_swarm_migration\s*\ncleanup_migration_service/);
+  assert.match(
+    deploy,
+    /run_swarm_migration\s*\nmigration_completed=1\s*\n\s*cleanup_migration_service/,
+  );
   assert.match(deploy, /sanitize_migration_output/);
   assert.match(deploy, /\^\(complete\|failed\|rejected\|shutdown\|orphaned\|remove\)\$/);
   assert.match(deploy, /\$\{IMAGE_TAG\+x\}/);
@@ -103,6 +106,7 @@ test('deploy migra uma vez antes de app e worker e não importa leads', async ()
   const wa2Health = deploy.indexOf('DNS e HTTPS CRM -> WA2 confirmados via Traefik');
   const postgresBeforeBackup = deploy.indexOf(
     'wait_for_one_healthy_instance "${stack_name}_postgres"',
+    wa2Health,
   );
   const backup = deploy.indexOf('bash ./scripts/backup.sh');
   const build = deploy.indexOf('docker build');
@@ -122,11 +126,62 @@ test('deploy migra uma vez antes de app e worker e não importa leads', async ()
   );
   assert.match(
     deploy,
-    /wait_for_one_healthy_instance "\$\{stack_name\}_postgres"\necho "PostgreSQL permaneceu healthy[\s\S]*?\n\nrun_swarm_migration/,
+    /wait_for_one_healthy_instance "\$\{stack_name\}_postgres"\r?\necho "PostgreSQL permaneceu healthy[\s\S]*?\r?\n\r?\nrun_swarm_migration/,
   );
   assert.doesNotMatch(deploy, /migrate dev/);
   assert.doesNotMatch(deploy, /import[-_: ]*lead|historical-sync/i);
   assert.doesNotMatch(deploy, /set -x|echo .*\b(SECRET|PASSWORD|TOKEN)\b/);
+});
+
+test('deploy mantém worker pausado e recupera app após falha', async () => {
+  const deploy = await read('deploy-vps.sh');
+
+  assert.match(
+    deploy,
+    /KEEP_WORKER_PAUSED="\$\{KEEP_WORKER_PAUSED:-false\}"/,
+  );
+  assert.match(deploy, /services_paused=0/);
+  assert.match(deploy, /migration_completed=0/);
+  assert.match(deploy, /deploy_completed=0/);
+  assert.match(deploy, /previous_app_image=""/);
+  assert.match(deploy, /trap cleanup_deploy_on_exit EXIT/);
+
+  assert.match(
+    deploy,
+    /status != 0 && services_paused == 1 && deploy_completed == 0/,
+  );
+  assert.match(
+    deploy,
+    /docker service scale "\$\{stack_name\}_worker=0"/,
+  );
+  assert.match(
+    deploy,
+    /docker service scale "\$\{stack_name\}_app=1"/,
+  );
+  assert.match(deploy, /--image "\$previous_app_image"/);
+  assert.match(deploy, /migration_completed=1/);
+  assert.match(
+    deploy,
+    /Worker mantido pausado por KEEP_WORKER_PAUSED=true/,
+  );
+
+  const previousImage = deploy.indexOf('previous_app_image="$(');
+  const servicesPaused = deploy.indexOf('services_paused=1');
+  const migration = deploy.lastIndexOf('run_swarm_migration');
+  const appStart = deploy.indexOf('APP_REPLICAS=1');
+  const pausedDecision = deploy.indexOf(
+    'if [[ "$KEEP_WORKER_PAUSED" == "true" ]]',
+  );
+  const workerStart = deploy.indexOf('WORKER_REPLICAS=1');
+
+  assert.ok(
+    previousImage > 0 &&
+      previousImage < servicesPaused &&
+      servicesPaused < migration &&
+      migration < appStart &&
+      appStart < pausedDecision &&
+      pausedDecision < workerStart,
+  );
 });
 
 test('rollback exige tag e backup é verificável sem remoção automática', async () => {

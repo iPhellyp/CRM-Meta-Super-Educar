@@ -30,6 +30,95 @@ test('migration 006 é versionada, tenant-safe e cria estruturas multi-Meta', as
   assert.doesNotMatch(migration, /DROP TABLE|TRUNCATE|DELETE FROM leads/i);
 });
 
+test('migration 006 converte matrícula manual legada sem confirmar matrícula real', async () => {
+  const migration = await read('sql/006_commercial_wa2_meta_connections.sql');
+  const manualConversions = migration.match(
+    /WHEN 'MATRICULATED' THEN 'AWAITING_ENROLLMENT'/g,
+  ) || [];
+  assert.equal(manualConversions.length, 5);
+  assert.doesNotMatch(migration, /WHEN 'MATRICULATED' THEN 'ENROLLED'/);
+  assert.match(
+    migration,
+    /UPDATE wa2_stage_confirmations[\s\S]*SET requested_stage = 'ENROLLED'[\s\S]*WHERE requested_stage = 'MATRICULATED'/,
+  );
+});
+
+test('migration 006 usa FK composta tenant-safe para evento do histórico', async () => {
+  const migration = await read('sql/006_commercial_wa2_meta_connections.sql');
+  assert.match(
+    migration,
+    /UNIQUE \(tenant_id, id\)[\s\S]*FOREIGN KEY \(tenant_id, meta_event_id\)[\s\S]*REFERENCES meta_conversion_events \(tenant_id, id\)[\s\S]*ON DELETE RESTRICT/,
+  );
+  assert.doesNotMatch(
+    migration,
+    /FOREIGN KEY \(meta_event_id\) REFERENCES meta_conversion_events\(id\)/,
+  );
+});
+
+test('migration 006 aborta resultados legados desconhecidos antes da nova constraint', async () => {
+  const migration = await read('sql/006_commercial_wa2_meta_connections.sql');
+  const guardAt = migration.indexOf('DO $$', migration.indexOf('UPDATE wa2_reconciliation_items SET result'));
+  const constraintAt = migration.indexOf(
+    'ADD CONSTRAINT wa2_reconciliation_items_result_check',
+    guardAt,
+  );
+  assert.ok(guardAt > 0);
+  assert.ok(constraintAt > guardAt);
+  const guard = migration.slice(guardAt, constraintAt);
+  assert.match(guard, /SELECT DISTINCT result/);
+  assert.match(guard, /string_agg\(quote_literal\(result\), ', ' ORDER BY result\)/);
+  assert.match(
+    guard,
+    /RAISE EXCEPTION[\s\S]*resultados antigos de reconciliação não reconhecidos/,
+  );
+  assert.doesNotMatch(guard, /ELSE 'ERROR'/);
+});
+
+test('migration 006 preserva RUNNING antes de PENDING ao deduplicar jobs ativos', async () => {
+  const migration = await read('sql/006_commercial_wa2_meta_connections.sql');
+  const dedupe = migration.slice(
+    migration.indexOf('WITH duplicate_active_runs AS'),
+    migration.indexOf('CREATE UNIQUE INDEX wa2_reconciliation_runs_active_uidx'),
+  );
+  assert.match(
+    dedupe,
+    /CASE status[\s\S]*WHEN 'RUNNING' THEN 0[\s\S]*WHEN 'PENDING' THEN 1[\s\S]*END,[\s\S]*created_at DESC,[\s\S]*id/,
+  );
+  assert.match(dedupe, /duplicate\.position > 1/);
+});
+
+test('migration 006 remove somente constraints compatíveis com o histórico real', async () => {
+  const [migration004, migration005, migration006] = await Promise.all([
+    read('sql/004_wa2_label_sync.sql'),
+    read('sql/005_historical_meta_wa2_inbound.sql'),
+    read('sql/006_commercial_wa2_meta_connections.sql'),
+  ]);
+  assert.match(migration004, /CONSTRAINT wa2_label_bindings_stage_check/);
+  assert.match(migration004, /CONSTRAINT wa2_label_jobs_target_stage_check/);
+  assert.match(
+    migration005,
+    /requested_stage TEXT NOT NULL CHECK \(requested_stage = 'MATRICULATED'\)/,
+  );
+  assert.match(
+    migration005,
+    /CREATE TABLE wa2_reconciliation_runs[\s\S]*status TEXT NOT NULL DEFAULT 'PENDING'[\s\S]*CHECK \(status IN/,
+  );
+  assert.match(
+    migration005,
+    /CREATE TABLE wa2_reconciliation_items[\s\S]*result TEXT CHECK \(/,
+  );
+  for (const name of [
+    'wa2_label_bindings_stage_check',
+    'wa2_label_jobs_target_stage_check',
+    'wa2_stage_confirmations_requested_stage_check',
+    'wa2_reconciliation_runs_status_check',
+    'wa2_reconciliation_items_result_check',
+  ]) {
+    assert.match(migration006, new RegExp(`DROP CONSTRAINT ${name}`));
+  }
+  assert.doesNotMatch(migration006, /DROP CONSTRAINT IF EXISTS/);
+});
+
 test('reconciliação impede jobs ativos duplicados e retry estrutural', async () => {
   const migration = await read('sql/006_commercial_wa2_meta_connections.sql');
   const database = await read('src/db.js');

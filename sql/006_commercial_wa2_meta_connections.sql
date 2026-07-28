@@ -169,9 +169,17 @@ ALTER TABLE lead_stage_history
       )
     ),
   ADD CONSTRAINT lead_stage_history_reason_check
-    CHECK (reason IS NULL OR char_length(reason) <= 1000),
+    CHECK (reason IS NULL OR char_length(reason) <= 1000);
+
+ALTER TABLE meta_conversion_events
+  ADD CONSTRAINT meta_conversion_events_tenant_id_id_key
+    UNIQUE (tenant_id, id);
+
+ALTER TABLE lead_stage_history
   ADD CONSTRAINT lead_stage_history_meta_event_fk
-    FOREIGN KEY (meta_event_id) REFERENCES meta_conversion_events(id) ON DELETE RESTRICT;
+    FOREIGN KEY (tenant_id, meta_event_id)
+    REFERENCES meta_conversion_events (tenant_id, id)
+    ON DELETE RESTRICT;
 
 ALTER TABLE wa2_instances
   ADD COLUMN phone TEXT,
@@ -196,7 +204,7 @@ UPDATE leads SET stage = CASE stage
   WHEN 'CONTACTED' THEN 'IN_SERVICE'
   WHEN 'VESTIBULAR_REGISTERED' THEN 'NEGOTIATING'
   WHEN 'VESTIBULAR_COMPLETED' THEN 'OPPORTUNITY'
-  WHEN 'MATRICULATED' THEN 'ENROLLED'
+  WHEN 'MATRICULATED' THEN 'AWAITING_ENROLLMENT'
   ELSE stage
 END;
 
@@ -205,14 +213,14 @@ UPDATE lead_stage_history SET
     WHEN 'CONTACTED' THEN 'IN_SERVICE'
     WHEN 'VESTIBULAR_REGISTERED' THEN 'NEGOTIATING'
     WHEN 'VESTIBULAR_COMPLETED' THEN 'OPPORTUNITY'
-    WHEN 'MATRICULATED' THEN 'ENROLLED'
+    WHEN 'MATRICULATED' THEN 'AWAITING_ENROLLMENT'
     ELSE previous_stage
   END,
   new_stage = CASE new_stage
     WHEN 'CONTACTED' THEN 'IN_SERVICE'
     WHEN 'VESTIBULAR_REGISTERED' THEN 'NEGOTIATING'
     WHEN 'VESTIBULAR_COMPLETED' THEN 'OPPORTUNITY'
-    WHEN 'MATRICULATED' THEN 'ENROLLED'
+    WHEN 'MATRICULATED' THEN 'AWAITING_ENROLLMENT'
     ELSE new_stage
   END;
 
@@ -220,7 +228,7 @@ UPDATE wa2_label_bindings SET stage = CASE stage
   WHEN 'CONTACTED' THEN 'IN_SERVICE'
   WHEN 'VESTIBULAR_REGISTERED' THEN 'NEGOTIATING'
   WHEN 'VESTIBULAR_COMPLETED' THEN 'OPPORTUNITY'
-  WHEN 'MATRICULATED' THEN 'ENROLLED'
+  WHEN 'MATRICULATED' THEN 'AWAITING_ENROLLMENT'
   ELSE stage
 END;
 
@@ -228,7 +236,7 @@ UPDATE wa2_label_jobs SET target_stage = CASE target_stage
   WHEN 'CONTACTED' THEN 'IN_SERVICE'
   WHEN 'VESTIBULAR_REGISTERED' THEN 'NEGOTIATING'
   WHEN 'VESTIBULAR_COMPLETED' THEN 'OPPORTUNITY'
-  WHEN 'MATRICULATED' THEN 'ENROLLED'
+  WHEN 'MATRICULATED' THEN 'AWAITING_ENROLLMENT'
   ELSE target_stage
 END;
 
@@ -288,7 +296,14 @@ ALTER TABLE wa2_reconciliation_runs
 WITH duplicate_active_runs AS (
   SELECT id, row_number() OVER (
     PARTITION BY tenant_id, wa2_instance_id
-    ORDER BY created_at DESC, id
+    ORDER BY
+      CASE status
+        WHEN 'RUNNING' THEN 0
+        WHEN 'PENDING' THEN 1
+        ELSE 2
+      END,
+      created_at DESC,
+      id
   ) AS position
   FROM wa2_reconciliation_runs
   WHERE status IN ('PENDING', 'RUNNING')
@@ -322,6 +337,30 @@ UPDATE wa2_reconciliation_items SET result = CASE result
   ELSE result
 END
 WHERE result IS NOT NULL;
+
+DO $$
+DECLARE
+  unknown_results TEXT;
+BEGIN
+  SELECT string_agg(quote_literal(result), ', ' ORDER BY result)
+  INTO unknown_results
+  FROM (
+    SELECT DISTINCT result
+    FROM wa2_reconciliation_items
+    WHERE result IS NOT NULL
+      AND result NOT IN (
+        'MATCHED', 'UPDATED', 'PHONE_EMPTY', 'PHONE_INVALID', 'NOT_FOUND_IN_WA2',
+        'LID_UNRESOLVED', 'LABEL_UNMAPPED', 'CONFLICT', 'ERROR'
+      )
+  ) unknown;
+
+  IF unknown_results IS NOT NULL THEN
+    RAISE EXCEPTION
+      'Migration 006 abortada: resultados antigos de reconciliação não reconhecidos: %',
+      unknown_results;
+  END IF;
+END
+$$;
 
 ALTER TABLE wa2_reconciliation_items
   ADD CONSTRAINT wa2_reconciliation_items_result_check CHECK (

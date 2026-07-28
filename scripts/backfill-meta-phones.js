@@ -99,8 +99,16 @@ export async function processMetaPhoneCandidates(
     tenant,
     limit,
     importLeadgenId,
+    persistLead,
   },
 ) {
+  if (!dryRun && typeof persistLead !== 'function') {
+    throw backfillError(
+      'PERSIST_LEAD_REQUIRED',
+      'Persistência do backfill não configurada.',
+    );
+  }
+
   const summary = {
     mode: dryRun ? 'dry-run' : 'apply',
     tenantId: tenant,
@@ -121,7 +129,10 @@ export async function processMetaPhoneCandidates(
     try {
       const accessToken = accessTokenFor(candidate);
       const sourceContext = sourceContextFor(candidate);
-      const imported = await importLeadgenId(
+      let normalizedPhone = '';
+      let persisted = false;
+
+      await importLeadgenId(
         candidate.meta_lead_id,
         {
           page_id: candidate.meta_page_id,
@@ -133,22 +144,25 @@ export async function processMetaPhoneCandidates(
           accessToken,
           sourceContext,
           logOptionalErrors: false,
-          ...(dryRun
-            ? { upsert: async (input) => input }
-            : {}),
+          upsert: async (input) => {
+            normalizedPhone = normalizeBrazilianPhone(
+              input.phoneNormalized || input.phone,
+            );
+            if (dryRun || !normalizedPhone) return input;
+            const result = await persistLead(input);
+            persisted = true;
+            return result;
+          },
         },
       );
-      const normalized = normalizeBrazilianPhone(
-        imported.phone_normalized || imported.phone,
-      );
-      if (!normalized) {
+      if (!normalizedPhone) {
         summary.missingPhoneCount += 1;
         summary.missingPhoneMetaLeadIds.push(candidate.meta_lead_id);
         continue;
       }
       summary.phoneFoundCount += 1;
       summary.phoneFoundMetaLeadIds.push(candidate.meta_lead_id);
-      if (!dryRun) {
+      if (persisted) {
         summary.updatedCount += 1;
         summary.updatedMetaLeadIds.push(candidate.meta_lead_id);
       }
@@ -164,7 +178,7 @@ export async function processMetaPhoneCandidates(
 async function run() {
   await import('dotenv/config');
   const options = parseOptions();
-  const [{ pool, closePool }, { importLeadgenId }] = await Promise.all([
+  const [{ pool, closePool, upsertLead }, { importLeadgenId }] = await Promise.all([
     import('../src/db.js'),
     import('../src/meta.js'),
   ]);
@@ -194,6 +208,7 @@ async function run() {
       tenant: options.tenant,
       limit: options.limit,
       importLeadgenId,
+      persistLead: upsertLead,
     });
 
     console.log(JSON.stringify(summary));

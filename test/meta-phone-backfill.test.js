@@ -95,7 +95,8 @@ test('backfill é limitado, tenant-safe, reutiliza importação e não roda auto
   assert.match(script, /lead\.meta_lead_id IS NOT NULL/);
   assert.match(script, /lead\.phone_normalized IS NULL/);
   assert.match(script, /importLeadgenId/);
-  assert.match(script, /upsert: async \(input\) => input/);
+  assert.match(script, /upsert: async \(input\) =>/);
+  assert.match(script, /persistLead: upsertLead/);
   assert.match(script, /token da conexão e fallback legado indisponíveis/);
   assert.match(script, /Backfill Meta interrompido sem expor detalhes sensíveis/);
   assert.equal(
@@ -140,13 +141,193 @@ test('Dockerfile inclui somente o script autorizado de backfill Meta', async () 
   )), false);
 });
 
-test('falha de token não interrompe os demais candidatos no dry-run', async () => {
+async function withLegacyMetaToken(callback) {
   const previousLegacyToken = process.env.META_PAGE_ACCESS_TOKEN;
   process.env.META_PAGE_ACCESS_TOKEN = 'token-de-teste-nao-impresso';
+  try {
+    return await callback();
+  } finally {
+    if (previousLegacyToken === undefined) {
+      delete process.env.META_PAGE_ACCESS_TOKEN;
+    } else {
+      process.env.META_PAGE_ACCESS_TOKEN = previousLegacyToken;
+    }
+  }
+}
+
+function legacyCandidate(metaLeadId) {
+  return {
+    meta_lead_id: metaLeadId,
+    meta_connection_id: null,
+  };
+}
+
+test('apply não persiste telefone inválido', async () => {
+  await withLegacyMetaToken(async () => {
+    let persistCalls = 0;
+    let controlledUpsertCalls = 0;
+
+    const summary = await processMetaPhoneCandidates(
+      [legacyCandidate('4000000000000001')],
+      {
+        dryRun: false,
+        tenant: 'super-educar',
+        limit: 1,
+        importLeadgenId: async (
+          _metaLeadId,
+          _webhookValue,
+          _receivedAt,
+          _tenant,
+          options,
+        ) => {
+          controlledUpsertCalls += 1;
+          return options.upsert({ phone: '123' });
+        },
+        persistLead: async (input) => {
+          persistCalls += 1;
+          return input;
+        },
+      },
+    );
+
+    assert.equal(controlledUpsertCalls, 1);
+    assert.equal(persistCalls, 0);
+    assert.equal(summary.missingPhoneCount, 1);
+    assert.deepEqual(summary.missingPhoneMetaLeadIds, ['4000000000000001']);
+    assert.equal(summary.updatedCount, 0);
+    assert.deepEqual(summary.updatedMetaLeadIds, []);
+  });
+});
+
+test('apply persiste telefone válido exatamente uma vez', async () => {
+  await withLegacyMetaToken(async () => {
+    const persistedIds = [];
+
+    const summary = await processMetaPhoneCandidates(
+      [legacyCandidate('4000000000000002')],
+      {
+        dryRun: false,
+        tenant: 'super-educar',
+        limit: 1,
+        importLeadgenId: async (
+          metaLeadId,
+          _webhookValue,
+          _receivedAt,
+          _tenant,
+          options,
+        ) => options.upsert({
+          metaLeadId,
+          phone: '+55 38 99905-9949',
+        }),
+        persistLead: async (input) => {
+          persistedIds.push(input.metaLeadId);
+          return input;
+        },
+      },
+    );
+
+    assert.deepEqual(persistedIds, ['4000000000000002']);
+    assert.equal(summary.phoneFoundCount, 1);
+    assert.equal(summary.updatedCount, 1);
+    assert.deepEqual(summary.updatedMetaLeadIds, ['4000000000000002']);
+  });
+});
+
+test('dry-run com telefone válido nunca chama persistência', async () => {
+  await withLegacyMetaToken(async () => {
+    let persistCalls = 0;
+
+    const summary = await processMetaPhoneCandidates(
+      [legacyCandidate('4000000000000003')],
+      {
+        dryRun: true,
+        tenant: 'super-educar',
+        limit: 1,
+        importLeadgenId: async (
+          metaLeadId,
+          _webhookValue,
+          _receivedAt,
+          _tenant,
+          options,
+        ) => options.upsert({
+          metaLeadId,
+          phone: '+55 38 99905-9949',
+        }),
+        persistLead: async (input) => {
+          persistCalls += 1;
+          return input;
+        },
+      },
+    );
+
+    assert.equal(persistCalls, 0);
+    assert.equal(summary.phoneFoundCount, 1);
+    assert.equal(summary.updatedCount, 0);
+    assert.deepEqual(summary.updatedMetaLeadIds, []);
+  });
+});
+
+test('lote misto persiste somente o telefone válido', async () => {
+  await withLegacyMetaToken(async () => {
+    const invalidId = '4000000000000004';
+    const validId = '4000000000000005';
+    const failedId = '4000000000000006';
+    const persistedIds = [];
+
+    const summary = await processMetaPhoneCandidates(
+      [
+        legacyCandidate(invalidId),
+        legacyCandidate(validId),
+        legacyCandidate(failedId),
+      ],
+      {
+        dryRun: false,
+        tenant: 'super-educar',
+        limit: 3,
+        importLeadgenId: async (
+          metaLeadId,
+          _webhookValue,
+          _receivedAt,
+          _tenant,
+          options,
+        ) => {
+          if (metaLeadId === failedId) throw new Error('graph failure');
+          return options.upsert({
+            metaLeadId,
+            phone: metaLeadId === validId ? '+55 38 99905-9949' : '',
+          });
+        },
+        persistLead: async (input) => {
+          persistedIds.push(input.metaLeadId);
+          return input;
+        },
+      },
+    );
+
+    assert.deepEqual(persistedIds, [validId]);
+    assert.equal(summary.selectedCount, 3);
+    assert.equal(summary.phoneFoundCount, 1);
+    assert.deepEqual(summary.phoneFoundMetaLeadIds, [validId]);
+    assert.equal(summary.missingPhoneCount, 1);
+    assert.deepEqual(summary.missingPhoneMetaLeadIds, [invalidId]);
+    assert.equal(summary.failedCount, 1);
+    assert.deepEqual(summary.failedMetaLeadIds, [failedId]);
+    assert.equal(summary.updatedCount, 1);
+    assert.deepEqual(summary.updatedMetaLeadIds, [validId]);
+    assert.equal(
+      summary.phoneFoundCount +
+        summary.missingPhoneCount +
+        summary.failedCount,
+      summary.selectedCount,
+    );
+  });
+});
+
+test('falha de token não interrompe os demais candidatos no dry-run', async () => {
   const importedIds = [];
   let realPersistenceCalls = 0;
 
-  try {
+  await withLegacyMetaToken(async () => {
     const summary = await processMetaPhoneCandidates(
       [
         {
@@ -191,13 +372,7 @@ test('falha de token não interrompe os demais candidatos no dry-run', async () 
     assert.deepEqual(summary.phoneFoundMetaLeadIds, ['1000000000000002']);
     assert.equal(summary.updatedCount, 0);
     assert.equal(realPersistenceCalls, 0);
-  } finally {
-    if (previousLegacyToken === undefined) {
-      delete process.env.META_PAGE_ACCESS_TOKEN;
-    } else {
-      process.env.META_PAGE_ACCESS_TOKEN = previousLegacyToken;
-    }
-  }
+  });
 });
 
 test('reconciliação diária ignora leads totalmente sem telefone', async () => {

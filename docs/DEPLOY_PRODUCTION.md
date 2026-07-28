@@ -25,6 +25,15 @@ de recifragem das credenciais existentes.
 a imagem; pausa app/worker; executa um único `npm run migrate`; atualiza o app;
 atualiza o worker; e aguarda as atualizações do Swarm.
 
+No primeiro rollout da migration 006, execute
+`KEEP_WORKER_PAUSED=true ./deploy-vps.sh`. Nesse modo, o app é iniciado e
+validado, enquanto o worker permanece com zero réplicas para inspeção manual.
+
+Se o deploy falhar depois de pausar app e worker, o trap de saída mantém o
+worker parado e tenta recuperar o app. Antes da conclusão da migration, restaura
+a imagem anterior do app. Depois da migration, mantém a nova imagem compatível
+com o schema e solicita novamente uma réplica do app.
+
 A migration usa o runner SQL existente em um serviço Swarm temporário, com uma
 única tarefa no manager, sem exigir rede overlay attachable. O serviço aguarda
 estado `complete` e exit code `0`, tem timeout de 300 segundos e é removido em

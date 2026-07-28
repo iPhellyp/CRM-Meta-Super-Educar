@@ -29,6 +29,11 @@ MIGRATION_TIMEOUT_SECONDS="${MIGRATION_TIMEOUT_SECONDS:-300}"
 MIGRATION_SERVICE_NAME_MAX_LENGTH=63
 migration_service=""
 migration_env=""
+KEEP_WORKER_PAUSED="${KEEP_WORKER_PAUSED:-false}"
+services_paused=0
+migration_completed=0
+deploy_completed=0
+previous_app_image=""
 
 sanitize_migration_output() {
   local -a sensitive_values=(
@@ -68,10 +73,36 @@ cleanup_migration_service() {
   return "$cleanup_failed"
 }
 
-cleanup_migration_on_exit() {
+cleanup_deploy_on_exit() {
   local status=$?
   trap - EXIT
+
   cleanup_migration_service || true
+
+  if (( status != 0 && services_paused == 1 && deploy_completed == 0 )); then
+    echo "Deploy falhou apos pausar app/worker; iniciando recuperacao segura" >&2
+
+    docker service scale "${stack_name}_worker=0" > /dev/null 2>&1 || true
+    docker service scale "${stack_name}_postgres=1" > /dev/null 2>&1 || true
+    wait_for_one_healthy_instance "${stack_name}_postgres" || true
+
+    if (( migration_completed == 0 )) && [[ -n "$previous_app_image" ]]; then
+      echo "Migration nao concluida; restaurando imagem anterior do app" >&2
+
+      docker service update \
+        --detach=true \
+        --image "$previous_app_image" \
+        "${stack_name}_app" > /dev/null 2>&1 || true
+    else
+      echo "Schema ja migrado; mantendo a nova imagem do app" >&2
+    fi
+
+    docker service scale "${stack_name}_app=1" > /dev/null 2>&1 || true
+    wait_for_one_healthy_instance "${stack_name}_app" || true
+
+    echo "Recuperacao finalizada: app solicitado em 1 e worker mantido em 0" >&2
+  fi
+
   exit "$status"
 }
 
@@ -170,7 +201,7 @@ run_swarm_migration() {
   wait_for_migration_service
 }
 
-trap cleanup_migration_on_exit EXIT
+trap cleanup_deploy_on_exit EXIT
 
 wait_for_one_healthy_instance() {
   local service="$1"
@@ -228,6 +259,10 @@ done
 [[ "$COOKIE_SECURE" == "true" ]] || { echo "COOKIE_SECURE deve ser true" >&2; exit 1; }
 [[ "$DATABASE_SSL" =~ ^(true|false)$ ]] || { echo "DATABASE_SSL invalido" >&2; exit 1; }
 [[ "$META_TEST_MODE" == "false" ]] || { echo "META_TEST_MODE deve ser false" >&2; exit 1; }
+[[ "$KEEP_WORKER_PAUSED" =~ ^(true|false)$ ]] || {
+  echo "KEEP_WORKER_PAUSED deve ser true ou false" >&2
+  exit 1
+}
 [[ "$APP_URL" == https://* ]] || { echo "APP_URL deve usar HTTPS" >&2; exit 1; }
 [[ "$WA2_INTERNAL_API_BASE_URL" == "https://wa2.supereducarbrasil.com.br" ]] || {
   echo "WA2_INTERNAL_API_BASE_URL deve usar o dominio HTTPS oficial" >&2
@@ -270,14 +305,31 @@ BACKUP_ROOT="$BACKUP_ROOT" bash ./scripts/backup.sh
 docker build -t "crm-meta-super-educar:${IMAGE_TAG}" .
 echo "Imagem publicada localmente: crm-meta-super-educar:${IMAGE_TAG}"
 
+previous_app_image="$(
+  docker service inspect \
+    --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' \
+    "${stack_name}_app"
+)"
+
+[[ -n "$previous_app_image" ]] || {
+  echo "Nao foi possivel identificar a imagem anterior do app" >&2
+  exit 1
+}
+
+echo "Imagem anterior do app registrada: ${previous_app_image}"
+
 export APP_REPLICAS=0
 export WORKER_REPLICAS=0
+services_paused=1
+
 docker stack deploy --resolve-image never -c docker-stack.yml "$stack_name"
 
 wait_for_one_healthy_instance "${stack_name}_postgres"
 echo "PostgreSQL permaneceu healthy apos pausar app e worker"
 
 run_swarm_migration
+migration_completed=1
+
 cleanup_migration_service
 migration_service=""
 migration_env=""
@@ -286,9 +338,26 @@ export APP_REPLICAS=1
 docker stack deploy --resolve-image never -c docker-stack.yml "$stack_name"
 wait_for_one_healthy_instance "${stack_name}_app"
 
+if [[ "$KEEP_WORKER_PAUSED" == "true" ]]; then
+  docker service scale "${stack_name}_worker=0" > /dev/null
+
+  deploy_completed=1
+
+  echo "Deploy concluido com tag: ${IMAGE_TAG}"
+  echo "Worker mantido pausado por KEEP_WORKER_PAUSED=true"
+  echo "Inspecao: docker stack services crm-meta"
+  echo "Inspecao: docker service ps crm-meta_app --no-trunc"
+  echo "Inspecao: docker service ps crm-meta_worker --no-trunc"
+  echo "Nenhuma importacao de leads foi executada."
+
+  exit 0
+fi
+
 export WORKER_REPLICAS=1
 docker stack deploy --resolve-image never -c docker-stack.yml "$stack_name"
 wait_for_one_healthy_instance "${stack_name}_worker"
+
+deploy_completed=1
 
 echo "Deploy concluido com tag: ${IMAGE_TAG}"
 echo "Inspecao: docker stack services crm-meta"

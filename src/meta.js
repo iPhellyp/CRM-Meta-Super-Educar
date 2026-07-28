@@ -229,7 +229,7 @@ export async function importLeadPayload(
   const name = firstValue(fields, ['full_name', 'nome_completo', 'name', 'nome']) || 'Lead Meta';
   const emailRaw = firstValue(fields, ['email', 'email_address']).trim().toLowerCase();
   const email = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emailRaw) ? emailRaw : '';
-  const phone = firstValue(fields, ['phone_number', 'telefone', 'phone', 'celular']);
+  const phone = firstValue(fields, ['phone_number', 'telefone', 'phone', 'celular', 'whatsapp']);
   const course = firstValue(fields, ['curso', 'course', 'qual_curso_voce_deseja', 'curso_de_interesse']);
   const city = firstValue(fields, ['city', 'cidade']);
 

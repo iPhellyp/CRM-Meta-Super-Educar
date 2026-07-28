@@ -2831,7 +2831,17 @@ export async function enqueueDailyWa2Reconciliations() {
     for (const run of runs.rows) {
       await client.query(
         `INSERT INTO wa2_reconciliation_items (tenant_id, run_id, lead_id)
-         SELECT tenant_id, $2, id FROM leads WHERE tenant_id = $1
+         SELECT lead.tenant_id, $2, lead.id
+         FROM leads lead
+         WHERE lead.tenant_id = $1
+           AND (
+             NULLIF(BTRIM(COALESCE(lead.phone_normalized, '')), '') IS NOT NULL
+             OR NULLIF(BTRIM(COALESCE(lead.whatsapp_normalized, '')), '') IS NOT NULL
+             OR NULLIF(BTRIM(COALESCE(lead.phone, '')), '') IS NOT NULL
+             OR NULLIF(BTRIM(COALESCE(lead.whatsapp, '')), '') IS NOT NULL
+             OR LOWER(COALESCE(lead.remote_jid, '')) LIKE '%@s.whatsapp.net'
+             OR LOWER(COALESCE(lead.remote_jid, '')) LIKE '%@c.us'
+           )
          ON CONFLICT (tenant_id, run_id, lead_id) DO NOTHING`,
         [tenantId(), run.id],
       );

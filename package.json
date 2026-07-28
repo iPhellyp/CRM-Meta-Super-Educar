@@ -12,7 +12,7 @@
     "start": "node src/server.js",
     "worker": "node src/worker.js",
     "migrate": "node src/migrate.js",
-    "check": "node --check src/server.js && node --check src/worker.js && node --check src/worker-health.js && node --check src/startup-migrations.js && node --check src/migrate.js && node --check src/db.js && node --check src/meta.js && node --check src/secret-crypto.js && node --check src/wa2.js && node --check src/wa2-link-token.js && node --check src/wa2-link-rules.js && node --check src/wa2-label-sync.js && node --check src/historical-sync.js && node --check src/auth.js && node --check src/views.js && node --check src/funnel.js && node --check src/phone.js && node --check public/app.js",
+    "check": "node --check src/server.js && node --check src/worker.js && node --check src/worker-health.js && node --check src/startup-migrations.js && node --check src/migrate.js && node --check src/db.js && node --check src/meta.js && node --check src/secret-crypto.js && node --check src/wa2.js && node --check src/wa2-link-token.js && node --check src/wa2-link-rules.js && node --check src/wa2-label-sync.js && node --check src/historical-sync.js && node --check src/auth.js && node --check src/views.js && node --check src/funnel.js && node --check src/phone.js && node --check public/app.js && node --check scripts/backfill-meta-phones.js",
     "test": "node --test"
   },
   "dependencies": {

@@ -164,10 +164,20 @@ export function verifyMetaSignature(req, configuredAppSecret = null) {
     crypto.timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
+export function normalizeMetaFieldName(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
 function fieldsToObject(fieldData = []) {
   const result = {};
   for (const item of fieldData) {
-    const key = String(item.name || '').toLowerCase();
+    const key = normalizeMetaFieldName(item.name);
     const value = Array.isArray(item.values) ? item.values[0] : item.values;
     if (key) result[key] = value;
   }
@@ -199,6 +209,7 @@ export async function importLeadPayload(
     upsert = upsertLead,
     accessToken = process.env.META_PAGE_ACCESS_TOKEN,
     sourceContext = null,
+    logOptionalErrors = true,
   } = {},
 ) {
   const metaLeadId = String(leadPayload?.id || webhookValue.leadgen_id || '');
@@ -218,18 +229,31 @@ export async function importLeadPayload(
       });
     } catch (error) {
       if (error?.temporary === true) throw error;
-      console.warn(JSON.stringify({
-        level: 'warn',
-        msg: 'Não foi possível buscar atribuição opcional do anúncio',
-        error: String(error),
-      }));
+      if (logOptionalErrors) {
+        console.warn(JSON.stringify({
+          level: 'warn',
+          msg: 'Não foi possível buscar atribuição opcional do anúncio',
+          error: String(error),
+        }));
+      }
     }
   }
 
   const name = firstValue(fields, ['full_name', 'nome_completo', 'name', 'nome']) || 'Lead Meta';
   const emailRaw = firstValue(fields, ['email', 'email_address']).trim().toLowerCase();
   const email = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emailRaw) ? emailRaw : '';
-  const phone = firstValue(fields, ['phone_number', 'telefone', 'phone', 'celular', 'whatsapp']);
+  const phone = firstValue(fields, [
+    'phone_number',
+    'telefone',
+    'phone',
+    'celular',
+    'whatsapp',
+    'numero_do_whatsapp',
+    'numero_de_whatsapp',
+    'telefone_whatsapp',
+    'whatsapp_number',
+    'numero_do_celular',
+  ]);
   const course = firstValue(fields, ['curso', 'course', 'qual_curso_voce_deseja', 'curso_de_interesse']);
   const city = firstValue(fields, ['city', 'cidade']);
 

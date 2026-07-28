@@ -29,7 +29,7 @@ test('grupo CRM 01 converge para Em atendimento', () => {
   );
 });
 
-test('grupos qualificado e oportunidade avançam por transições oficiais', () => {
+test('grupos CRM 02, 03, 04 e 05 convergem corretamente', () => {
   assert.equal(
     decideInboundLabelAction({
       event: baseEvent,
@@ -39,11 +39,22 @@ test('grupos qualificado e oportunidade avançam por transições oficiais', () 
     }).targetStage,
     'QUALIFIED',
   );
+
+  assert.equal(
+    canonicalInboundStage(['NEGOTIATING']),
+    'NEGOTIATING',
+  );
+
   assert.equal(
     canonicalInboundStage([
-      'OPPORTUNITY', 'NEGOTIATING', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT',
+      'OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT',
     ]),
     'OPPORTUNITY',
+  );
+
+  assert.equal(
+    canonicalInboundStage(['ENROLLED', 'PAID']),
+    'ENROLLED',
   );
 });
 
@@ -59,7 +70,7 @@ test('duas etiquetas comerciais conflitantes exigem revisão', () => {
   );
 });
 
-test('ENROLLED e PAID nunca são atualizados automaticamente pelo WA2', () => {
+test('CRM 05 é protegido e nunca confirma matrícula automaticamente pelo WA2', () => {
   for (const target of ['ENROLLED', 'PAID']) {
     const result = decideInboundLabelAction({
       event: baseEvent,
@@ -67,9 +78,25 @@ test('ENROLLED e PAID nunca são atualizados automaticamente pelo WA2', () => {
       eventBindingStages: [target],
       currentCrmLabelStages: [[target]],
     });
+
     assert.equal(result.action, 'CONFLICT');
     assert.equal(result.code, 'PROTECTED_STAGE_REQUIRES_SOURCE_CONFIRMATION');
   }
+
+  const sharedLabelResult = decideInboundLabelAction({
+    event: baseEvent,
+    currentStage: 'AWAITING_PAYMENT',
+    eventBindingStages: ['ENROLLED', 'PAID'],
+    currentCrmLabelStages: [['ENROLLED', 'PAID']],
+  });
+
+  assert.equal(sharedLabelResult.action, 'CONFLICT');
+  assert.equal(
+    sharedLabelResult.code,
+    'PROTECTED_STAGE_REQUIRES_SOURCE_CONFIRMATION',
+  );
+  assert.equal(sharedLabelResult.targetStage, 'ENROLLED');
+
   assert.equal(
     decideInboundLabelAction({
       event: baseEvent,

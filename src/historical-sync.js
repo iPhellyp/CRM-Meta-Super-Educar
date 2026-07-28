@@ -19,7 +19,9 @@ export function canonicalInboundStage(stages) {
   const groups = [
     [['NEW', 'CONTACT_STARTED', 'NO_RESPONSE', 'IN_SERVICE'], 'IN_SERVICE'],
     [['QUALIFIED'], 'QUALIFIED'],
-    [['OPPORTUNITY', 'NEGOTIATING', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT'], 'OPPORTUNITY'],
+    [['NEGOTIATING'], 'NEGOTIATING'],
+    [['OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT'], 'OPPORTUNITY'],
+    [['ENROLLED', 'PAID'], 'ENROLLED'],
     [['LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED'], 'LOST'],
   ];
   for (const [members, canonical] of groups) {

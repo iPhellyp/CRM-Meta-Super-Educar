@@ -144,35 +144,35 @@ export async function listLeads({
   offset = 0,
 } = {}) {
   const values = [tenantId()];
-  const where = ['tenant_id = $1'];
+  const where = ['leads.tenant_id = $1'];
 
   if (stage) {
     values.push(stage);
-    where.push(`stage = $${values.length}`);
+    where.push(`leads.stage = $${values.length}`);
   }
 
   if (search) {
     values.push(`%${search}%`);
     where.push(`(
-      name ILIKE $${values.length}
-      OR phone ILIKE $${values.length}
-      OR email ILIKE $${values.length}
-      OR course ILIKE $${values.length}
-      OR city ILIKE $${values.length}
-      OR phone_normalized ILIKE $${values.length}
+      leads.name ILIKE $${values.length}
+      OR leads.phone ILIKE $${values.length}
+      OR leads.email ILIKE $${values.length}
+      OR leads.course ILIKE $${values.length}
+      OR leads.city ILIKE $${values.length}
+      OR leads.phone_normalized ILIKE $${values.length}
     )`);
   }
   for (const [value, column] of [
-    [course, 'course'],
-    [city, 'city'],
-    [lostReason, 'lost_reason'],
-    [metaConnectionId, 'meta_connection_id'],
-    [businessId, 'business_id'],
-    [pageId, 'meta_page_id'],
-    [formId, 'meta_form_id'],
-    [campaignId, 'meta_campaign_id'],
-    [adsetId, 'meta_adset_id'],
-    [adId, 'meta_ad_id'],
+    [course, 'leads.course'],
+    [city, 'leads.city'],
+    [lostReason, 'leads.lost_reason'],
+    [metaConnectionId, 'leads.meta_connection_id'],
+    [businessId, 'connection.business_id'],
+    [pageId, 'leads.meta_page_id'],
+    [formId, 'leads.meta_form_id'],
+    [campaignId, 'leads.meta_campaign_id'],
+    [adsetId, 'leads.meta_adset_id'],
+    [adId, 'leads.meta_ad_id'],
   ]) {
     if (value) {
       values.push(value);
@@ -199,39 +199,39 @@ export async function listLeads({
         AND binding.enabled = true
     )`);
   }
-  if (attributed === 'yes') where.push('meta_lead_id IS NOT NULL');
-  if (attributed === 'no') where.push('meta_lead_id IS NULL');
+  if (attributed === 'yes') where.push('leads.meta_lead_id IS NOT NULL');
+  if (attributed === 'no') where.push('leads.meta_lead_id IS NULL');
   if (validPhone === 'yes') {
-    where.push('COALESCE(phone_normalized, whatsapp_normalized) IS NOT NULL');
+    where.push('COALESCE(leads.phone_normalized, leads.whatsapp_normalized) IS NOT NULL');
   }
   if (validPhone === 'no') {
-    where.push('COALESCE(phone_normalized, whatsapp_normalized) IS NULL');
+    where.push('COALESCE(leads.phone_normalized, leads.whatsapp_normalized) IS NULL');
   }
-  if (unattended === 'yes') where.push('first_contact_at IS NULL');
+  if (unattended === 'yes') where.push('leads.first_contact_at IS NULL');
 
   if (createdAfter) {
     values.push(createdAfter);
-    where.push(`COALESCE(received_at, created_at) >= $${values.length}`);
+    where.push(`COALESCE(leads.received_at, leads.created_at) >= $${values.length}`);
   }
   if (createdBefore) {
     values.push(createdBefore);
-    where.push(`COALESCE(received_at, created_at) <= $${values.length}`);
+    where.push(`COALESCE(leads.received_at, leads.created_at) <= $${values.length}`);
   }
 
   const orderBy = {
-    recent: 'COALESCE(received_at, created_at) DESC',
-    oldest: 'COALESCE(received_at, created_at) ASC',
-    stage: 'stage, updated_at DESC',
-    unattended: 'first_contact_at NULLS FIRST, received_at DESC',
-    updated: 'updated_at DESC',
+    recent: 'COALESCE(leads.received_at, leads.created_at) DESC',
+    oldest: 'COALESCE(leads.received_at, leads.created_at) ASC',
+    stage: 'leads.stage, leads.updated_at DESC',
+    unattended: 'leads.first_contact_at NULLS FIRST, leads.received_at DESC',
+    updated: 'leads.updated_at DESC',
     conversation: `COALESCE((
       SELECT max(history.changed_at)
       FROM lead_stage_history history
       WHERE history.tenant_id = leads.tenant_id
         AND history.lead_id = leads.id
         AND history.activity_type = 'WHATSAPP_OPENED'
-    ), received_at, created_at) DESC`,
-  }[sort] || 'COALESCE(received_at, created_at) DESC';
+    ), leads.received_at, leads.created_at) DESC`,
+  }[sort] || 'COALESCE(leads.received_at, leads.created_at) DESC';
   values.push(Math.min(Math.max(Number(limit) || 100, 1), 200));
   const limitIndex = values.length;
   values.push(Math.max(Number(offset) || 0, 0));

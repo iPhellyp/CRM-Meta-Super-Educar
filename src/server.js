@@ -1839,7 +1839,16 @@ app.use((error, _req, res, _next) => {
   console.error(JSON.stringify({
     level: 'error',
     msg: 'Erro não tratado',
-    error: error?.name || 'Error',
+    errorName: error?.name || 'Error',
+    errorMessage: process.env.NODE_ENV === 'development'
+      ? error?.message || String(error)
+      : undefined,
+    errorCode: process.env.NODE_ENV === 'development'
+      ? error?.code || null
+      : undefined,
+    stack: process.env.NODE_ENV === 'development'
+      ? error?.stack
+      : undefined,
   }));
   if (error?.type === 'entity.too.large') {
     return res.status(413).send('Payload excede o limite permitido.');

@@ -136,6 +136,7 @@ import {
 } from './wa2-link-token.js';
 import { validateWa2ConfirmationState } from './wa2-link-rules.js';
 import { isWa2LabelStage } from './wa2-label-sync.js';
+import { createWhatsAppActionHandler } from './whatsapp-action.js';
 
 const app = express();
 const loginAttempts = new Map();
@@ -1659,25 +1660,13 @@ app.post('/leads/:id/lost', async (req, res) => {
   }
 });
 
-app.post('/leads/:id/whatsapp', async (req, res) => {
-  const parsedId = z.string().uuid().safeParse(req.params.id);
-  if (!parsedId.success) return res.status(404).send('Lead inválido.');
-  try {
-    const [lead, template] = await Promise.all([
-      getLeadById(parsedId.data),
-      getTenantWhatsAppMessage(),
-    ]);
-    if (!lead) return res.status(404).send('Lead não encontrado.');
-    const phone = selectBestLeadPhone(lead);
-    if (!phone.phoneNormalized) return res.status(422).send('Telefone inválido.');
-    const message = template.replaceAll('{{nome}}', String(lead.name || '').trim());
-    const url = getWhatsAppUrl(phone.phoneNormalized, message);
-    await recordWhatsAppOpened(lead.id, req.user.sub);
-    return res.redirect(303, url);
-  } catch {
-    return res.status(503).send('Não foi possível abrir o WhatsApp.');
-  }
-});
+app.post('/leads/:id/whatsapp', createWhatsAppActionHandler({
+  getLeadById,
+  getTenantWhatsAppMessage,
+  getWhatsAppUrl,
+  recordWhatsAppOpened,
+  selectBestLeadPhone,
+}));
 
 app.get('/leads/:id', async (req, res, next) => {
   if (req.params.id === 'export.csv') return next();

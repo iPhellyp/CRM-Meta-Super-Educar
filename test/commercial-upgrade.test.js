@@ -174,13 +174,16 @@ test('credenciais são cifradas com AES-GCM e mascaradas', () => {
 test('interface abre WhatsApp sem confundir com Atendimento e registra histórico', async () => {
   const views = await read('src/views.js');
   const server = await read('src/server.js');
-  assert.match(views, /<form method="post" action="\/leads\/\$\{esc\(lead\.id\)\}\/whatsapp" target="_blank" rel="noopener noreferrer">/);
-  assert.match(views, />◉ Abrir WhatsApp<\/button>/);
-  assert.match(views, /CONTACT_STARTED: 'stage-contact'/);
+  assert.match(views, /method="post" action="\/leads\/\$\{esc\(lead\.id\)\}\/whatsapp" target="_blank"/);
+  assert.match(views, /data-whatsapp-form/);
+  assert.match(views, /aria-live="polite"/);
+  assert.match(views, /Abrir no WhatsApp/);
+  assert.match(views, /Atualizar etapa/);
+  assert.match(views, /Mais ações/);
+  assert.match(views, /Encerrar lead/);
   assert.match(views, /target="_blank" rel="noopener noreferrer"/);
   assert.match(server, /app\.post\('\/leads\/:id\/whatsapp'/);
-  assert.match(server, /await recordWhatsAppOpened\(lead\.id, req\.user\.sub\)/);
-  assert.match(server, /template\.replaceAll\('\{\{nome\}\}'/);
+  assert.match(server, /createWhatsAppActionHandler/);
   assert.doesNotMatch(views, /encrypted_access_token|encrypted_app_secret/);
 });
 
@@ -196,7 +199,7 @@ test('dashboard renderiza WhatsApp protegido por CSRF, filtros e paginação', (
   const html = dashboardView({
     leads: [{
       id: '11111111-1111-4111-8111-111111111111',
-      name: 'Lead',
+      name: '<img src=x onerror=alert(1)>',
       phone: '(38) 99114-2298',
       phone_normalized: '5538991142298',
       stage: 'NEW',
@@ -215,6 +218,24 @@ test('dashboard renderiza WhatsApp protegido por CSRF, filtros e paginação', (
   });
   assert.match(html, /action="\/leads\/11111111-1111-4111-8111-111111111111\/whatsapp"/);
   assert.match(html, /name="_csrf" value="csrf-test"/);
+  assert.match(html, /data-whatsapp-form/);
+  assert.match(html, /role="status" aria-live="polite" aria-atomic="true"/);
+  assert.match(html, />Abrir no WhatsApp</);
+  assert.match(html, />Atualizar etapa</);
+  assert.match(html, />Mais ações</);
+  assert.doesNotMatch(html, /[◉⚙✕]/);
+  assert.equal((html.match(/data-lost-lead=/g) || []).length, 1);
+  assert.match(html, /aria-labelledby="lost-dialog-title"/);
+  assert.match(html, /aria-describedby="lost-dialog-description"/);
+  assert.equal(html.includes('<img src=x onerror=alert(1)>'), false);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.match(html, /stroke="currentColor"/);
+  assert.match(html, /aria-hidden="true" focusable="false"/);
+  const actionCell = html.slice(
+    html.indexOf('<td data-label="Ações"'),
+    html.indexOf('</td>', html.indexOf('<td data-label="Ações"')),
+  );
+  assert.doesNotMatch(actionCell, />\s*(Perder|Sem interesse|Telefone inválido|Duplicado)\s*</);
   assert.match(html, /Entrada desde/);
   assert.match(html, /Etiqueta WA2 \(ID\)/);
   assert.match(html, /Página 2/);

@@ -25,6 +25,23 @@ function csrfField(csrfToken) {
   return `<input type="hidden" name="_csrf" value="${esc(csrfToken)}">`;
 }
 
+const ICON_PATHS = Object.freeze({
+  whatsapp: '<path d="M21 11.5a8.38 8.38 0 0 1-9 8.5 9.5 9.5 0 0 1-4-.9L3 21l1.9-4.6A8.5 8.5 0 1 1 21 11.5Z"/><path d="M8.5 8.5c.5 3 2 4.5 5 5l1.5-1.5 2 1v2c0 1-1 2-2 2A10 10 0 0 1 7 9c0-1 1-2 2-2h2l1 2-1.5 1.5"/>',
+  stage: '<path d="M4 7h10"/><path d="m11 4 3 3-3 3"/><path d="M20 17H10"/><path d="m13 14-3 3 3 3"/>',
+  more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+  details: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h6"/>',
+  wa2: '<path d="M12 2a10 10 0 1 0 10 10"/><path d="M12 6v6l4 2"/><path d="M16 3h5v5"/>',
+  close: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/>',
+  chevron: '<path d="m9 18 6-6-6-6"/>',
+  alert: '<path d="M10.3 2.9 1.8 17a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 2.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+});
+
+function icon(name) {
+  const paths = ICON_PATHS[name];
+  if (!paths) return '';
+  return `<svg class="icon icon-${name}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${paths}</svg>`;
+}
+
 function layout(title, body, { logged = true, csrfToken = '' } = {}) {
   return `<!doctype html>
 <html lang="pt-BR">
@@ -190,12 +207,20 @@ function whatsappAction(lead, csrfToken) {
   const phone = selectBestLeadPhone(lead);
   if (!phone.phoneNormalized) {
     return `
-      <span class="action-button whatsapp disabled" aria-disabled="true" title="Telefone inválido">◉ Abrir WhatsApp</span>
-      <small class="action-note error-text">Telefone inválido</small>`;
+      <button type="button" class="action-button whatsapp" disabled>
+        ${icon('whatsapp')}<span>Abrir no WhatsApp</span>
+      </button>
+      <p class="action-status error-text" role="alert">${icon('alert')} Telefone inválido</p>`;
   }
-  return `<form method="post" action="/leads/${esc(lead.id)}/whatsapp" target="_blank" rel="noopener noreferrer">
+  return `<form method="post" action="/leads/${esc(lead.id)}/whatsapp" target="_blank" rel="noopener noreferrer" data-whatsapp-form>
     ${csrfField(csrfToken)}
-    <button class="action-button whatsapp primary-action" title="Abrir conversa sem alterar a etapa">◉ Abrir WhatsApp</button>
+    <button class="action-button whatsapp primary-action" type="submit" data-whatsapp-submit>
+      ${icon('whatsapp')}<span data-button-label>Abrir no WhatsApp</span>
+    </button>
+    <button class="fallback-action" type="submit" formtarget="_self" data-whatsapp-fallback hidden>
+      Abrir nesta aba
+    </button>
+    <p class="action-status" role="status" aria-live="polite" aria-atomic="true" data-whatsapp-status></p>
   </form>`;
 }
 
@@ -241,29 +266,47 @@ function dashboardFilterQuery(filters, overrides = {}) {
 }
 
 function stageActions(lead, csrfToken) {
-  const actions = getStageActions(lead.stage);
-  if (actions.length === 0) return '<span class="muted">Etapa final</span>';
-  return actions.map(({ stage, label }) => {
-    if (['LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED'].includes(stage)) {
-      return `<button type="button" class="action-button stage-lost" data-lost-lead="${esc(lead.id)}" title="Registrar perda e motivo">✕ ${esc(label)}</button>`;
-    }
-    const actionClass = {
-      CONTACT_STARTED: 'stage-contact',
-      IN_SERVICE: 'stage-contact',
-      QUALIFIED: 'stage-qualified',
-      OPPORTUNITY: 'stage-opportunity',
-      NEGOTIATING: 'stage-opportunity',
-      AWAITING_ENROLLMENT: 'stage-enrollment',
-      AWAITING_PAYMENT: 'stage-enrollment',
-      NO_RESPONSE: 'stage-secondary',
-    }[stage] || 'stage-secondary';
-    return `
-    <form method="post" action="/leads/${esc(lead.id)}/stage">
+  const actions = getStageActions(lead.stage).filter(
+    ({ stage }) => !['LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED'].includes(stage),
+  );
+  if (actions.length === 0) {
+    return `<button type="button" class="action-button action-secondary" disabled>
+      ${icon('stage')}<span>Sem transição disponível</span>
+    </button>`;
+  }
+  return `<details class="action-disclosure" data-action-disclosure>
+    <summary class="action-button action-secondary">
+      ${icon('stage')}<span>Atualizar etapa</span>${icon('chevron')}
+    </summary>
+    <div class="action-menu">
+      ${actions.map(({ stage, label }) => `
+      <form method="post" action="/leads/${esc(lead.id)}/stage">
       ${csrfField(csrfToken)}
       <input type="hidden" name="stage" value="${stage}">
-      <button class="action-button ${actionClass}" title="Mover para ${esc(label)}">→ ${esc(label)}</button>
-    </form>`;
-  }).join('');
+      <button class="action-menu-item">${icon('stage')}<span>${esc(label)}</span></button>
+      </form>`).join('')}
+    </div>
+  </details>`;
+}
+
+function moreLeadActions(lead) {
+  return `<details class="action-disclosure" data-action-disclosure>
+    <summary class="action-button action-secondary">
+      ${icon('more')}<span>Mais ações</span>${icon('chevron')}
+    </summary>
+    <div class="action-menu">
+      <a class="action-menu-item" href="/leads/${esc(lead.id)}">
+        ${icon('details')}<span>Ver detalhes e histórico</span>
+      </a>
+      <a class="action-menu-item" href="/leads/${esc(lead.id)}/wa2">
+        ${icon('wa2')}<span>WA2 e etiquetas</span>
+      </a>
+      <hr>
+      <button type="button" class="action-menu-item action-menu-danger" data-lost-lead="${esc(lead.id)}">
+        ${icon('close')}<span>Encerrar lead</span>
+      </button>
+    </div>
+  </details>`;
 }
 
 export function dashboardView({
@@ -309,11 +352,11 @@ export function dashboardView({
         </td>
         <td data-label="Etapa"><span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span>${lead.lost_reason ? `<small>Motivo: ${esc(LOST_REASON_LABELS[lead.lost_reason] || lead.lost_reason)}</small>` : ''}</td>
         <td data-label="Ações" class="actions-cell">
-          <div class="actions">
+          <div class="lead-actions" data-lead-actions>
             <div class="whatsapp-action">${whatsappAction(lead, csrfToken)}</div>
-            <div class="secondary-actions">
-              <a class="action-button stage-secondary" href="/leads/${esc(lead.id)}/wa2" title="Vínculo e detalhes WA2">⚙ WA2</a>
+            <div class="lead-secondary-actions">
               ${stageActions(lead, csrfToken)}
+              ${moreLeadActions(lead)}
             </div>
           </div>
         </td>
@@ -415,14 +458,14 @@ export function dashboardView({
         ${pagination.hasNext ? `<a class="button-link secondary" href="/?${esc(dashboardFilterQuery(filters, { page: pagination.page + 1 }))}">Próxima →</a>` : ''}
       </nav>
     </section>
-    <dialog id="lost-dialog" class="modal">
+    <dialog id="lost-dialog" class="modal" aria-labelledby="lost-dialog-title" aria-describedby="lost-dialog-description">
       <form method="post" id="lost-form">
         ${csrfField(csrfToken)}
-        <h2>Registrar perda</h2>
-        <p>Escolha o motivo. Nenhum evento positivo será enviado à Meta.</p>
+        <h2 id="lost-dialog-title">Encerrar lead</h2>
+        <p id="lost-dialog-description">Escolha o motivo. Nenhum evento positivo será enviado à Meta.</p>
         <label>Motivo<select name="lostReason" required><option value="">Selecione</option>${Object.entries(LOST_REASON_LABELS).map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join('')}</select></label>
         <label class="lost-notes">Observação<textarea name="lostNotes" maxlength="1000"></textarea></label>
-        <div class="actions"><button class="danger">Confirmar perda</button><button type="button" class="secondary" data-close-dialog>Cancelar</button></div>
+        <div class="actions"><button class="danger">Confirmar encerramento</button><button type="button" class="secondary" data-close-dialog>Cancelar</button></div>
       </form>
     </dialog>
   `, { csrfToken });

@@ -274,6 +274,63 @@ test('preview escapa XSS e mantém hash, contagens e confirmação CSRF', () => 
   assert.match(html, /CONFIRM_LEAD_FILE_IMPORT/);
 });
 
+function previewFixture(items) {
+  return {
+    id: '11111111-1111-4111-8111-111111111111',
+    original_filename: 'fixture.csv',
+    format: 'CSV',
+    sheet_name: 'Leads',
+    sha256: 'a'.repeat(64),
+    status: 'PREVIEW',
+    counts: {
+      total: items.length,
+      new: items.length,
+      update: 0,
+      possibleDuplicate: 0,
+      invalid: 0,
+    },
+    items,
+  };
+}
+
+function previewItems(count) {
+  return Array.from({ length: count }, (_, index) => ({
+    row_number: index + 1,
+    meta_lead_id: `fixture-${index + 1}`,
+    name: `Linha sintética ${index + 1}`,
+    phone: '000',
+    phone_normalized: null,
+    meta_created_at: null,
+    decision: 'NEW',
+    errors: [],
+  }));
+}
+
+test('preview renderiza todas as 366 linhas sem limite de amostra', async () => {
+  const html = leadFileImportPreviewView({ imported: previewFixture(previewItems(366)) });
+  assert.match(html, /366 linhas exibidas/);
+  assert.match(html, />Linha sintética 1</);
+  assert.match(html, />Linha sintética 100</);
+  assert.match(html, />Linha sintética 101</);
+  assert.match(html, />Linha sintética 366</);
+  assert.doesNotMatch(html, /100 de 366/);
+  assert.equal((html.match(/<tr>/g) || []).length - 1, 366);
+
+  const views = await read('src/views.js');
+  assert.doesNotMatch(views, /slice\(0,\s*100\)/);
+});
+
+test('preview renderiza o limite de 2.000 itens e aceita lista vazia', () => {
+  const fullHtml = leadFileImportPreviewView({ imported: previewFixture(previewItems(2_000)) });
+  assert.match(fullHtml, /2(?:\.|&#46;)?000 linhas exibidas|2000 linhas exibidas/);
+  assert.match(fullHtml, />Linha sintética 2000</);
+  assert.equal((fullHtml.match(/<tr>/g) || []).length - 1, 2_000);
+
+  const emptyHtml = leadFileImportPreviewView({ imported: previewFixture([]) });
+  assert.match(emptyHtml, /0 linhas exibidas/);
+  assert.match(emptyHtml, /Nenhuma linha disponível para exibição/);
+});
+
 test('migration, banco e rota mantêm tenant, preview, CSRF e idempotência', async () => {
   const [migration, database, server, views] = await Promise.all([
     read('sql/007_lead_file_imports.sql'),

@@ -402,7 +402,9 @@ export function leadFileImportPreviewView({ imported, csrfToken = '' }) {
     POSSIBLE_DUPLICATE: 'Possível duplicidade',
     INVALID: 'Inválido',
   };
-  const samples = imported.items.slice(0, 100);
+  const previewItems = Array.isArray(imported.items)
+    ? imported.items
+    : [];
   const diagnostics = imported.importDiagnostics || {};
   const delimiterLabel = diagnostics.delimiter === '\t'
     ? 'Tabulação'
@@ -434,16 +436,16 @@ export function leadFileImportPreviewView({ imported, csrfToken = '' }) {
       </div>
     </section>
     <section class="panel">
-      <div class="panel-title"><h2>Amostra sanitizada</h2><span>${esc(samples.length)} de ${esc(imported.counts.total)}</span></div>
+      <div class="panel-title"><h2>Todas as linhas</h2><span>${esc(previewItems.length)} linhas exibidas</span></div>
       <div class="table-wrap"><table><thead><tr><th>Linha</th><th>ID Meta</th><th>Nome</th>
         <th>WhatsApp</th><th>Data Meta</th><th>Decisão</th><th>Validação</th></tr></thead><tbody>
-        ${samples.map((item) => `<tr>
+        ${previewItems.length ? previewItems.map((item) => `<tr>
           <td>${esc(item.row_number)}</td><td>${detailValue(item.meta_lead_id)}</td>
           <td>${detailValue(item.name)}</td><td>${detailValue(item.phone_normalized || item.phone)}</td>
           <td>${formatDateTime(item.meta_created_at)}</td>
           <td><span class="badge ${esc(item.decision.toLowerCase().replaceAll('_', '-'))}">${esc(decisionLabels[item.decision] || item.decision)}</span></td>
           <td>${item.errors?.length ? esc(item.errors.join(', ')) : 'Válido'}</td>
-        </tr>`).join('')}
+        </tr>`).join('') : '<tr><td colspan="7">Nenhuma linha disponível para exibição.</td></tr>'}
       </tbody></table></div>
       ${imported.status === 'PREVIEW' ? `<div class="actions">
         <form method="post" action="/operations/file-imports/${esc(imported.id)}/confirm"

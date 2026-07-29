@@ -2,7 +2,7 @@ FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package*.json ./
-RUN npm install --omit=dev
+RUN npm ci --omit=dev
 COPY --chown=node:node src ./src
 COPY --chown=node:node sql ./sql
 COPY --chown=node:node public ./public

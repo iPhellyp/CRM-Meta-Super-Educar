@@ -3278,7 +3278,7 @@ export async function completeWa2ReconciliationItem(
          RETURNING *`,
         [
           tenantId(), row.lead_id, row.wa2_instance_id, contact.id,
-          chat.id, chat.jid, contact.phoneNormalized,
+          chat.id, contact.jid, contact.phoneNormalized,
         ],
       );
       link = inserted.rows[0];

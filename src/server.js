@@ -146,6 +146,7 @@ import { createWhatsAppActionHandler } from './whatsapp-action.js';
 import {
   LEAD_FILE_LIMITS,
   parseLeadFile,
+  protectCsvExportValue,
   publicLeadFileImportError,
 } from './lead-file-import.js';
 
@@ -1901,7 +1902,7 @@ app.post('/leads/bulk', async (req, res) => {
 });
 
 function csvCell(value) {
-  return `"${String(value ?? '').replaceAll('"', '""').replace(/[\r\n]+/g, ' ')}"`;
+  return `"${protectCsvExportValue(value).replaceAll('"', '""')}"`;
 }
 
 app.get('/leads/export.csv', async (req, res) => {

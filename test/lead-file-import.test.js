@@ -7,6 +7,7 @@ import {
   LeadFileImportError,
   parseLeadCreatedTime,
   parseLeadFile,
+  protectCsvExportValue,
   sanitizeLeadImportFilename,
 } from '../src/lead-file-import.js';
 import { leadFileImportPreviewView } from '../src/views.js';
@@ -107,12 +108,51 @@ test('XLSX e XLS são aceitos e preservam IDs string maiores que 15 dígitos', (
   }
 });
 
-test('ID numérico no Excel é recusado para impedir perda de precisão', () => {
+test('ID numérico seguro é convertido em texto e ID numérico inseguro é recusado', () => {
   const parsed = parseLeadFile(workbookBuffer([
     ['id', 'Nome', 'WhatsApp'],
-    [12345678901234568, 'Caio', '11999999999'],
+    [123456789012345, 'Caio', '11999999999'],
+    [Number.MAX_SAFE_INTEGER + 1, 'Dora', '11999999999'],
   ]), 'leads.xlsx');
-  assert.ok(parsed.rows[0].errors.includes('ID_MUST_BE_TEXT'));
+  assert.equal(parsed.rows[0].metaLeadId, '123456789012345');
+  assert.equal(parsed.rows[0].errors.includes('ID_MUST_BE_TEXT'), false);
+  assert.ok(parsed.rows[1].errors.includes('ID_MUST_BE_TEXT'));
+});
+
+test('prefixo tipado de ID exportado pela Meta é removido sem alterar o identificador', () => {
+  const parsed = parseLeadFile(
+    Buffer.from('id,ad_id,Nome,WhatsApp\nl:123456,ad:987654,Pessoa Teste,11999999999'),
+    'leads.csv',
+  );
+  assert.equal(parsed.rows[0].metaLeadId, '123456');
+  assert.equal(parsed.rows[0].metaAdId, '987654');
+  assert.equal(parsed.rows[0].errors.length, 0);
+});
+
+test('telefones +55, formatados e nome iniciado por arroba são preservados', () => {
+  for (const phone of ['+5538999999999', '+55 38 99999-9999', '(38) 99999-9999']) {
+    const parsed = parseLeadFile(
+      Buffer.from(`id,Nome,WhatsApp\nsafe-id,@Identificador,${phone}`),
+      'leads.csv',
+    );
+    assert.equal(parsed.rows[0].name, '@Identificador');
+    assert.equal(parsed.rows[0].phone, phone);
+    assert.equal(parsed.rows[0].errors.includes('WHATSAPP_UNSAFE_VALUE'), false);
+    assert.equal(parsed.rows[0].errors.length, 0);
+  }
+});
+
+test('CSV não executa valores iniciados por fórmula e exportação os neutraliza', () => {
+  const parsed = parseLeadFile(
+    Buffer.from('id,Nome,WhatsApp\nsafe-id,=texto,000'),
+    'leads.csv',
+  );
+  assert.equal(parsed.rows[0].name, '=texto');
+  assert.equal(parsed.rows[0].errors.includes('NOME_UNSAFE_VALUE'), false);
+  for (const value of ['=1+1', '+cmd', '-valor', '@valor']) {
+    assert.equal(protectCsvExportValue(value), `'${value}`);
+  }
+  assert.equal(protectCsvExportValue('texto'), 'texto');
 });
 
 test('datas aceitam formatos documentados sem fallback ambíguo', () => {
@@ -196,6 +236,13 @@ test('limites de linhas, colunas, tamanho, extensão, assinatura e nome são apl
     (error) => error.code === 'FILE_TOO_LARGE',
   );
   assert.throws(() => sanitizeLeadImportFilename('../leads.csv'), /Nome de arquivo inválido/);
+});
+
+test('nome multipart corrige mojibake conservador sem alterar UTF-8 correto', () => {
+  assert.equal(sanitizeLeadImportFilename('Veterinária.xls'), 'Veterinária.xls');
+  assert.equal(sanitizeLeadImportFilename('VeterinÃ¡ria.xls'), 'Veterinária.xls');
+  assert.equal(sanitizeLeadImportFilename('arquivo ASCII.csv'), 'arquivo ASCII.csv');
+  assert.throws(() => sanitizeLeadImportFilename('arquivo\0.csv'), /Nome de arquivo inválido/);
 });
 
 test('preview escapa XSS e mantém hash, contagens e confirmação CSRF', () => {

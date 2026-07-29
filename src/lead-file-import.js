@@ -35,7 +35,7 @@ const FIELD_LIMITS = Object.freeze({
 });
 const INVISIBLE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B-\u200D\u2060\uFEFF]/u;
 const SCIENTIFIC = /^[+-]?\d+(?:[.,]\d+)?e[+-]?\d+$/i;
-const FORMULA_PREFIX = /^[=+\-@]/;
+const MOJIBAKE_MARKERS = /[ÃÂâð]/u;
 
 export class LeadFileImportError extends Error {
   constructor(code, message, details = {}) {
@@ -46,8 +46,18 @@ export class LeadFileImportError extends Error {
   }
 }
 
+export function normalizeLeadImportOriginalName(originalName) {
+  const original = String(originalName || '');
+  if (!MOJIBAKE_MARKERS.test(original)) return original;
+  const repaired = Buffer.from(original, 'latin1').toString('utf8');
+  if (repaired.includes('\uFFFD')) return original;
+  const originalMarkers = (original.match(MOJIBAKE_MARKERS) || []).length;
+  const repairedMarkers = (repaired.match(MOJIBAKE_MARKERS) || []).length;
+  return repairedMarkers < originalMarkers ? repaired : original;
+}
+
 export function sanitizeLeadImportFilename(originalName) {
-  const original = String(originalName || '').normalize('NFKC');
+  const original = normalizeLeadImportOriginalName(originalName).normalize('NFKC');
   if (!original || original.includes('\0') || /[/\\]/.test(original) || original.includes('..')) {
     throw new LeadFileImportError('INVALID_FILENAME', 'Nome de arquivo inválido.');
   }
@@ -324,15 +334,24 @@ export function parseLeadCreatedTime(value) {
 function safeString(cell, header, errors) {
   const value = cellText(cell);
   if (value === '') return '';
-  if (cell?.f || cell?.l || (typeof value === 'string' && FORMULA_PREFIX.test(value.trim()))) {
+  if (cell?.f || cell?.l) {
     errors.push(`${header.toUpperCase()}_UNSAFE_VALUE`);
     return '';
   }
   if (typeof value !== 'string') {
-    if (ID_HEADERS.has(header)) errors.push(`${header.toUpperCase()}_MUST_BE_TEXT`);
+    if (ID_HEADERS.has(header)) {
+      if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) {
+        return String(value);
+      }
+      errors.push(`${header.toUpperCase()}_MUST_BE_TEXT`);
+    }
     return String(value);
   }
-  const normalized = value.normalize('NFKC').trim();
+  let normalized = value.normalize('NFKC').trim();
+  if (ID_HEADERS.has(header)) {
+    const exportedMetaId = /^[A-Za-z]{1,16}:([A-Za-z0-9_-]+)$/u.exec(normalized);
+    if (exportedMetaId) normalized = exportedMetaId[1];
+  }
   if (INVISIBLE.test(normalized)) errors.push(`${header.toUpperCase()}_INVISIBLE_CHAR`);
   if (normalized.length > FIELD_LIMITS[header]) errors.push(`${header.toUpperCase()}_TOO_LONG`);
   if (ID_HEADERS.has(header)) {
@@ -341,6 +360,11 @@ function safeString(cell, header, errors) {
     if (!/^[A-Za-z0-9_-]+$/.test(normalized)) errors.push(`${header.toUpperCase()}_INVALID`);
   }
   return normalized.slice(0, FIELD_LIMITS[header]);
+}
+
+export function protectCsvExportValue(value) {
+  const text = String(value ?? '').replace(/[\r\n]+/g, ' ');
+  return /^[=+\-@]/u.test(text) ? `'${text}` : text;
 }
 
 function parseSheet(sheet, sheetName) {

@@ -5,27 +5,11 @@ function setContextMessage(region, message, { error = false } = {}) {
   region.setAttribute('role', error ? 'alert' : 'status');
 }
 
-function setWhatsAppLoading(form, loading) {
-  const button = form.querySelector('[data-whatsapp-submit]');
-  const label = button?.querySelector('[data-button-label]');
-  form.classList.toggle('loading', loading);
-  form.setAttribute('aria-busy', String(loading));
-  if (button) button.disabled = loading;
-  if (label) label.textContent = loading ? 'Abrindo WhatsApp…' : 'Abrir no WhatsApp';
-}
-
-function setupWhatsAppActions() {
-  for (const form of document.querySelectorAll('[data-whatsapp-form]')) {
-    const button = form.querySelector('[data-whatsapp-submit]');
-    const status = form.querySelector('[data-whatsapp-status]');
-    form.addEventListener('submit', () => {
-      if (button?.disabled) return;
-      setContextMessage(status, 'Abrindo o WhatsApp…');
-      setWhatsAppLoading(form, true);
-    });
-
-    form.querySelector('[data-copy-phone]')?.addEventListener('click', async (event) => {
+function setupCopyPhoneActions() {
+  for (const button of document.querySelectorAll('[data-copy-phone]')) {
+    button.addEventListener('click', async (event) => {
       const phone = event.currentTarget.dataset.copyPhone;
+      const status = event.currentTarget.closest('form')?.querySelector('[data-whatsapp-status]');
       try {
         await navigator.clipboard.writeText(phone);
         setContextMessage(status, 'Telefone copiado.');
@@ -418,7 +402,7 @@ function setupOfflineRetry() {
   });
 }
 
-setupWhatsAppActions();
+setupCopyPhoneActions();
 setupActionDisclosures();
 setupLostDialog();
 setupNavigationDrawer();

@@ -8,20 +8,18 @@ test('ação principal do WhatsApp preserva navegação HTML nativa', () => {
   assert.doesNotMatch(source, /window\.open\s*\(/);
   assert.doesNotMatch(source, /about:blank/);
   assert.doesNotMatch(source, /fetch\s*\(\s*form\.action/);
-  const whatsappSetup = source.match(
-    /function setupWhatsAppActions\(\) \{[\s\S]*?\n\}\n\nfunction setupActionDisclosures/,
-  )?.[0] || '';
-  assert.doesNotMatch(whatsappSetup, /preventDefault\s*\(/);
-  assert.match(whatsappSetup, /Abrindo o WhatsApp…/);
+  assert.doesNotMatch(source, /setupWhatsAppActions|setWhatsAppLoading/);
+  assert.doesNotMatch(source, /Abrindo (?:o )?WhatsApp/);
+  assert.match(source, /form\.matches\('\[data-whatsapp-form\]'\)\) continue/);
 });
 
-test('duplo clique é contido desabilitando o submit de forma síncrona', () => {
-  assert.match(source, /if \(button\?\.disabled\) return;/);
-  assert.match(source, /setWhatsAppLoading\(form, true\)/);
-  assert.match(source, /if \(button\) button\.disabled = loading/);
+test('JavaScript não escuta submit nem desabilita o botão principal', () => {
+  assert.doesNotMatch(source, /addEventListener\('submit'[\s\S]*data-whatsapp-submit/);
+  assert.doesNotMatch(source, /querySelector\('\[data-whatsapp-submit\]'\)/);
 });
 
 test('copiar telefone usa Clipboard API e fallback local', () => {
+  assert.match(source, /function setupCopyPhoneActions/);
   assert.match(source, /navigator\.clipboard\.writeText\(phone\)/);
   assert.match(source, /document\.execCommand\('copy'\)/);
 });

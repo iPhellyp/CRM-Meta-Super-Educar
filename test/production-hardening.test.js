@@ -129,7 +129,7 @@ test('views críticas preservam semântica, CSRF e progressive enhancement', () 
 test('inicializadores do cliente são registrados uma única vez', () => {
   const app = read('public/app.js');
   for (const setup of [
-    'setupWhatsAppActions',
+    'setupCopyPhoneActions',
     'setupActionDisclosures',
     'setupLostDialog',
     'setupNavigationDrawer',

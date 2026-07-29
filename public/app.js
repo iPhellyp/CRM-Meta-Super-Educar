@@ -14,89 +14,33 @@ function setWhatsAppLoading(form, loading) {
   if (label) label.textContent = loading ? 'Abrindo WhatsApp…' : 'Abrir no WhatsApp';
 }
 
-function closeReservedPopup(popup) {
-  try {
-    if (popup && !popup.closed) popup.close();
-  } catch {
-    // A navegação externa pode tornar a referência inacessível.
-  }
-}
-
-function isStrictWhatsAppUrl(value) {
-  if (typeof value !== 'string' || !value.startsWith('https://wa.me/')) return false;
-  try {
-    const url = new URL(value);
-    return url.protocol === 'https:' &&
-      url.hostname === 'wa.me' &&
-      url.port === '' &&
-      url.username === '' &&
-      url.password === '';
-  } catch {
-    return false;
-  }
-}
-
 function setupWhatsAppActions() {
   for (const form of document.querySelectorAll('[data-whatsapp-form]')) {
-    let submitting = false;
     const button = form.querySelector('[data-whatsapp-submit]');
-    const fallback = form.querySelector('[data-whatsapp-fallback]');
     const status = form.querySelector('[data-whatsapp-status]');
-
-    form.addEventListener('submit', async (event) => {
-      if (event.submitter === fallback) return;
-      event.preventDefault();
-      if (submitting) return;
-
-      const popup = window.open('about:blank', '_blank');
-      if (!popup) {
-        fallback?.removeAttribute('hidden');
-        setContextMessage(status, 'A nova aba foi bloqueada. Abra nesta aba para continuar.', {
-          error: true,
-        });
-        button?.focus();
-        return;
-      }
-
-      try {
-        popup.opener = null;
-      } catch {
-        // Alguns navegadores impedem alterar opener; a navegação ainda pode prosseguir.
-      }
-
-      submitting = true;
-      fallback?.setAttribute('hidden', '');
-      setContextMessage(status, 'Preparando a conversa no WhatsApp.');
+    form.addEventListener('submit', () => {
+      if (button?.disabled) return;
+      setContextMessage(status, 'Abrindo o WhatsApp…');
       setWhatsAppLoading(form, true);
+    });
 
+    form.querySelector('[data-copy-phone]')?.addEventListener('click', async (event) => {
+      const phone = event.currentTarget.dataset.copyPhone;
       try {
-        const response = await fetch(form.action, {
-          method: 'POST',
-          body: new FormData(form),
-          headers: { Accept: 'application/json' },
-          credentials: 'same-origin',
+        await navigator.clipboard.writeText(phone);
+        setContextMessage(status, 'Telefone copiado.');
+      } catch {
+        const field = document.createElement('textarea');
+        field.value = phone;
+        field.setAttribute('readonly', '');
+        field.className = 'sr-only';
+        document.body.append(field);
+        field.select();
+        const copied = document.execCommand('copy');
+        field.remove();
+        setContextMessage(status, copied ? 'Telefone copiado.' : 'Não foi possível copiar.', {
+          error: !copied,
         });
-        const payload = await response.json().catch(() => null);
-        if (
-          !response.ok ||
-          payload?.ok !== true ||
-          !isStrictWhatsAppUrl(payload.redirectUrl)
-        ) {
-          throw new Error(payload?.error?.message || 'Não foi possível abrir o WhatsApp.');
-        }
-        popup.location.replace(payload.redirectUrl);
-        setContextMessage(status, 'WhatsApp aberto em uma nova aba.');
-      } catch (error) {
-        closeReservedPopup(popup);
-        setContextMessage(
-          status,
-          error instanceof Error ? error.message : 'Não foi possível abrir o WhatsApp.',
-          { error: true },
-        );
-        button?.focus();
-      } finally {
-        submitting = false;
-        setWhatsAppLoading(form, false);
       }
     });
   }
@@ -282,6 +226,7 @@ function setupFilterDrawer() {
 
 function setupFormLoading() {
   for (const form of document.querySelectorAll('form[method="post"]')) {
+    if (form.matches('[data-whatsapp-form]')) continue;
     form.addEventListener('submit', (event) => {
       if (event.defaultPrevented) return;
       if (form.dataset.confirm && !window.confirm(form.dataset.confirm)) {

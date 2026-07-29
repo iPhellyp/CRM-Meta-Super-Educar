@@ -85,8 +85,8 @@ function layout(title, body, { logged = true, csrfToken = '' } = {}) {
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icons/app-icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/icons/app-icon-192.png">
-  <link rel="stylesheet" href="/app.css?v=4">
-  <script src="/app.js?v=4" defer></script>
+  <link rel="stylesheet" href="/app.css?v=5">
+  <script src="/app.js?v=5" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Ir para o conteúdo principal</a>
@@ -256,10 +256,16 @@ export function historicalOperationsView({
         <div class="panel-title"><div><span class="eyebrow">Arquivo controlado</span>
           <h2>Importar arquivo de leads</h2><p>CSV, XLSX ou XLS da Meta · até 5 MB, 2.000 linhas e 50 colunas.</p></div>
           <span class="badge qualified">Arquivo</span></div>
+        <ol class="import-steps" aria-label="Etapas da importação">
+          <li class="active">1 <span>Arquivo</span></li><li>2 <span>Conferência</span></li><li>3 <span>Resultado</span></li>
+        </ol>
         <form method="post" action="/operations/file-imports/preview"
-          enctype="multipart/form-data" class="stack">
+          enctype="multipart/form-data" class="stack upload-dropzone">
           ${csrfField(csrfToken)}
-          <label>Arquivo de leads<input type="file" name="leadFile" accept=".csv,.xlsx,.xls" required></label>
+          <label><strong>Arraste o arquivo aqui ou selecione no dispositivo</strong>
+            <span>CSV, XLSX, XLS binário e Excel XML · até 5 MB</span>
+            <input type="file" name="leadFile" accept=".csv,.xlsx,.xls" required>
+          </label>
           <button type="submit">Gerar prévia segura</button>
         </form>
         <p class="helper-text">A prévia não altera leads. Duplicidades possíveis nunca são mescladas automaticamente.</p>
@@ -397,13 +403,25 @@ export function leadFileImportPreviewView({ imported, csrfToken = '' }) {
     INVALID: 'Inválido',
   };
   const samples = imported.items.slice(0, 100);
+  const diagnostics = imported.importDiagnostics || {};
+  const delimiterLabel = diagnostics.delimiter === '\t'
+    ? 'Tabulação'
+    : diagnostics.delimiter === ';' ? 'Ponto e vírgula'
+      : diagnostics.delimiter === ',' ? 'Vírgula' : 'Não aplicável';
   return layout('Prévia da importação', `
     <section class="hero"><div><h1>Prévia da importação</h1>
       <p>Nenhum lead foi alterado. Confira as decisões antes de confirmar.</p></div></section>
     <section class="panel">
+      <ol class="import-steps" aria-label="Etapas da importação">
+        <li>1 <span>Arquivo</span></li><li class="active">2 <span>Conferência</span></li><li>3 <span>Resultado</span></li>
+      </ol>
+      ${(diagnostics.warnings || []).map((warning) => `<div class="alert warning">${esc(warning)}</div>`).join('')}
       <div class="detail-grid">
         <div><strong>Arquivo</strong><span>${esc(imported.original_filename)}</span></div>
         <div><strong>Formato</strong><span>${esc(imported.format)}</span></div>
+        ${diagnostics.detectedFormat ? `<div><strong>Formato detectado</strong><span>${esc(diagnostics.detectedFormat)}</span></div>` : ''}
+        ${diagnostics.encoding ? `<div><strong>Codificação</strong><span>${esc(diagnostics.encoding)}</span></div>` : ''}
+        ${diagnostics.delimiter ? `<div><strong>Delimitador</strong><span>${esc(delimiterLabel)}</span></div>` : ''}
         <div><strong>Planilha</strong><span>${esc(imported.sheet_name)}</span></div>
         <div><strong>SHA-256</strong><span class="break-anywhere">${esc(imported.sha256)}</span></div>
       </div>
@@ -482,13 +500,13 @@ function whatsappAction(lead, csrfToken) {
       </button>
       <p class="action-status error-text" role="alert">${icon('alert')} Telefone inválido</p>`;
   }
-  return `<form method="post" action="/leads/${esc(lead.id)}/whatsapp" target="_blank" rel="noopener noreferrer" data-whatsapp-form>
+  return `<form method="post" action="/leads/${esc(lead.id)}/whatsapp" data-whatsapp-form>
     ${csrfField(csrfToken)}
     <button class="action-button whatsapp primary-action" type="submit" data-whatsapp-submit>
       ${icon('whatsapp')}<span data-button-label>Abrir no WhatsApp</span>
     </button>
-    <button class="fallback-action" type="submit" formtarget="_self" data-whatsapp-fallback hidden>
-      Abrir nesta aba
+    <button class="copy-phone" type="button" data-copy-phone="${esc(phone.phoneNormalized)}">
+      Copiar telefone
     </button>
     <p class="action-status" role="status" aria-live="polite" aria-atomic="true" data-whatsapp-status></p>
   </form>`;

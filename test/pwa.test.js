@@ -35,8 +35,8 @@ test('manifest é instalável, pt-BR e não contém dados privados', () => {
 test('service worker guarda somente assets públicos permitidos', () => {
   assert.match(worker, /const PUBLIC_ASSETS = \[/);
   for (const asset of [
-    '/app.css?v=4',
-    '/app.js?v=4',
+    '/app.css?v=5',
+    '/app.js?v=5',
     '/manifest.webmanifest',
     '/offline.html',
     '/icons/app-icon-192.png',
@@ -51,6 +51,18 @@ test('service worker guarda somente assets públicos permitidos', () => {
   assert.doesNotMatch(worker, /['"`]\/(leads|events|operations|meta|wa2|login|logout)/);
   assert.match(worker, /if \(request\.method !== 'GET'\) return/);
   assert.match(worker, /request\.mode === 'navigate'[\s\S]*fetch\(request\)\.catch\(\(\) => caches\.match\('\/offline\.html'\)\)/);
+});
+
+test('HTML e service worker usam a mesma versão de CSS e JavaScript', () => {
+  const views = read('src/views.js');
+  const cssVersion = views.match(/app\.css\?v=(\d+)/)?.[1];
+  const jsVersion = views.match(/app\.js\?v=(\d+)/)?.[1];
+  assert.equal(cssVersion, jsVersion);
+  assert.match(worker, new RegExp(`CACHE_NAME = .+v${cssVersion}`));
+  assert.match(worker, new RegExp(`/app\\.css\\?v=${cssVersion}`));
+  assert.match(worker, new RegExp(`/app\\.js\\?v=${jsVersion}`));
+  assert.doesNotMatch(views, /\?v=4/);
+  assert.doesNotMatch(worker, /\?v=4|public-v4/);
 });
 
 test('offline é genérico e não contém conteúdo administrativo', () => {

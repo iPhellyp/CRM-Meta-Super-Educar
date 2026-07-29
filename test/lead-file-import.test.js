@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import * as XLSX from 'xlsx';
 import {
+  detectLeadFileContent,
   LeadFileImportError,
   parseLeadCreatedTime,
   parseLeadFile,
@@ -17,6 +18,67 @@ function workbookBuffer(rows, { bookType = 'xlsx', sheetName = 'Leads' } = {}) {
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(rows), sheetName);
   return XLSX.write(workbook, { type: 'buffer', bookType });
 }
+
+function spreadsheetMlBuffer({ unsafe = '' } = {}) {
+  return Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+  <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+    xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+    <Worksheet ss:Name="Leads"><Table>
+      <Row><Cell><Data ss:Type="String">id</Data></Cell><Cell><Data ss:Type="String">Nome</Data></Cell><Cell><Data ss:Type="String">WhatsApp</Data></Cell></Row>
+      <Row><Cell><Data ss:Type="String">fake-001</Data></Cell><Cell><Data ss:Type="String">Pessoa Fictícia</Data></Cell><Cell><Data ss:Type="String">000</Data></Cell></Row>
+      ${unsafe}
+    </Table></Worksheet>
+  </Workbook>`, 'utf8');
+}
+
+test('SpreadsheetML 2003 XML salvo como XLS é reconhecido pelo conteúdo', () => {
+  const parsed = parseLeadFile(spreadsheetMlBuffer(), 'exportacao.xls');
+  assert.equal(parsed.declaredFormat, 'XLS');
+  assert.equal(parsed.detectedFormat, 'SPREADSHEETML');
+  assert.equal(parsed.encoding, 'UTF-8');
+  assert.equal(parsed.rows[0].metaLeadId, 'fake-001');
+  assert.match(parsed.warnings.join(' '), /formato XML/);
+});
+
+test('CSV UTF-16LE com BOM e TAB é reconhecido e preserva ID', () => {
+  const text = 'id\tcreated_time\tNome\tWhatsApp\tlead_status\r\n'
+    + '000000000000000001\t2026-07-29\tPessoa Fictícia\t000\tnew\r\n';
+  const buffer = Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from(text, 'utf16le')]);
+  const parsed = parseLeadFile(buffer, 'exportacao.csv');
+  assert.equal(parsed.encoding, 'UTF-16LE');
+  assert.equal(parsed.delimiter, '\t');
+  assert.equal(parsed.rows[0].metaLeadId, '000000000000000001');
+  assert.match(parsed.warnings.join(' '), /CSV UTF-16 reconhecido/);
+});
+
+test('conteúdo seguro suportado é aceito mesmo com extensão divergente', () => {
+  const parsed = parseLeadFile(Buffer.from('id;Nome;WhatsApp\nfake-002;Pessoa Teste;000'), 'dados.xls');
+  assert.equal(parsed.declaredFormat, 'XLS');
+  assert.equal(parsed.detectedFormat, 'CSV');
+  assert.equal(parsed.warnings.length, 1);
+});
+
+test('SpreadsheetML rejeita DOCTYPE, fórmula, hyperlink e vínculo externo', () => {
+  const safe = spreadsheetMlBuffer().toString('utf8');
+  for (const text of [
+    safe.replace('<Workbook', '<!DOCTYPE Workbook><Workbook'),
+    safe.replace('<Cell><Data ss:Type="String">fake-001', '<Cell ss:Formula="=1+1"><Data ss:Type="String">fake-001'),
+    safe.replace('<Cell><Data ss:Type="String">fake-001', '<Cell ss:HRef="https://example.invalid"><Data ss:Type="String">fake-001'),
+    safe.replace('</Workbook>', '<ExternalLink/></Workbook>'),
+  ]) {
+    assert.throws(
+      () => parseLeadFile(Buffer.from(text), 'dados.xls'),
+      (error) => error.code === 'UNSAFE_WORKBOOK',
+    );
+  }
+});
+
+test('binário desconhecido não é interpretado como texto Windows-1252', () => {
+  assert.throws(
+    () => detectLeadFileContent(Buffer.from([0, 1, 2, 3, 4, 5])),
+    (error) => error.code === 'UNKNOWN_FORMAT',
+  );
+});
 
 test('CSV aceita vírgula, ponto e vírgula, tab e BOM preservando ID textual', () => {
   for (const separator of [',', ';', '\t']) {
@@ -126,7 +188,7 @@ test('limites de linhas, colunas, tamanho, extensão, assinatura e nome são apl
   assert.throws(() => parseLeadFile(Buffer.from('x'), 'leads.exe'), /CSV, XLSX ou XLS/);
   assert.throws(
     () => parseLeadFile(Buffer.from('not zip'), 'leads.xlsx'),
-    (error) => error.code === 'SIGNATURE_MISMATCH',
+    (error) => error.code === 'UNKNOWN_FORMAT',
   );
   assert.throws(
     () => parseLeadFile(Buffer.alloc(5 * 1024 * 1024 + 1), 'leads.csv'),

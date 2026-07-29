@@ -404,7 +404,12 @@
   .action-status { display: flex; align-items: flex-start; gap: var(--space-1); margin: 0; color: var(--color-text-secondary); font-size: var(--font-caption); }
   .action-status:empty { display: none; }
   .action-status .icon { width: 15px; height: 15px; margin-top: 1px; }
-  .fallback-action { border-color: var(--color-error); background: var(--color-surface); color: var(--color-error); }
+  .copy-phone { min-height: 36px; border: 0; padding: var(--space-1) var(--space-2); background: transparent; color: var(--color-text-secondary); font-size: var(--font-caption); text-decoration: underline; }
+  .upload-dropzone { border: 2px dashed var(--color-border-strong); border-radius: var(--radius-lg); padding: var(--space-6); background: var(--color-surface-secondary); text-align: center; }
+  .upload-dropzone label span { color: var(--color-text-secondary); font-weight: var(--font-weight-normal); }
+  .import-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-2); margin: 0 0 var(--space-5); padding: 0; list-style: none; }
+  .import-steps li { display: flex; min-height: 44px; align-items: center; justify-content: center; gap: var(--space-2); border-bottom: 3px solid var(--color-border); color: var(--color-text-secondary); font-weight: var(--font-weight-bold); }
+  .import-steps li.active { border-color: var(--color-brand); color: var(--color-brand); }
   .skeleton { min-height: 1em; border-radius: var(--radius-sm); background: linear-gradient(90deg, #eeeaf2 25%, #f8f6fa 50%, #eeeaf2 75%); background-size: 200% 100%; animation: skeleton 1.2s linear infinite; }
   @keyframes skeleton { to { background-position-x: -200%; } }
 }
@@ -424,6 +429,24 @@
 @layer responsive {
   @media (min-width: 1100px) {
     .nav-toggle, .nav-close, .nav-backdrop { display: none; }
+    .app-header {
+      position: fixed;
+      inset: 0 auto 0 0;
+      width: 248px;
+      min-height: 100dvh;
+      align-items: stretch;
+      flex-direction: column;
+      justify-content: flex-start;
+      padding: var(--space-6) var(--space-4);
+    }
+    .app-brand { padding: 0 var(--space-2) var(--space-4); border-bottom: 1px solid rgb(255 255 255 / 16%); }
+    .app-navigation { min-height: 0; align-items: stretch; flex-direction: column; }
+    .nav-groups { display: flex; flex-direction: column; gap: var(--space-5); }
+    .nav-groups section { display: grid; gap: var(--space-1); }
+    .app-navigation a { width: 100%; min-height: 42px; padding: var(--space-2) var(--space-3); font-size: var(--font-label); }
+    .nav-logout { width: 100%; margin: auto 0 0; }
+    .nav-logout button { width: 100%; }
+    main { width: auto; max-width: 1520px; margin-left: 248px; }
   }
   @media (max-width: 1099px) {
     .app-header, header { min-height: 60px; padding: var(--space-2) var(--space-4); }
@@ -508,7 +531,7 @@
     button, .button-link, .action-button, input, select { min-height: var(--control-height-mobile); }
   }
   @media (min-width: 1440px) {
-    .priority-stats { grid-template-columns: repeat(8, minmax(140px, 1fr)); }
+    .priority-stats { grid-template-columns: repeat(4, minmax(140px, 1fr)); }
   }
 }
 

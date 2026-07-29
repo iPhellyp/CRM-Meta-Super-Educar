@@ -174,14 +174,14 @@ test('credenciais são cifradas com AES-GCM e mascaradas', () => {
 test('interface abre WhatsApp sem confundir com Atendimento e registra histórico', async () => {
   const views = await read('src/views.js');
   const server = await read('src/server.js');
-  assert.match(views, /method="post" action="\/leads\/\$\{esc\(lead\.id\)\}\/whatsapp" target="_blank"/);
+  assert.match(views, /method="post" action="\/leads\/\$\{esc\(lead\.id\)\}\/whatsapp" data-whatsapp-form/);
+  assert.doesNotMatch(views, /\/whatsapp" target="_blank"/);
   assert.match(views, /data-whatsapp-form/);
   assert.match(views, /aria-live="polite"/);
   assert.match(views, /Abrir no WhatsApp/);
   assert.match(views, /Atualizar etapa/);
   assert.match(views, /Mais ações/);
   assert.match(views, /Encerrar lead/);
-  assert.match(views, /target="_blank" rel="noopener noreferrer"/);
   assert.match(server, /app\.post\('\/leads\/:id\/whatsapp'/);
   assert.match(server, /createWhatsAppActionHandler/);
   assert.doesNotMatch(views, /encrypted_access_token|encrypted_app_secret/);

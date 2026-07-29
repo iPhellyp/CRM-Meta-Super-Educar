@@ -76,6 +76,128 @@ function fileFormat(filename) {
   return extension.slice(1).toUpperCase();
 }
 
+function startsWith(buffer, signature) {
+  return buffer.length >= signature.length && buffer.subarray(0, signature.length).equals(signature);
+}
+
+export function detectTextEncoding(buffer) {
+  if (startsWith(buffer, Buffer.from([0xFF, 0xFE]))) return 'UTF-16LE';
+  if (startsWith(buffer, Buffer.from([0xFE, 0xFF]))) return 'UTF-16BE';
+  if (startsWith(buffer, Buffer.from([0xEF, 0xBB, 0xBF]))) return 'UTF-8-BOM';
+  const utf8 = new TextDecoder('utf-8', { fatal: true });
+  try {
+    utf8.decode(buffer);
+    return 'UTF-8';
+  } catch {
+    try {
+      new TextDecoder('windows-1252', { fatal: true }).decode(buffer);
+      return 'WINDOWS-1252';
+    } catch {
+      return null;
+    }
+  }
+}
+
+export function decodeLeadText(buffer, encoding = detectTextEncoding(buffer)) {
+  const labels = {
+    'UTF-16LE': 'utf-16le',
+    'UTF-16BE': 'utf-16be',
+    'UTF-8-BOM': 'utf-8',
+    'UTF-8': 'utf-8',
+    'WINDOWS-1252': 'windows-1252',
+  };
+  if (!encoding || !labels[encoding]) {
+    throw new LeadFileImportError(
+      'UNKNOWN_FORMAT',
+      'Não foi possível identificar um formato seguro.',
+    );
+  }
+  const offset = encoding === 'UTF-16LE' || encoding === 'UTF-16BE'
+    ? 2
+    : encoding === 'UTF-8-BOM' ? 3 : 0;
+  return new TextDecoder(labels[encoding], { fatal: true })
+    .decode(buffer.subarray(offset))
+    .replace(/^\uFEFF/u, '');
+}
+
+export function isSpreadsheetMlXml(text) {
+  const prefix = text.trimStart().slice(0, 500);
+  return /^(?:<\?xml\b|<Workbook\b)/i.test(prefix)
+    && /urn:schemas-microsoft-com:office:spreadsheet/i.test(text);
+}
+
+export function detectTextDelimiter(text) {
+  const header = String(text).split(/\r?\n/u, 1)[0] || '';
+  const recognized = new Set(LEAD_FILE_HEADERS);
+  let best = null;
+  for (const delimiter of ['\t', ';', ',']) {
+    const headers = header.split(delimiter).map(normalizedHeader);
+    const score = headers.filter((value) => recognized.has(value)).length;
+    if (!best || score > best.score || (score === best.score && headers.length > best.columns)) {
+      best = { delimiter, score, columns: headers.length };
+    }
+  }
+  return best && best.score >= 2 ? best.delimiter : null;
+}
+
+export function detectLeadFileContent(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+    throw new LeadFileImportError('EMPTY_FILE', 'O arquivo está vazio.');
+  }
+  if (buffer.length > LEAD_FILE_LIMITS.bytes) {
+    throw new LeadFileImportError('FILE_TOO_LARGE', 'O arquivo excede 5 MB.');
+  }
+  if (startsWith(buffer, Buffer.from([0x50, 0x4B]))) {
+    return { detectedFormat: 'XLSX', encoding: null, delimiter: null };
+  }
+  if (startsWith(buffer, Buffer.from([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]))) {
+    return { detectedFormat: 'XLS', encoding: null, delimiter: null };
+  }
+  const encoding = detectTextEncoding(buffer);
+  if (!encoding) {
+    throw new LeadFileImportError('UNKNOWN_FORMAT', 'Não foi possível identificar um formato seguro.');
+  }
+  let text;
+  try {
+    text = decodeLeadText(buffer, encoding);
+  } catch {
+    throw new LeadFileImportError('INVALID_ENCODING', 'Não foi possível decodificar o arquivo com segurança.');
+  }
+  if (isSpreadsheetMlXml(text)) {
+    return { detectedFormat: 'SPREADSHEETML', encoding, delimiter: null, text };
+  }
+  const delimiter = detectTextDelimiter(text);
+  if (delimiter) return { detectedFormat: 'CSV', encoding, delimiter, text };
+  throw new LeadFileImportError('UNKNOWN_FORMAT', 'Não foi possível identificar um formato seguro.');
+}
+
+export function validateDetectedFileSafety(buffer, detection) {
+  const { detectedFormat, text = '' } = detection;
+  if (detectedFormat === 'SPREADSHEETML') {
+    if (/<!DOCTYPE|<!ENTITY/i.test(text)) {
+      throw new LeadFileImportError('UNSAFE_WORKBOOK', 'O arquivo contém conteúdo XML não permitido.');
+    }
+    if (
+      /\b(?:ss:)?Formula\s*=|<(?:\w+:)?Hyperlink\b|\b(?:ss:)?HRef\s*=|<(?:\w+:)?External/i
+        .test(text)
+    ) {
+      throw new LeadFileImportError(
+        'UNSAFE_WORKBOOK',
+        'O arquivo contém fórmula, hyperlink ou conteúdo externo não permitido.',
+      );
+    }
+  }
+  if (detectedFormat === 'XLSX') {
+    const archiveNames = buffer.toString('latin1');
+    if (/vbaProject\.bin|xl\/externalLinks\/|xl\/embeddings\//i.test(archiveNames)) {
+      throw new LeadFileImportError(
+        'UNSAFE_WORKBOOK',
+        'O arquivo contém fórmula, hyperlink ou conteúdo externo não permitido.',
+      );
+    }
+  }
+}
+
 function validateSignature(buffer, format) {
   if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
     throw new LeadFileImportError('EMPTY_FILE', 'O arquivo está vazio.');
@@ -83,39 +205,17 @@ function validateSignature(buffer, format) {
   if (buffer.length > LEAD_FILE_LIMITS.bytes) {
     throw new LeadFileImportError('FILE_TOO_LARGE', 'O arquivo excede 5 MB.');
   }
-  const isZip = buffer[0] === 0x50 && buffer[1] === 0x4B;
-  const isCfb = buffer.subarray(0, 8).equals(
-    Buffer.from([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]),
-  );
-  if ((format === 'XLSX' && !isZip) || (format === 'XLS' && !isCfb)) {
-    throw new LeadFileImportError('SIGNATURE_MISMATCH', 'A estrutura não corresponde à extensão.');
-  }
-  if (format === 'CSV') {
-    if (isZip || isCfb || buffer.includes(0)) {
-      throw new LeadFileImportError('SIGNATURE_MISMATCH', 'O CSV informado não é texto válido.');
-    }
-    const text = buffer.toString('utf8');
-    if (text.includes('\uFFFD')) {
-      throw new LeadFileImportError('INVALID_ENCODING', 'O CSV deve usar codificação UTF-8.');
-    }
-  }
-  if (format === 'XLSX') {
-    const archiveNames = buffer.toString('latin1');
-    if (/vbaProject\.bin|xl\/externalLinks\/|xl\/embeddings\//i.test(archiveNames)) {
-      throw new LeadFileImportError('UNSAFE_WORKBOOK', 'Macros ou vínculos externos não são aceitos.');
-    }
-  }
+  return format;
 }
 
-function readWorkbook(buffer, format) {
+function readWorkbook(buffer, detection) {
   try {
-    const parserBuffer = format === 'CSV'
-      && buffer[0] === 0xEF && buffer[1] === 0xBB && buffer[2] === 0xBF
-      ? buffer.subarray(3)
-      : buffer;
-    return XLSX.read(parserBuffer, {
-      type: 'buffer',
+    const textual = detection.detectedFormat === 'CSV'
+      || detection.detectedFormat === 'SPREADSHEETML';
+    return XLSX.read(textual ? detection.text : buffer, {
+      type: textual ? 'string' : 'buffer',
       raw: true,
+      FS: detection.delimiter || undefined,
       cellDates: true,
       cellFormula: true,
       cellHTML: false,
@@ -327,10 +427,12 @@ function parseSheet(sheet, sheetName) {
 
 export function parseLeadFile(buffer, originalName, { sheetName = '' } = {}) {
   const filename = sanitizeLeadImportFilename(originalName);
-  const format = fileFormat(filename);
-  validateSignature(buffer, format);
+  const declaredFormat = fileFormat(filename);
+  validateSignature(buffer, declaredFormat);
+  const detection = detectLeadFileContent(buffer);
+  validateDetectedFileSafety(buffer, detection);
   const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
-  const workbook = readWorkbook(buffer, format);
+  const workbook = readWorkbook(buffer, detection);
   assertWorkbookHasNoActiveContent(workbook);
   if (workbook.Workbook?.Names?.some((item) => /\[[^\]]+\]/.test(String(item.Ref || '')))) {
     throw new LeadFileImportError('UNSAFE_WORKBOOK', 'Vínculos externos não são aceitos.');
@@ -349,9 +451,24 @@ export function parseLeadFile(buffer, originalName, { sheetName = '' } = {}) {
     throw new LeadFileImportError('INVALID_SHEET', 'A planilha selecionada é inválida.');
   }
   const parsed = parseSheet(workbook.Sheets[selected], selected);
+  const warnings = declaredFormat === detection.detectedFormat
+    || (declaredFormat === 'XLS' && detection.detectedFormat === 'SPREADSHEETML')
+    ? []
+    : [`A extensão indica ${declaredFormat}, mas o conteúdo seguro foi reconhecido como ${detection.detectedFormat}.`];
+  if (detection.detectedFormat === 'SPREADSHEETML') {
+    warnings.unshift('Este arquivo do Excel usa o formato XML e foi reconhecido.');
+  }
+  if (detection.detectedFormat === 'CSV' && detection.encoding.startsWith('UTF-16')) {
+    warnings.unshift('CSV UTF-16 reconhecido.');
+  }
   return {
     filename,
-    format,
+    format: detection.detectedFormat,
+    declaredFormat,
+    detectedFormat: detection.detectedFormat,
+    encoding: detection.encoding,
+    delimiter: detection.delimiter,
+    warnings,
     sha256,
     sheetName: selected,
     rows: parsed.rows,

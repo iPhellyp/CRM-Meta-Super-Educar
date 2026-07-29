@@ -410,6 +410,13 @@ app.post(
         sheetName: String(req.body.sheetName || ''),
       });
       const preview = await createLeadFileImportPreview(parsed, req.user.sub);
+      preview.importDiagnostics = {
+        declaredFormat: parsed.declaredFormat,
+        detectedFormat: parsed.detectedFormat,
+        encoding: parsed.encoding,
+        delimiter: parsed.delimiter,
+        warnings: parsed.warnings,
+      };
       return res.send(leadFileImportPreviewView({
         imported: preview,
         csrfToken: issueCsrfToken(req, res),

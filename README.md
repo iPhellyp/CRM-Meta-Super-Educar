@@ -13,6 +13,10 @@ Serviço enxuto e separado do SR Gestão para:
 
 Este é um bridge operacional. Matrícula e pagamento continuam dependendo de confirmação do sistema de origem; o CRM não os confirma por clique manual.
 
+O workspace de leads usa cards em celular/tablet e tabela compacta em desktop.
+A busca rápida permanece visível; filtros avançados ficam recolhidos e são
+preservados na paginação e nas principais ações comerciais.
+
 ## Limitações conhecidas desta versão
 
 - integração automática com o SR Gestão;

@@ -25,3 +25,15 @@
 - Confirmação transacional e idempotente, preservando etapa e isolamento tenant.
 - Migration aditiva `007_lead_file_imports.sql`.
 - Regras operacionais documentadas em `docs/spreadsheet-import.md`.
+
+## Fase 2B
+
+- Tabela de leads reduzida a seis colunas operacionais.
+- Cards responsivos entre 320px e 1023px, reutilizando o fluxo WhatsApp da 1A.
+- Metadados Meta e WA2 movidos para “Detalhes da origem”.
+- Busca rápida sempre visível e filtros avançados em drawer com resumo ativo.
+- Paginação e ações comerciais preservam filtros validados.
+- Navegação agrupada com drawer, focus trap, Escape, `inert` e retorno de foco.
+- Indicadores reorganizados por prioridade comercial.
+- Novo lead e mensagem inicial movidos para painéis recolhíveis.
+- Critérios registrados em `docs/accessibility.md`.

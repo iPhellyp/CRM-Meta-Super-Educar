@@ -54,6 +54,20 @@ Badges exibem texto de estado e podem usar classes do funil. Nunca mostre apenas
 
 Use `details` e `summary` para progressive enhancement. O conteúdo continua disponível sem JavaScript. Escape e retorno de foco são adicionados pelo script da aplicação.
 
+O menu global usa navegação agrupada em desktop e drawer até 1099px. Filtros
+avançados usam `dialog`: busca rápida e filtros já aplicados continuam visíveis
+fora do drawer.
+
+### Leads responsivos
+
+- 320–767px: cards em uma coluna.
+- 768–1023px: cards em duas colunas.
+- 1024px+: tabela operacional compacta com seis colunas.
+- 1440px+: indicadores prioritários podem ocupar oito colunas.
+
+Detalhes Meta/WA2 extensos ficam em “Detalhes da origem”. Tabela e cards chamam
+os mesmos helpers de ações; não existe segundo fluxo JavaScript de WhatsApp.
+
 ### Modal
 
 Use o elemento `dialog`, nomeado por `aria-labelledby` e descrito por `aria-describedby`. O acionador deve recuperar foco ao fechar.
@@ -73,6 +87,7 @@ Use o elemento `dialog`, nomeado por `aria-labelledby` e descrito por `aria-desc
 - Movimento reduzido respeitado.
 - SVG decorativo usa `currentColor`, `aria-hidden="true"` e `focusable="false"`.
 - O link “Ir para o conteúdo principal” é o primeiro controle focável.
+- Drawers usam focus trap, Escape, `inert` no fundo e retorno de foco.
 
 ## Convenções
 

@@ -370,6 +370,19 @@ function singleLeadFile(req, res, next) {
   });
 }
 
+function safeDashboardReturnPath(value) {
+  const raw = String(value || '/');
+  if (raw.length > 2_000 || /[\r\n]/.test(raw) || !raw.startsWith('/')) return '/';
+  try {
+    const url = new URL(raw, 'http://dashboard.local');
+    return url.origin === 'http://dashboard.local' && url.pathname === '/'
+      ? `${url.pathname}${url.search}`
+      : '/';
+  } catch {
+    return '/';
+  }
+}
+
 app.post(
   '/operations/file-imports/preview',
   singleLeadFile,
@@ -1364,14 +1377,15 @@ function wa2LabelResultSuffix(result) {
 }
 
 app.post('/leads/:id/stage', async (req, res) => {
+  const returnPath = safeDashboardReturnPath(req.body.returnTo);
   const parsedId = z.string().uuid().safeParse(req.params.id);
-  if (!parsedId.success) return redirectWith(res, '/', 'error', 'Lead inválido.');
+  if (!parsedId.success) return redirectWith(res, returnPath, 'error', 'Lead inválido.');
   const stage = String(req.body.stage || '');
   if (!isDirectStageTarget(stage)) {
-    return redirectWith(res, '/', 'error', 'Etapa inválida.');
+    return redirectWith(res, returnPath, 'error', 'Etapa inválida.');
   }
   if (['LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED'].includes(stage)) {
-    return redirectWith(res, '/', 'error', 'Use a ação Perder e informe o motivo obrigatório.');
+    return redirectWith(res, returnPath, 'error', 'Use a ação Perder e informe o motivo obrigatório.');
   }
   try {
     const eventName = getStageEventName(stage);
@@ -1380,20 +1394,20 @@ app.post('/leads/:id/stage', async (req, res) => {
       changedBy: req.user.sub,
       mode: currentMetaMode(),
     });
-    if (!result) return redirectWith(res, '/', 'error', 'Lead não encontrado.');
+    if (!result) return redirectWith(res, returnPath, 'error', 'Lead não encontrado.');
     if (result.invalidTransition) {
-      return redirectWith(res, '/', 'error', 'Transição de etapa não permitida.');
+      return redirectWith(res, returnPath, 'error', 'Transição de etapa não permitida.');
     }
     const suffix = metaResultSuffix(eventName, result);
     const wa2Suffix = wa2LabelResultSuffix(result);
     redirectWith(
       res,
-      '/',
+      returnPath,
       'message',
       `Lead movido para ${STAGE_LABELS[stage]}.${suffix}${wa2Suffix}`,
     );
   } catch {
-    redirectWith(res, '/', 'error', 'Não foi possível mover o lead.');
+    redirectWith(res, returnPath, 'error', 'Não foi possível mover o lead.');
   }
 });
 
@@ -1757,10 +1771,11 @@ const lostLeadSchema = z.object({
 });
 
 app.post('/leads/:id/lost', async (req, res) => {
+  const returnPath = safeDashboardReturnPath(req.body.returnTo);
   const parsedId = z.string().uuid().safeParse(req.params.id);
   const parsed = lostLeadSchema.safeParse(req.body);
   if (!parsedId.success || !parsed.success) {
-    return redirectWith(res, '/', 'error', 'Informe um motivo de perda válido.');
+    return redirectWith(res, returnPath, 'error', 'Informe um motivo de perda válido.');
   }
   try {
     const stageByReason = {
@@ -1779,11 +1794,11 @@ app.post('/leads/:id/lost', async (req, res) => {
       mode: currentMetaMode(),
     });
     if (!result || result.invalidTransition) {
-      return redirectWith(res, '/', 'error', 'Transição para perda não permitida.');
+      return redirectWith(res, returnPath, 'error', 'Transição para perda não permitida.');
     }
-    return redirectWith(res, '/', 'message', 'Perda registrada com motivo e sem evento positivo.');
+    return redirectWith(res, returnPath, 'message', 'Perda registrada com motivo e sem evento positivo.');
   } catch {
-    return redirectWith(res, '/', 'error', 'Não foi possível registrar a perda.');
+    return redirectWith(res, returnPath, 'error', 'Não foi possível registrar a perda.');
   }
 });
 
@@ -1812,6 +1827,7 @@ app.get('/leads/:id', async (req, res, next) => {
 });
 
 app.post('/leads/bulk', async (req, res) => {
+  const returnPath = safeDashboardReturnPath(req.body.returnTo);
   const rawIds = Array.isArray(req.body.leadIds)
     ? req.body.leadIds
     : req.body.leadIds
@@ -1832,7 +1848,7 @@ app.post('/leads/bulk', async (req, res) => {
     (lossStage && !Object.hasOwn(LOST_REASON_LABELS, lostReason)) ||
     (lossStage && lostReason === 'OTHER' && !lostNotes)
   ) {
-    return redirectWith(res, '/', 'error', 'Seleção ou etapa em lote inválida.');
+    return redirectWith(res, returnPath, 'error', 'Seleção ou etapa em lote inválida.');
   }
   let changed = 0;
   for (const id of parsedIds.data) {
@@ -1854,7 +1870,7 @@ app.post('/leads/bulk', async (req, res) => {
   }
   return redirectWith(
     res,
-    '/',
+    returnPath,
     'message',
     bulkAction === 'sync'
       ? `${changed} sincronização(ões) WA2 enfileirada(s).`

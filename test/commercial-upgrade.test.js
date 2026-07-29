@@ -224,7 +224,8 @@ test('dashboard renderiza WhatsApp protegido por CSRF, filtros e paginação', (
   assert.match(html, />Atualizar etapa</);
   assert.match(html, />Mais ações</);
   assert.doesNotMatch(html, /[◉⚙✕]/);
-  assert.equal((html.match(/data-lost-lead=/g) || []).length, 1);
+  assert.equal((html.match(/data-lost-lead=/g) || []).length, 2);
+  assert.equal((html.match(/class="lead-card"/g) || []).length, 1);
   assert.match(html, /aria-labelledby="lost-dialog-title"/);
   assert.match(html, /aria-describedby="lost-dialog-description"/);
   assert.equal(html.includes('<img src=x onerror=alert(1)>'), false);

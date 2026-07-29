@@ -2062,6 +2062,8 @@ export async function getDashboardCounts({ createdAfter = operationStartAt() } =
     SELECT
       count(*)::int AS total,
       count(*) FILTER (WHERE stage = 'NEW')::int AS new,
+      count(*) FILTER (WHERE stage = 'NEW' AND first_contact_at IS NULL)::int AS unattended,
+      count(*) FILTER (WHERE stage = 'NO_RESPONSE')::int AS no_response,
       count(*) FILTER (WHERE stage = 'QUALIFIED')::int AS qualified,
       count(*) FILTER (WHERE stage IN ('CONTACT_STARTED', 'IN_SERVICE'))::int AS in_service,
       count(*) FILTER (
@@ -2069,6 +2071,8 @@ export async function getDashboardCounts({ createdAfter = operationStartAt() } =
           'OPPORTUNITY', 'NEGOTIATING', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT'
         )
       )::int AS opportunities,
+      count(*) FILTER (WHERE stage = 'AWAITING_ENROLLMENT')::int AS awaiting_enrollment,
+      count(*) FILTER (WHERE stage = 'AWAITING_PAYMENT')::int AS awaiting_payment,
       count(*) FILTER (WHERE stage = 'ENROLLED')::int AS enrolled,
       count(*) FILTER (WHERE stage = 'PAID')::int AS paid,
       count(*) FILTER (

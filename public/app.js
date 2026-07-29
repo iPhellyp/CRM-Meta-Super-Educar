@@ -165,6 +165,121 @@ function setupLostDialog() {
   });
 }
 
+function focusableElements(container) {
+  return [...container.querySelectorAll(
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), '
+    + 'textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
+  )].filter((element) => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
+}
+
+function setupNavigationDrawer() {
+  const toggle = document.querySelector('[data-nav-toggle]');
+  const drawer = document.querySelector('[data-nav-drawer]');
+  const backdrop = document.querySelector('[data-nav-backdrop]');
+  const closeButton = drawer?.querySelector('[data-nav-close]');
+  const main = document.querySelector('main');
+  if (!toggle || !drawer) return;
+
+  const mobile = window.matchMedia('(max-width: 1099px)');
+  let open = false;
+
+  const close = ({ restoreFocus = true } = {}) => {
+    if (!open) return;
+    open = false;
+    drawer.classList.remove('open');
+    drawer.setAttribute('aria-hidden', mobile.matches ? 'true' : 'false');
+    drawer.inert = mobile.matches;
+    document.body.classList.remove('nav-open');
+    if (main) main.inert = false;
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-label', 'Abrir menu principal');
+    if (restoreFocus) toggle.focus();
+  };
+
+  const openDrawer = () => {
+    if (!mobile.matches) return;
+    open = true;
+    drawer.inert = false;
+    drawer.setAttribute('aria-hidden', 'false');
+    drawer.classList.add('open');
+    document.body.classList.add('nav-open');
+    if (main) main.inert = true;
+    toggle.setAttribute('aria-expanded', 'true');
+    toggle.setAttribute('aria-label', 'Fechar menu principal');
+    closeButton?.focus();
+  };
+
+  const syncMode = () => {
+    if (!mobile.matches) {
+      open = false;
+      drawer.classList.remove('open');
+      drawer.inert = false;
+      drawer.setAttribute('aria-hidden', 'false');
+      document.body.classList.remove('nav-open');
+      if (main) main.inert = false;
+      toggle.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    if (!open) {
+      drawer.inert = true;
+      drawer.setAttribute('aria-hidden', 'true');
+    }
+  };
+
+  toggle.addEventListener('click', () => open ? close() : openDrawer());
+  closeButton?.addEventListener('click', () => close());
+  backdrop?.addEventListener('click', () => close());
+  drawer.addEventListener('click', (event) => {
+    if (event.target.closest('a[href]')) close({ restoreFocus: false });
+  });
+  drawer.addEventListener('keydown', (event) => {
+    if (!open) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      close();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = focusableElements(drawer);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  mobile.addEventListener('change', syncMode);
+  syncMode();
+}
+
+function setupFilterDrawer() {
+  const dialog = document.querySelector('#advanced-filters');
+  const opener = document.querySelector('[data-filter-open]');
+  const closeButton = dialog?.querySelector('[data-filter-close]');
+  if (!dialog || !opener) return;
+  let shouldRestoreFocus = false;
+
+  opener.addEventListener('click', () => {
+    shouldRestoreFocus = true;
+    dialog.showModal();
+    dialog.querySelector('input:not([type="hidden"]), select, button')?.focus();
+  });
+  closeButton?.addEventListener('click', () => dialog.close());
+  dialog.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    dialog.close();
+  });
+  dialog.addEventListener('close', () => {
+    if (shouldRestoreFocus) opener.focus();
+    shouldRestoreFocus = false;
+  });
+}
+
 function setupFormLoading() {
   for (const form of document.querySelectorAll('form[method="post"]')) {
     form.addEventListener('submit', (event) => {
@@ -197,4 +312,6 @@ function setupFormLoading() {
 setupWhatsAppActions();
 setupActionDisclosures();
 setupLostDialog();
+setupNavigationDrawer();
+setupFilterDrawer();
 setupFormLoading();

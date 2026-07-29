@@ -30,7 +30,7 @@ test('fundação preserva foco, toque e movimento reduzido', () => {
 test('layout oferece skip link, landmarks, labels, CSRF e escape', () => {
   assert.match(views, /class="skip-link" href="#main-content"/);
   assert.match(views, /<main id="main-content">/);
-  assert.match(views, /<nav aria-label="Navegação principal">/);
+  assert.match(views, /<nav aria-label="Navegação principal"/);
   const html = dashboardView({
     leads: [],
     counts: {
@@ -44,5 +44,5 @@ test('layout oferece skip link, landmarks, labels, CSRF e escape', () => {
   });
   assert.equal(html.includes('value="<csrf>"'), false);
   assert.match(html, /name="_csrf" value="&lt;csrf&gt;"/);
-  assert.match(html, /<label>Busca<input/);
+  assert.match(html, /<label for="lead-search">Busca rápida<\/label>/);
 });

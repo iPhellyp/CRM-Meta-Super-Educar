@@ -33,6 +33,8 @@ const ICON_PATHS = Object.freeze({
   wa2: '<path d="M12 2a10 10 0 1 0 10 10"/><path d="M12 6v6l4 2"/><path d="M16 3h5v5"/>',
   close: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/>',
   chevron: '<path d="m9 18 6-6-6-6"/>',
+  menu: '<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/>',
+  x: '<path d="m6 6 12 12"/><path d="m18 6-12 12"/>',
   alert: '<path d="M10.3 2.9 1.8 17a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 2.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
 });
 
@@ -40,6 +42,36 @@ function icon(name) {
   const paths = ICON_PATHS[name];
   if (!paths) return '';
   return `<svg class="icon icon-${name}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${paths}</svg>`;
+}
+
+function appNavigation(csrfToken) {
+  return `<div class="app-brand"><strong>CRM Meta</strong><span>Super Educar</span></div>
+    <button type="button" class="nav-toggle" data-nav-toggle aria-expanded="false"
+      aria-controls="app-navigation" aria-label="Abrir menu principal">${icon('menu')}</button>
+    <nav aria-label="Navegação principal" id="app-navigation" class="app-navigation" data-nav-drawer>
+      <div class="nav-drawer-header"><strong>Menu principal</strong>
+        <button type="button" class="nav-close" data-nav-close aria-label="Fechar menu">${icon('x')}</button>
+      </div>
+      <div class="nav-groups">
+        <section aria-labelledby="nav-operation"><h2 id="nav-operation">Operação</h2>
+          <a href="/">Leads</a><a href="/operations">Importações</a>
+          <a href="/operations#reconciliacoes">Reconciliações</a></section>
+        <section aria-labelledby="nav-integrations"><h2 id="nav-integrations">Integrações</h2>
+          <a href="/meta/connections">Meta</a><a href="/wa2">WhatsApp</a>
+          <a href="/wa2/labels">Etiquetas</a></section>
+        <section aria-labelledby="nav-monitoring"><h2 id="nav-monitoring">Monitoramento</h2>
+          <a href="/events">Eventos Meta</a><a href="/wa2/label-jobs">Jobs WA2</a>
+          <a href="/events?status=FAILED">Falhas</a></section>
+        <section aria-labelledby="nav-settings"><h2 id="nav-settings">Configurações</h2>
+          <a href="/#whatsapp-settings">Mensagens</a>
+          <a href="/meta/connections">Conexões</a><a href="/#lead-tools">Preferências</a></section>
+      </div>
+      <form method="post" action="/logout" class="nav-logout">
+        ${csrfField(csrfToken)}<button class="link">Sair</button>
+      </form>
+    </nav>
+    <button type="button" class="nav-backdrop" data-nav-backdrop
+      aria-label="Fechar menu" tabindex="-1"></button>`;
 }
 
 function layout(title, body, { logged = true, csrfToken = '' } = {}) {
@@ -54,7 +86,7 @@ function layout(title, body, { logged = true, csrfToken = '' } = {}) {
 </head>
 <body>
   <a class="skip-link" href="#main-content">Ir para o conteúdo principal</a>
-  ${logged ? `<header class="app-header"><strong>CRM Meta · Super Educar</strong><nav aria-label="Navegação principal"><a href="/">Leads</a><a href="/meta/connections">Conexões Meta</a><a href="/events">Eventos Meta</a><a href="/wa2">WA2</a><a href="/wa2/labels">Etiquetas WA2</a><a href="/wa2/label-jobs">Jobs WA2</a><a href="/operations">Importação e reconciliação</a><form method="post" action="/logout">${csrfField(csrfToken)}<button class="link">Sair</button></form></nav></header>` : ''}
+  ${logged ? `<header class="app-header">${appNavigation(csrfToken)}</header>` : ''}
   <main id="main-content">${body}</main>
 </body>
 </html>`;
@@ -75,8 +107,8 @@ export function loginView(error = '', csrfToken = '') {
     </section>`, { logged: false });
 }
 
-function stat(label, value) {
-  return `<div class="stat"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
+function stat(label, value, className = '') {
+  return `<div class="stat ${esc(className)}"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
 }
 
 function operationDuration(startedAt, completedAt) {
@@ -372,7 +404,39 @@ function dashboardFilterQuery(filters, overrides = {}) {
   return params.toString();
 }
 
-function stageActions(lead, csrfToken) {
+const ADVANCED_FILTER_KEYS = Object.freeze([
+  'course', 'city', 'stage', 'lostReason', 'instanceId', 'labelId',
+  'metaConnectionId', 'businessId', 'pageId', 'formId', 'campaignId',
+  'adsetId', 'adId', 'attributed', 'validPhone', 'unattended',
+  'dateFrom', 'dateTo', 'sort',
+]);
+
+function activeDashboardFilters(filters) {
+  const labels = {
+    search: 'Busca', course: 'Curso', city: 'Cidade', stage: 'Etapa',
+    lostReason: 'Motivo', instanceId: 'Instância WA2', labelId: 'Etiqueta WA2',
+    metaConnectionId: 'Conexão Meta', businessId: 'BM', pageId: 'Página',
+    formId: 'Formulário', campaignId: 'Campanha', adsetId: 'Conjunto',
+    adId: 'Anúncio', attributed: 'Atribuição', validPhone: 'Telefone',
+    unattended: 'Atendimento', dateFrom: 'Desde', dateTo: 'Até', sort: 'Ordenação',
+  };
+  return ['search', ...ADVANCED_FILTER_KEYS]
+    .filter((key) => {
+      const value = String(filters[key] || '');
+      return value && !(key === 'sort' && value === 'recent');
+    })
+    .map((key) => ({ key, label: labels[key], value: String(filters[key]) }));
+}
+
+function hiddenFilterFields(filters, excluded = []) {
+  const excludedSet = new Set(excluded);
+  return ['search', ...ADVANCED_FILTER_KEYS]
+    .filter((key) => !excludedSet.has(key) && filters[key] != null && String(filters[key]) !== '')
+    .map((key) => `<input type="hidden" name="${key}" value="${esc(filters[key])}">`)
+    .join('');
+}
+
+function stageActions(lead, csrfToken, returnPath = '/') {
   const actions = getStageActions(lead.stage).filter(
     ({ stage }) => !['LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED'].includes(stage),
   );
@@ -389,6 +453,7 @@ function stageActions(lead, csrfToken) {
       ${actions.map(({ stage, label }) => `
       <form method="post" action="/leads/${esc(lead.id)}/stage">
       ${csrfField(csrfToken)}
+      <input type="hidden" name="returnTo" value="${esc(returnPath)}">
       <input type="hidden" name="stage" value="${stage}">
       <button class="action-menu-item">${icon('stage')}<span>${esc(label)}</span></button>
       </form>`).join('')}
@@ -416,6 +481,33 @@ function moreLeadActions(lead) {
   </details>`;
 }
 
+function leadOriginDetails(lead) {
+  return `<details class="origin-details">
+    <summary>Detalhes da origem</summary>
+    <dl>
+      <div><dt>ID Meta</dt><dd>${metadataValue(lead.meta_lead_id)}</dd></div>
+      <div><dt>Conexão</dt><dd>${metadataValue(lead.meta_connection_name)}</dd></div>
+      <div><dt>BM</dt><dd>${metadataValue(lead.meta_business_id || lead.business_id)}</dd></div>
+      <div><dt>Página</dt><dd>${metadataValue(lead.meta_page_name || lead.meta_page_id)}</dd></div>
+      <div><dt>Formulário</dt><dd>${metadataValue(lead.meta_form_name || lead.meta_form_id)}</dd></div>
+      <div><dt>Campanha</dt><dd>${metadataValue(lead.meta_campaign_id)}</dd></div>
+      <div><dt>Conjunto</dt><dd>${metadataValue(lead.meta_adset_id)}</dd></div>
+      <div><dt>Anúncio</dt><dd>${metadataValue(lead.meta_ad_id)}</dd></div>
+      <div><dt>WA2</dt><dd>${metadataValue(lead.wa2_instance_name)}</dd></div>
+    </dl>
+  </details>`;
+}
+
+function leadActions(lead, csrfToken, returnPath = '/') {
+  return `<div class="lead-actions" data-lead-actions>
+    <div class="whatsapp-action">${whatsappAction(lead, csrfToken)}</div>
+    <div class="lead-secondary-actions">
+      ${stageActions(lead, csrfToken, returnPath)}
+      ${moreLeadActions(lead)}
+    </div>
+  </div>`;
+}
+
 export function dashboardView({
   leads,
   counts,
@@ -430,6 +522,7 @@ export function dashboardView({
   whatsappMessage = '',
   csrfToken = '',
 }) {
+  const returnPath = `/?${dashboardFilterQuery(filters)}`;
   const rows = leads.map((lead) => {
     const arrival = formatArrival(lead.received_at || lead.created_at);
     return `
@@ -439,36 +532,38 @@ export function dashboardView({
           <strong><a href="/leads/${esc(lead.id)}">${esc(lead.name)}</a></strong>
           <small>${esc(lead.phone || 'Sem telefone')}${lead.email ? `<br>${esc(lead.email)}` : ''}</small>
         </td>
-        <td data-label="Interesse"><strong>${esc(lead.course || '—')}</strong><small>${esc(lead.city || 'Cidade não informada')}</small></td>
-        <td data-label="Chegada">${esc(arrival.date)}${arrival.time ? `<small>${esc(arrival.time)}</small>` : ''}</td>
-        <td data-label="Origem">
-          ${esc(sourceLabel(lead.source))}
-          <small>${lead.meta_lead_id ? `Lead Meta: ${esc(lead.meta_lead_id)}` : 'Sem atribuição Meta'}</small>
-          <small>Conexão: ${metadataValue(lead.meta_connection_name)}</small>
-          <small>BM: ${metadataValue(lead.meta_business_id || lead.business_id)}</small>
-        </td>
-        <td data-label="Campanha" class="metadata-cell">
-          <span>Campanha: ${metadataValue(lead.meta_campaign_id)}</span>
-          <small>Conjunto: ${metadataValue(lead.meta_adset_id)}</small>
-          <small>Anúncio: ${metadataValue(lead.meta_ad_id)}</small>
-        </td>
-        <td data-label="Página/formulário" class="metadata-cell">
-          <span>Página: ${metadataValue(lead.meta_page_name || lead.meta_page_id)}</span>
-          <small>Formulário: ${metadataValue(lead.meta_form_name || lead.meta_form_id)}</small>
-          <small>Instância WA2: ${metadataValue(lead.wa2_instance_name)}</small>
+        <td data-label="Curso e cidade"><strong>${esc(lead.course || 'Curso não informado')}</strong><small>${esc(lead.city || 'Cidade não informada')}</small></td>
+        <td data-label="Origem e chegada">
+          <strong>${esc(sourceLabel(lead.source))}</strong>
+          <small>${esc(arrival.date)}${arrival.time ? ` · ${esc(arrival.time)}` : ''}</small>
+          ${leadOriginDetails(lead)}
         </td>
         <td data-label="Etapa"><span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span>${lead.lost_reason ? `<small>Motivo: ${esc(LOST_REASON_LABELS[lead.lost_reason] || lead.lost_reason)}</small>` : ''}</td>
         <td data-label="Ações" class="actions-cell">
-          <div class="lead-actions" data-lead-actions>
-            <div class="whatsapp-action">${whatsappAction(lead, csrfToken)}</div>
-            <div class="lead-secondary-actions">
-              ${stageActions(lead, csrfToken)}
-              ${moreLeadActions(lead)}
-            </div>
-          </div>
+          ${leadActions(lead, csrfToken, returnPath)}
         </td>
       </tr>`;
   }).join('');
+  const cards = leads.map((lead) => {
+    const arrival = formatArrival(lead.received_at || lead.created_at);
+    return `<article class="lead-card" aria-labelledby="lead-card-${esc(lead.id)}">
+      <div class="lead-card-heading">
+        <div><input class="lead-select" form="bulk-leads" type="checkbox" name="leadIds"
+          value="${esc(lead.id)}" aria-label="Selecionar ${esc(lead.name)}">
+          <h3 id="lead-card-${esc(lead.id)}"><a href="/leads/${esc(lead.id)}">${esc(lead.name)}</a></h3></div>
+        <span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span>
+      </div>
+      <dl class="lead-card-summary">
+        <div><dt>Curso</dt><dd>${esc(lead.course || 'Não informado')}</dd></div>
+        <div><dt>Cidade</dt><dd>${esc(lead.city || 'Não informada')}</dd></div>
+        <div><dt>Origem e chegada</dt><dd>${esc(sourceLabel(lead.source))} · ${esc(arrival.date)}${arrival.time ? ` às ${esc(arrival.time)}` : ''}</dd></div>
+        <div><dt>Telefone</dt><dd>${esc(lead.phone || 'Sem telefone')}</dd></div>
+      </dl>
+      ${leadOriginDetails(lead)}
+      ${leadActions(lead, csrfToken, returnPath)}
+    </article>`;
+  }).join('');
+  const appliedFilters = activeDashboardFilters(filters);
 
   return layout('Leads', `
     ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
@@ -483,10 +578,36 @@ export function dashboardView({
       </div>
     </section>
 
-    <section class="panel">
-      <div class="panel-title"><div><h2>Filtros</h2><small>Consultas paginadas e isoladas por tenant.</small></div></div>
-      <form method="get" action="/" class="filter-grid">
-        <label>Busca<input name="search" value="${esc(filters.search || '')}" placeholder="Nome, telefone, e-mail ou curso"></label>
+    <section class="panel filter-workspace" aria-labelledby="filter-title">
+      <div class="panel-title"><div><h2 id="filter-title">Encontrar leads</h2>
+        <small>Consultas paginadas e isoladas por tenant.</small></div>
+        <button type="button" class="secondary" data-filter-open aria-haspopup="dialog"
+          aria-controls="advanced-filters">Filtros avançados
+          ${appliedFilters.length ? `<span class="filter-count" aria-label="${esc(appliedFilters.length)} filtros ativos">${esc(appliedFilters.length)}</span>` : ''}
+        </button>
+      </div>
+      <form method="get" action="/" class="quick-search" role="search">
+        ${hiddenFilterFields(filters, ['search', 'page'])}
+        <label for="lead-search">Busca rápida</label>
+        <div><input id="lead-search" name="search" value="${esc(filters.search || '')}"
+          placeholder="Nome, telefone, e-mail ou curso">
+          <button type="submit">Buscar</button></div>
+      </form>
+      ${appliedFilters.length ? `<div class="filter-summary" aria-label="Filtros aplicados">
+        <strong>Filtros aplicados:</strong>
+        <ul>${appliedFilters.map((item) => `<li>${esc(item.label)}: ${esc(item.value)}</li>`).join('')}</ul>
+        <a href="/">Limpar filtros</a>
+      </div>` : '<p class="muted filter-empty">Nenhum filtro aplicado.</p>'}
+    </section>
+
+    <dialog id="advanced-filters" class="filter-drawer" aria-labelledby="advanced-filter-title">
+      <form method="get" action="/" class="filter-dialog-form">
+        <div class="filter-drawer-header"><div><h2 id="advanced-filter-title">Filtros avançados</h2>
+          <p>Refine a lista sem perder a busca rápida.</p></div>
+          <button type="button" class="secondary icon-only" data-filter-close aria-label="Fechar filtros">${icon('x')}</button>
+        </div>
+        <div class="filter-grid">
+        <input type="hidden" name="search" value="${esc(filters.search || '')}">
         <label>Curso/interesse<input name="course" value="${esc(filters.course || '')}"></label>
         <label>Cidade<input name="city" value="${esc(filters.city || '')}"></label>
         <label>Etapa<select name="stage"><option value="">Todas</option>${Object.entries(STAGE_LABELS).map(([value, label]) => `<option value="${value}"${filters.stage === value ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
@@ -506,17 +627,29 @@ export function dashboardView({
         <label>Entrada desde<input type="date" name="dateFrom" value="${esc(filters.dateFrom || '')}"></label>
         <label>Entrada até<input type="date" name="dateTo" value="${esc(filters.dateTo || '')}"></label>
         <label>Ordenar<select name="sort">${[['recent','Mais recentes'],['oldest','Mais antigos'],['stage','Etapa'],['unattended','Sem atendimento'],['updated','Última atualização'],['conversation','Última conversa']].map(([value, label]) => `<option value="${value}"${filters.sort === value ? ' selected' : ''}>${label}</option>`).join('')}</select></label>
-        <button type="submit">Aplicar filtros</button>
-        <a class="button-link secondary" href="/">Limpar</a>
+        </div>
+        <div class="filter-drawer-actions"><a class="button-link secondary" href="/">Limpar</a>
+          <button type="submit">Aplicar filtros</button></div>
       </form>
+    </dialog>
+
+    <section class="stats priority-stats" aria-label="Prioridades comerciais">
+      ${stat('Sem atendimento', counts.unattended || 0, 'priority')}
+      ${stat('Leads novos', counts.new, 'priority')}
+      ${stat('Sem resposta', counts.no_response || 0, 'priority')}
+      ${stat('Oportunidades', counts.opportunities, 'priority')}
+      ${stat('Aguardando matrícula', counts.awaiting_enrollment || 0, 'priority')}
+      ${stat('Aguardando pagamento', counts.awaiting_payment || 0, 'priority')}
+      ${stat('Falhas de integração', counts.metaFailed, counts.metaFailed ? 'risk' : '')}
+      ${stat('Total', counts.total)}${stat('Em atendimento', counts.in_service)}
+      ${stat('Qualificados', counts.qualified)}${stat('Matriculados', counts.enrolled)}
+      ${stat('Pagos', counts.paid)}${stat('Perdidos', counts.lost)}
+      ${stat('Taxa de qualificação', `${counts.qualificationRate}%`)}
+      ${stat('Taxa de matrícula', `${counts.matriculationRate}%`)}
     </section>
 
-    <section class="stats">
-      ${stat('Total', counts.total)}${stat('Novos', counts.new)}${stat('Em atendimento', counts.in_service)}${stat('Qualificados', counts.qualified)}${stat('Oportunidades', counts.opportunities)}${stat('Matriculados', counts.enrolled)}${stat('Pagos', counts.paid)}${stat('Perdidos', counts.lost)}${stat('Taxa de qualificação', `${counts.qualificationRate}%`)}${stat('Taxa de matrícula', `${counts.matriculationRate}%`)}${stat('Eventos pendentes', counts.metaPending)}${stat('Eventos em nova tentativa', counts.metaRetry)}${stat('Eventos com falha', counts.metaFailed)}
-    </section>
-
-    <section class="panel">
-      <h2>Novo lead manual</h2>
+    <details class="panel dashboard-tool" id="lead-tools">
+      <summary>Novo lead manual</summary>
       <form method="post" action="/leads" class="grid-form">
         ${csrfField(csrfToken)}
         <label>Nome<input name="name" required></label>
@@ -526,27 +659,29 @@ export function dashboardView({
         <label>Cidade<input name="city"></label>
         <button type="submit">Adicionar lead</button>
       </form>
-    </section>
+    </details>
 
-    <section class="panel">
-      <div class="panel-title"><div><h2>Mensagem inicial do WhatsApp</h2><small>Configuração isolada deste tenant. Use {{nome}} para personalizar.</small></div></div>
+    <details class="panel dashboard-tool" id="whatsapp-settings">
+      <summary>Mensagem inicial do WhatsApp</summary>
+      <p class="muted">Configuração isolada deste tenant. Use {{nome}} para personalizar.</p>
       <form method="post" action="/settings/whatsapp-message" class="compact-form stack">
         ${csrfField(csrfToken)}
         <textarea name="message" required maxlength="1000">${esc(whatsappMessage)}</textarea>
         <button>Salvar mensagem</button>
       </form>
-    </section>
+    </details>
 
     <section class="panel">
       <div class="panel-title">
         <div>
-          <h2>Leads recentes</h2>
+          <h2>Fila de leads</h2>
           ${operationStartAt ? `<small>Operação iniciada em ${esc(new Date(operationStartAt).toLocaleString('pt-BR'))}. Leads anteriores permanecem armazenados.</small>` : ''}
         </div>
         <span>${leads.length} exibidos</span>
       </div>
       <form id="bulk-leads" method="post" action="/leads/bulk" class="bulk-toolbar" data-confirm="Aplicar esta ação a todos os leads selecionados?">
         ${csrfField(csrfToken)}
+        <input type="hidden" name="returnTo" value="${esc(returnPath)}">
         <strong>Ações em lote</strong>
         <select name="bulkAction" required><option value="stage">Alterar etapa</option><option value="sync">Sincronizar etiqueta WA2</option></select>
         <select name="stage"><option value="">Selecione a etapa...</option>${Object.entries(STAGE_LABELS).filter(([stage]) => !['ENROLLED','PAID'].includes(stage)).map(([stage, label]) => `<option value="${stage}">${esc(label)}</option>`).join('')}</select>
@@ -555,9 +690,13 @@ export function dashboardView({
         <button>Aplicar aos selecionados</button>
         <a class="button-link secondary" href="/leads/export.csv?${esc(dashboardFilterQuery(filters))}">Exportar CSV</a>
       </form>
-      <div class="table-wrap"><table class="leads-table">
-        <thead><tr><th><span class="sr-only">Selecionar</span></th><th>Lead</th><th>Interesse</th><th>Chegada</th><th>Origem/Meta</th><th>Campanha</th><th>Página/formulário</th><th>Etapa</th><th>Ações</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="9" class="empty">Nenhum lead encontrado.</td></tr>'}</tbody>
+      <div class="lead-cards" aria-label="Leads em cards">
+        ${cards || '<div class="empty">Nenhum lead encontrado.</div>'}
+      </div>
+      <div class="table-wrap desktop-leads"><table class="leads-table">
+        <thead><tr><th><span class="sr-only">Selecionar</span></th><th>Lead</th>
+          <th>Curso e cidade</th><th>Origem e chegada</th><th>Etapa</th><th>Ações</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="6" class="empty">Nenhum lead encontrado.</td></tr>'}</tbody>
       </table></div>
       <nav class="pagination" aria-label="Paginação de leads">
         ${pagination.page > 1 ? `<a class="button-link secondary" href="/?${esc(dashboardFilterQuery(filters, { page: pagination.page - 1 }))}">← Anterior</a>` : ''}
@@ -568,6 +707,7 @@ export function dashboardView({
     <dialog id="lost-dialog" class="modal" aria-labelledby="lost-dialog-title" aria-describedby="lost-dialog-description">
       <form method="post" id="lost-form">
         ${csrfField(csrfToken)}
+        <input type="hidden" name="returnTo" value="${esc(returnPath)}">
         <h2 id="lost-dialog-title">Encerrar lead</h2>
         <p id="lost-dialog-description">Escolha o motivo. Nenhum evento positivo será enviado à Meta.</p>
         <label>Motivo<select name="lostReason" required><option value="">Selecione</option>${Object.entries(LOST_REASON_LABELS).map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join('')}</select></label>

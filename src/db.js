@@ -448,6 +448,15 @@ export async function upsertLead(input, { client = pool } = {}) {
   return lead;
 }
 
+function serializeJsonb(value, fallback) {
+  const candidate = value === undefined ? fallback : value;
+  const serialized = JSON.stringify(candidate);
+  if (serialized === undefined) {
+    throw new TypeError('Valor JSONB não serializável');
+  }
+  return serialized;
+}
+
 function leadFileImportSummary(row) {
   return {
     total: Number(row.total_count || 0),
@@ -571,7 +580,7 @@ export async function createLeadFileImportPreview(parsedFile, actor) {
         counts.possibleDuplicate,
         counts.invalid,
         String(actor || 'admin').slice(0, 200),
-        counts,
+        serializeJsonb(counts, {}),
       ],
     );
     const importId = importResult.rows[0].id;
@@ -598,9 +607,9 @@ export async function createLeadFileImportPreview(parsedFile, actor) {
           row.metaAdsetId || null,
           row.metaCampaignId || null,
           row.metaFormId || null,
-          row.rawMeta,
+          serializeJsonb(row.rawMeta, {}),
           row.decision,
-          row.errors,
+          serializeJsonb(row.errors, []),
           row.existingLeadId,
         ],
       );
@@ -709,7 +718,7 @@ export async function confirmLeadFileImport(importId, actor) {
            summary = $4
        WHERE tenant_id = $1 AND id = $2
        RETURNING *`,
-      [currentTenantId, importId, applied, summary],
+      [currentTenantId, importId, applied, serializeJsonb(summary, {})],
     );
     await client.query('COMMIT');
     return {

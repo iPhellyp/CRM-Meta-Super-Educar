@@ -864,6 +864,35 @@ export function createWa2Client({
       instancePath(instanceId, '/identities/labeled'),
       { parse: sanitizeLabeledIdentities },
     ),
+    rebuildIdentities: (instanceId, phones) => {
+      if (!Array.isArray(phones) || phones.length > 2_000 || phones.some(
+        (phone) => !/^55[1-9]\d{9,10}$/.test(String(phone)),
+      )) {
+        throw new Wa2Error('Telefones candidatos inválidos', { code: 'WA2_PHONE_INVALID' });
+      }
+      return request(instancePath(instanceId, '/identities/rebuild'), {
+        method: 'POST',
+        body: { phones: [...new Set(phones)] },
+        parse: (payload) => {
+          const value = objectPayload(payload);
+          return {
+            jobId: optionalRemoteText(value.jobId, 200),
+            deduped: value.deduped === true,
+          };
+        },
+      });
+    },
+    getIdentityRebuildStatus: (instanceId) => request(
+      instancePath(instanceId, '/identities/rebuild/status'),
+      {
+        parse: (payload) => {
+          const value = objectPayload(payload);
+          return {
+            status: requiredRemoteText(value.status, 40, 'WA2_RESPONSE_INVALID'),
+          };
+        },
+      },
+    ),
     listLabels: (instanceId) => request(instancePath(instanceId, '/labels'), {
       parse: sanitizeLabels,
     }),
@@ -942,6 +971,10 @@ export const getWa2ContactByPhone = (instanceId, phoneNormalized, options) =>
   defaultClient(options).getContactByPhone(instanceId, phoneNormalized);
 export const listWa2LabeledIdentities = (instanceId, options) =>
   defaultClient(options).listLabeledIdentities(instanceId);
+export const rebuildWa2Identities = (instanceId, phones, options) =>
+  defaultClient(options).rebuildIdentities(instanceId, phones);
+export const getWa2IdentityRebuildStatus = (instanceId, options) =>
+  defaultClient(options).getIdentityRebuildStatus(instanceId);
 export const listWa2Labels = (instanceId, options) =>
   defaultClient(options).listLabels(instanceId);
 export const listWa2ChatLabels = (instanceId, chatId, options) =>

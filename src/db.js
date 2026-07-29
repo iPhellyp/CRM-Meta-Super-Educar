@@ -3100,6 +3100,23 @@ export async function createWa2Reconciliation({ instanceId, actor }) {
   }
 }
 
+export async function listWa2ReconciliationCandidatePhones() {
+  const result = await pool.query(
+    `SELECT DISTINCT phone
+     FROM (
+       SELECT NULLIF(BTRIM(phone_normalized), '') AS phone
+       FROM leads WHERE tenant_id = $1
+       UNION
+       SELECT NULLIF(BTRIM(whatsapp_normalized), '') AS phone
+       FROM leads WHERE tenant_id = $1
+     ) candidates
+     WHERE phone ~ '^55[1-9][0-9]{9,10}$'
+     ORDER BY phone`,
+    [tenantId()],
+  );
+  return result.rows.map((row) => row.phone);
+}
+
 export async function enqueueDailyWa2Reconciliations() {
   const client = await pool.connect();
   try {

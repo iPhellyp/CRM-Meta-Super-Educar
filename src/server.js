@@ -41,6 +41,7 @@ import {
   listWa2LabelBindings,
   listWa2LabelJobs,
   listWa2ReconciliationItems,
+  listWa2ReconciliationCandidatePhones,
   listRecentJobs,
   listRecentMetaEvents,
   moveLeadStage,
@@ -124,8 +125,10 @@ import {
   getWa2Health,
   getWa2InstanceQr,
   getWa2InstanceStatus,
+  getWa2IdentityRebuildStatus,
   listWa2Instances,
   listWa2Labels,
+  rebuildWa2Identities,
   syncWa2Instance,
   validateWa2InstanceId,
   wa2ConfigStatus,
@@ -569,6 +572,20 @@ app.post('/operations/reconciliations', async (req, res) => {
     return redirectWith(res, '/operations', 'error', 'Instância inválida.');
   }
   try {
+    const candidatePhones = await listWa2ReconciliationCandidatePhones();
+    await rebuildWa2Identities(instanceId.data, candidatePhones);
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      const rebuild = await getWa2IdentityRebuildStatus(instanceId.data);
+      if (rebuild.status === 'complete') break;
+      if (rebuild.status === 'failed') {
+        throw new Error('WA2_IDENTITY_REBUILD_FAILED');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+    if ((await getWa2IdentityRebuildStatus(instanceId.data)).status !== 'complete') {
+      throw new Error('WA2_IDENTITY_REBUILD_TIMEOUT');
+    }
     await createWa2Reconciliation({
       instanceId: instanceId.data,
       actor: req.user.sub,

@@ -463,7 +463,8 @@ export function parseLeadFile(buffer, originalName, { sheetName = '' } = {}) {
   }
   return {
     filename,
-    format: detection.detectedFormat,
+    // O schema legado persiste somente CSV/XLS/XLSX; a detecção detalhada fica na prévia.
+    format: declaredFormat,
     declaredFormat,
     detectedFormat: detection.detectedFormat,
     encoding: detection.encoding,

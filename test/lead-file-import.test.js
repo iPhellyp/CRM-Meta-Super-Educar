@@ -35,6 +35,7 @@ test('SpreadsheetML 2003 XML salvo como XLS é reconhecido pelo conteúdo', () =
   const parsed = parseLeadFile(spreadsheetMlBuffer(), 'exportacao.xls');
   assert.equal(parsed.declaredFormat, 'XLS');
   assert.equal(parsed.detectedFormat, 'SPREADSHEETML');
+  assert.equal(parsed.format, 'XLS');
   assert.equal(parsed.encoding, 'UTF-8');
   assert.equal(parsed.rows[0].metaLeadId, 'fake-001');
   assert.match(parsed.warnings.join(' '), /formato XML/);

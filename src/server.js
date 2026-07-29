@@ -142,7 +142,10 @@ import {
 } from './wa2-link-token.js';
 import { validateWa2ConfirmationState } from './wa2-link-rules.js';
 import { isWa2LabelStage } from './wa2-label-sync.js';
-import { createWhatsAppActionHandler } from './whatsapp-action.js';
+import {
+  createWhatsAppActionHandler,
+  createWhatsAppOpenedHandler,
+} from './whatsapp-action.js';
 import {
   LEAD_FILE_LIMITS,
   parseLeadFile,
@@ -1831,6 +1834,11 @@ app.post('/leads/:id/whatsapp', createWhatsAppActionHandler({
   getWhatsAppUrl,
   recordWhatsAppOpened,
   selectBestLeadPhone,
+}));
+
+app.post('/leads/:id/whatsapp-opened', createWhatsAppOpenedHandler({
+  getLeadById,
+  recordWhatsAppOpened,
 }));
 
 app.get('/leads/:id', async (req, res, next) => {

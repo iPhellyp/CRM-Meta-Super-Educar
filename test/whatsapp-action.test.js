@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createWhatsAppActionHandler } from '../src/whatsapp-action.js';
+import {
+  createWhatsAppActionHandler,
+  createWhatsAppOpenedHandler,
+} from '../src/whatsapp-action.js';
 
 const LEAD_ID = '11111111-1111-4111-8111-111111111111';
 const WHATSAPP_URL = 'https://wa.me/5538991142298?text=Ol%C3%A1';
@@ -30,6 +33,11 @@ function responseMock() {
     redirect(status, location) {
       this.statusCode = status;
       this.redirected = location;
+      return this;
+    },
+    sendStatus(status) {
+      this.statusCode = status;
+      this.body = null;
       return this;
     },
   };
@@ -163,4 +171,56 @@ test('URL não estritamente pertencente a https://wa.me/ é rejeitada antes do h
     assert.equal(response.body.error.code, 'WHATSAPP_UNAVAILABLE');
     assert.equal(fixture.calls.history, 0);
   }
+});
+
+test('logging responde 204, valida tenant pelo lead e deduplica por cinco segundos', async () => {
+  let timestamp = 1_000;
+  let history = 0;
+  const handler = createWhatsAppOpenedHandler({
+    getLeadById: async () => ({ id: LEAD_ID, tenant_id: 'tenant-a' }),
+    recordWhatsAppOpened: async () => { history += 1; },
+    now: () => timestamp,
+  });
+  const first = responseMock();
+  await handler(requestMock(), first);
+  assert.equal(first.statusCode, 204);
+  assert.equal(history, 1);
+
+  const duplicate = responseMock();
+  await handler(requestMock(), duplicate);
+  assert.equal(duplicate.statusCode, 204);
+  assert.equal(history, 1);
+
+  timestamp += 5_000;
+  const later = responseMock();
+  await handler(requestMock(), later);
+  assert.equal(later.statusCode, 204);
+  assert.equal(history, 2);
+});
+
+test('logging rejeita UUID e lead fora do tenant sem registrar abertura', async () => {
+  let history = 0;
+  const handler = createWhatsAppOpenedHandler({
+    getLeadById: async () => null,
+    recordWhatsAppOpened: async () => { history += 1; },
+  });
+  const invalid = responseMock();
+  await handler(requestMock({ id: 'invalido' }), invalid);
+  assert.equal(invalid.statusCode, 404);
+
+  const missing = responseMock();
+  await handler(requestMock(), missing);
+  assert.equal(missing.statusCode, 404);
+  assert.equal(history, 0);
+});
+
+test('falha do logging é sanitizada e não afeta a rota de compatibilidade', async () => {
+  const handler = createWhatsAppOpenedHandler({
+    getLeadById: async () => ({ id: LEAD_ID, tenant_id: 'tenant-a' }),
+    recordWhatsAppOpened: async () => { throw new Error('detalhe interno'); },
+  });
+  const response = responseMock();
+  await handler(requestMock(), response);
+  assert.equal(response.statusCode, 503);
+  assert.equal(response.body, 'Não foi possível registrar a abertura.');
 });

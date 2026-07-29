@@ -5,7 +5,7 @@ import {
   getStageActions,
   getStageBadgeClass,
 } from './funnel.js';
-import { selectBestLeadPhone } from './phone.js';
+import { getWhatsAppUrl, selectBestLeadPhone } from './phone.js';
 import {
   WA2_LABEL_STAGES,
   getWa2StageLabelName,
@@ -85,8 +85,8 @@ function layout(title, body, { logged = true, csrfToken = '' } = {}) {
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icons/app-icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/icons/app-icon-192.png">
-  <link rel="stylesheet" href="/app.css?v=6">
-  <script src="/app.js?v=6" defer></script>
+  <link rel="stylesheet" href="/app.css?v=7">
+  <script src="/app.js?v=7" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Ir para o conteúdo principal</a>
@@ -493,7 +493,22 @@ export function reconciliationItemsView({
   `, { csrfToken });
 }
 
-function whatsappAction(lead, csrfToken) {
+function strictWhatsAppUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' &&
+      url.hostname === 'wa.me' &&
+      url.port === '' &&
+      url.username === '' &&
+      url.password === ''
+      ? url.toString()
+      : '';
+  } catch {
+    return '';
+  }
+}
+
+function whatsappAction(lead, csrfToken, whatsappMessage) {
   const phone = selectBestLeadPhone(lead);
   if (!phone.phoneNormalized) {
     return `
@@ -502,16 +517,28 @@ function whatsappAction(lead, csrfToken) {
       </button>
       <p class="action-status error-text" role="alert">${icon('alert')} Telefone inválido</p>`;
   }
-  return `<form method="post" action="/leads/${esc(lead.id)}/whatsapp" data-whatsapp-form>
-    ${csrfField(csrfToken)}
-    <button class="action-button whatsapp primary-action" type="submit" data-whatsapp-submit>
+  const message = String(whatsappMessage || '').replaceAll(
+    '{{nome}}',
+    String(lead.name || '').trim(),
+  );
+  const whatsappUrl = strictWhatsAppUrl(getWhatsAppUrl(phone.phoneNormalized, message));
+  if (!whatsappUrl) {
+    return `<button type="button" class="action-button whatsapp" disabled>
+      ${icon('whatsapp')}<span>Abrir no WhatsApp</span>
+    </button>`;
+  }
+  return `<div>
+    <a class="action-button whatsapp primary-action" href="${esc(whatsappUrl)}"
+      target="_blank" rel="noopener noreferrer" data-whatsapp-link
+      data-whatsapp-log-url="/leads/${esc(lead.id)}/whatsapp-opened"
+      data-whatsapp-csrf="${esc(csrfToken)}">
       ${icon('whatsapp')}<span data-button-label>Abrir no WhatsApp</span>
-    </button>
+    </a>
     <button class="copy-phone" type="button" data-copy-phone="${esc(phone.phoneNormalized)}">
       Copiar telefone
     </button>
     <p class="action-status" role="status" aria-live="polite" aria-atomic="true" data-whatsapp-status></p>
-  </form>`;
+  </div>`;
 }
 
 function formatArrival(value) {
@@ -649,9 +676,9 @@ function leadOriginDetails(lead) {
   </details>`;
 }
 
-function leadActions(lead, csrfToken, returnPath = '/') {
+function leadActions(lead, csrfToken, returnPath = '/', whatsappMessage = '') {
   return `<div class="lead-actions" data-lead-actions>
-    <div class="whatsapp-action">${whatsappAction(lead, csrfToken)}</div>
+    <div class="whatsapp-action">${whatsappAction(lead, csrfToken, whatsappMessage)}</div>
     <div class="lead-secondary-actions">
       ${stageActions(lead, csrfToken, returnPath)}
       ${moreLeadActions(lead)}
@@ -691,7 +718,7 @@ export function dashboardView({
         </td>
         <td data-label="Etapa"><span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span>${lead.lost_reason ? `<small>Motivo: ${esc(LOST_REASON_LABELS[lead.lost_reason] || lead.lost_reason)}</small>` : ''}</td>
         <td data-label="Ações" class="actions-cell">
-          ${leadActions(lead, csrfToken, returnPath)}
+          ${leadActions(lead, csrfToken, returnPath, whatsappMessage)}
         </td>
       </tr>`;
   }).join('');
@@ -711,7 +738,7 @@ export function dashboardView({
         <div><dt>Telefone</dt><dd>${esc(lead.phone || 'Sem telefone')}</dd></div>
       </dl>
       ${leadOriginDetails(lead)}
-      ${leadActions(lead, csrfToken, returnPath)}
+      ${leadActions(lead, csrfToken, returnPath, whatsappMessage)}
     </article>`;
   }).join('');
   const appliedFilters = activeDashboardFilters(filters);

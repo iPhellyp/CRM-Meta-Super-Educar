@@ -79,13 +79,15 @@ test('desktop usa tabela compacta de seis colunas e detalhes progressivos', () =
   assert.match(html, /class="table-wrap desktop-leads"/);
 });
 
-test('mobile e tablet usam cards com os mesmos formulários WhatsApp', () => {
+test('mobile e tablet usam cards com os mesmos links diretos do WhatsApp', () => {
   const html = render();
   assert.equal((html.match(/class="lead-card"/g) || []).length, 2);
-  assert.equal((html.match(/data-whatsapp-form/g) || []).length, 2);
+  assert.equal((html.match(/data-whatsapp-link/g) || []).length, 2);
   assert.equal((
-    html.match(/action="\/leads\/11111111-1111-4111-8111-111111111111\/whatsapp"/g) || []
+    html.match(/data-whatsapp-log-url="\/leads\/11111111-1111-4111-8111-111111111111\/whatsapp-opened"/g) || []
   ).length, 2);
+  assert.equal((html.match(/target="_blank" rel="noopener noreferrer"/g) || []).length, 2);
+  assert.doesNotMatch(html, /data-whatsapp-form/);
   assert.match(html, /Sem telefone/);
   assert.match(html, /Abrir no WhatsApp/);
   assert.match(html, /Atualizar etapa/);

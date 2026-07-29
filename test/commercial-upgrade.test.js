@@ -174,16 +174,27 @@ test('credenciais são cifradas com AES-GCM e mascaradas', () => {
 test('interface abre WhatsApp sem confundir com Atendimento e registra histórico', async () => {
   const views = await read('src/views.js');
   const server = await read('src/server.js');
-  assert.match(views, /method="post" action="\/leads\/\$\{esc\(lead\.id\)\}\/whatsapp" data-whatsapp-form/);
-  assert.doesNotMatch(views, /\/whatsapp" target="_blank"/);
-  assert.match(views, /data-whatsapp-form/);
+  const app = await read('public/app.js');
+  assert.match(views, /href="\$\{esc\(whatsappUrl\)\}"/);
+  assert.match(views, /target="_blank" rel="noopener noreferrer" data-whatsapp-link/);
+  assert.match(views, /data-whatsapp-log-url="\/leads\/\$\{esc\(lead\.id\)\}\/whatsapp-opened"/);
+  assert.match(views, /data-whatsapp-csrf="\$\{esc\(csrfToken\)\}"/);
+  assert.doesNotMatch(views, /data-whatsapp-form/);
   assert.match(views, /aria-live="polite"/);
   assert.match(views, /Abrir no WhatsApp/);
   assert.match(views, /Atualizar etapa/);
   assert.match(views, /Mais ações/);
   assert.match(views, /Encerrar lead/);
   assert.match(server, /app\.post\('\/leads\/:id\/whatsapp'/);
+  assert.match(server, /app\.post\('\/leads\/:id\/whatsapp-opened'/);
+  assert.ok(
+    server.indexOf("app.use((req, res, next) => req.method === 'POST' ? requireCsrf")
+      < server.indexOf("app.post('/leads/:id/whatsapp-opened'"),
+  );
   assert.match(server, /createWhatsAppActionHandler/);
+  assert.match(app, /navigator\.sendBeacon/);
+  assert.match(app, /keepalive: true/);
+  assert.doesNotMatch(app, /window\.open|about:blank/);
   assert.doesNotMatch(views, /encrypted_access_token|encrypted_app_secret/);
 });
 
@@ -216,9 +227,11 @@ test('dashboard renderiza WhatsApp protegido por CSRF, filtros e paginação', (
     whatsappMessage: 'Olá, {{nome}}!',
     csrfToken: 'csrf-test',
   });
-  assert.match(html, /action="\/leads\/11111111-1111-4111-8111-111111111111\/whatsapp"/);
-  assert.match(html, /name="_csrf" value="csrf-test"/);
-  assert.match(html, /data-whatsapp-form/);
+  assert.match(html, /href="https:\/\/wa\.me\/5538991142298\?text=/);
+  assert.match(html, /target="_blank" rel="noopener noreferrer" data-whatsapp-link/);
+  assert.match(html, /data-whatsapp-log-url="\/leads\/11111111-1111-4111-8111-111111111111\/whatsapp-opened"/);
+  assert.match(html, /data-whatsapp-csrf="csrf-test"/);
+  assert.doesNotMatch(html, /data-whatsapp-form/);
   assert.match(html, /role="status" aria-live="polite" aria-atomic="true"/);
   assert.match(html, />Abrir no WhatsApp</);
   assert.match(html, />Atualizar etapa</);

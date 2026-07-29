@@ -110,3 +110,41 @@ export function createWhatsAppActionHandler({
     }
   };
 }
+
+export function createWhatsAppOpenedHandler({
+  getLeadById,
+  recordWhatsAppOpened,
+  now = () => Date.now(),
+  dedupeWindowMs = 5_000,
+}) {
+  const recent = new Map();
+  return async function whatsappOpenedHandler(req, res) {
+    const leadId = String(req.params.id || '');
+    if (!UUID_PATTERN.test(leadId)) return res.status(404).send('Lead inválido.');
+    try {
+      const lead = await getLeadById(leadId);
+      if (!lead) return res.status(404).send('Lead não encontrado.');
+      const timestamp = now();
+      const key = [
+        String(lead.tenant_id || ''),
+        String(req.user?.sub || ''),
+        leadId,
+      ].join(':');
+      const previous = recent.get(key);
+      if (previous && timestamp - previous < dedupeWindowMs) return res.sendStatus(204);
+      recent.set(key, timestamp);
+      for (const [entry, createdAt] of recent) {
+        if (timestamp - createdAt >= dedupeWindowMs) recent.delete(entry);
+      }
+      try {
+        await recordWhatsAppOpened(lead.id, req.user.sub);
+      } catch (error) {
+        recent.delete(key);
+        throw error;
+      }
+      return res.sendStatus(204);
+    } catch {
+      return res.status(503).send('Não foi possível registrar a abertura.');
+    }
+  };
+}

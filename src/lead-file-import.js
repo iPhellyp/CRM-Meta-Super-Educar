@@ -49,7 +49,7 @@ export class LeadFileImportError extends Error {
 export function normalizeLeadImportOriginalName(originalName) {
   const original = String(originalName || '');
   if (!MOJIBAKE_MARKERS.test(original)) return original;
-  const repaired = Buffer.from(original, 'latin1').toString('utf8');
+  const repaired = Buffer.from(original.replaceAll('Ã_', 'Ã¡'), 'latin1').toString('utf8');
   if (repaired.includes('\uFFFD')) return original;
   const originalMarkers = (original.match(MOJIBAKE_MARKERS) || []).length;
   const repairedMarkers = (repaired.match(MOJIBAKE_MARKERS) || []).length;
@@ -184,7 +184,10 @@ export function detectLeadFileContent(buffer) {
 export function validateDetectedFileSafety(buffer, detection) {
   const { detectedFormat, text = '' } = detection;
   if (detectedFormat === 'SPREADSHEETML') {
-    if (/<!DOCTYPE|<!ENTITY/i.test(text)) {
+    if (
+      /<!DOCTYPE|<!ENTITY|<!ELEMENT|<!ATTLIST|<!NOTATION|<(?:\w+:)?(?:include|script)\b|<Macro\b/i
+        .test(text)
+    ) {
       throw new LeadFileImportError('UNSAFE_WORKBOOK', 'O arquivo contém conteúdo XML não permitido.');
     }
     if (
@@ -226,7 +229,9 @@ function readWorkbook(buffer, detection) {
       type: textual ? 'string' : 'buffer',
       raw: true,
       FS: detection.delimiter || undefined,
-      cellDates: true,
+      // Mantém datas de SpreadsheetML como serial/texto para que valores sem
+      // timezone sejam interpretados explicitamente em America/Sao_Paulo.
+      cellDates: false,
       cellFormula: true,
       cellHTML: false,
       cellNF: false,
@@ -288,7 +293,14 @@ function cellText(cell) {
 function excelSerialToDate(serial) {
   const parsed = XLSX.SSF.parse_date_code(serial);
   if (!parsed) return null;
-  const date = new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d, parsed.H, parsed.M, parsed.S));
+  const date = new Date(Date.UTC(
+    parsed.y,
+    parsed.m - 1,
+    parsed.d,
+    parsed.H + 3,
+    parsed.M,
+    parsed.S,
+  ));
   return Number.isNaN(date.getTime()) ? null : date;
 }
 

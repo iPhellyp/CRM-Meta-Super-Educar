@@ -67,12 +67,33 @@ test('SpreadsheetML rejeita DOCTYPE, fórmula, hyperlink e vínculo externo', ()
     safe.replace('<Cell><Data ss:Type="String">fake-001', '<Cell ss:Formula="=1+1"><Data ss:Type="String">fake-001'),
     safe.replace('<Cell><Data ss:Type="String">fake-001', '<Cell ss:HRef="https://example.invalid"><Data ss:Type="String">fake-001'),
     safe.replace('</Workbook>', '<ExternalLink/></Workbook>'),
+    safe.replace('</Workbook>', '<xi:include href="file:///tmp/x"/></Workbook>'),
   ]) {
     assert.throws(
       () => parseLeadFile(Buffer.from(text), 'dados.xls'),
       (error) => error.code === 'UNSAFE_WORKBOOK',
     );
   }
+});
+
+test('SpreadsheetML preserva texto iniciado por fórmula, zeros, índice e células vazias', () => {
+  const xml = Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+    <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+      xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+      <Worksheet ss:Name="Leads"><Table>
+        <Row><Cell><Data ss:Type="String">id</Data></Cell>
+          <Cell ss:Index="3"><Data ss:Type="String">Nome</Data></Cell>
+          <Cell><Data ss:Type="String">WhatsApp</Data></Cell></Row>
+        <Row><Cell><Data ss:Type="String">000123456789012345</Data></Cell>
+          <Cell ss:Index="3"><Data ss:Type="String">=texto comum</Data></Cell>
+          <Cell><Data ss:Type="String">+5538999999999</Data></Cell></Row>
+      </Table></Worksheet>
+    </Workbook>`);
+  const row = parseLeadFile(xml, 'fixture.xls').rows[0];
+  assert.equal(row.metaLeadId, '000123456789012345');
+  assert.equal(row.name, '=texto comum');
+  assert.equal(row.phone, '+5538999999999');
+  assert.deepEqual(row.errors, []);
 });
 
 test('binário desconhecido não é interpretado como texto Windows-1252', () => {
@@ -162,6 +183,40 @@ test('datas aceitam formatos documentados sem fallback ambíguo', () => {
   assert.equal(parseLeadCreatedTime(46232).toISOString().slice(0, 10), '2026-07-29');
   assert.equal(parseLeadCreatedTime('29/7/26'), null);
   assert.equal(parseLeadCreatedTime('2026-02-30'), null);
+  assert.equal(
+    parseLeadCreatedTime('2026-07-29T12:00:00Z').toISOString(),
+    '2026-07-29T12:00:00.000Z',
+  );
+  assert.equal(
+    parseLeadCreatedTime('2026-07-29T12:00:00-03:00').toISOString(),
+    '2026-07-29T15:00:00.000Z',
+  );
+});
+
+test('SpreadsheetML e CSV tratam data sem timezone como America/Sao_Paulo', () => {
+  const xml = Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+    <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+      xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+      <Worksheet ss:Name="Leads"><Table>
+        <Row><Cell><Data ss:Type="String">id</Data></Cell>
+          <Cell><Data ss:Type="String">created_time</Data></Cell>
+          <Cell><Data ss:Type="String">Nome</Data></Cell>
+          <Cell><Data ss:Type="String">WhatsApp</Data></Cell></Row>
+        <Row><Cell><Data ss:Type="String">fixture-1</Data></Cell>
+          <Cell><Data ss:Type="DateTime">2026-07-29T12:00:00.000</Data></Cell>
+          <Cell><Data ss:Type="String">@Fixture</Data></Cell>
+          <Cell><Data ss:Type="String">+5538999999999</Data></Cell></Row>
+      </Table></Worksheet>
+    </Workbook>`);
+  const csv = Buffer.from(
+    'id,created_time,Nome,WhatsApp\nfixture-1,2026-07-29T12:00:00,@Fixture,+5538999999999',
+  );
+  const xlsRow = parseLeadFile(xml, 'fixture.xls').rows[0];
+  const csvRow = parseLeadFile(csv, 'fixture.csv').rows[0];
+  assert.equal(xlsRow.metaCreatedAt.toISOString(), '2026-07-29T15:00:00.000Z');
+  assert.equal(xlsRow.metaCreatedAt.toISOString(), csvRow.metaCreatedAt.toISOString());
+  assert.equal(xlsRow.phone, '+5538999999999');
+  assert.equal(xlsRow.name, '@Fixture');
 });
 
 test('telefone inválido, campos obrigatórios e notação científica viram erros de linha', () => {
@@ -241,6 +296,7 @@ test('limites de linhas, colunas, tamanho, extensão, assinatura e nome são apl
 test('nome multipart corrige mojibake conservador sem alterar UTF-8 correto', () => {
   assert.equal(sanitizeLeadImportFilename('Veterinária.xls'), 'Veterinária.xls');
   assert.equal(sanitizeLeadImportFilename('VeterinÃ¡ria.xls'), 'Veterinária.xls');
+  assert.equal(sanitizeLeadImportFilename('VeterinÃ_ria.xls'), 'Veterinária.xls');
   assert.equal(sanitizeLeadImportFilename('arquivo ASCII.csv'), 'arquivo ASCII.csv');
   assert.throws(() => sanitizeLeadImportFilename('arquivo\0.csv'), /Nome de arquivo inválido/);
 });

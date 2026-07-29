@@ -9,7 +9,8 @@ function setupCopyPhoneActions() {
   for (const button of document.querySelectorAll('[data-copy-phone]')) {
     button.addEventListener('click', async (event) => {
       const phone = event.currentTarget.dataset.copyPhone;
-      const status = event.currentTarget.closest('form')?.querySelector('[data-whatsapp-status]');
+      const status = event.currentTarget.closest('.whatsapp-action')
+        ?.querySelector('[data-whatsapp-status]');
       try {
         await navigator.clipboard.writeText(phone);
         setContextMessage(status, 'Telefone copiado.');
@@ -25,6 +26,36 @@ function setupCopyPhoneActions() {
         setContextMessage(status, copied ? 'Telefone copiado.' : 'Não foi possível copiar.', {
           error: !copied,
         });
+      }
+    });
+  }
+}
+
+function setupWhatsAppLogging() {
+  for (const link of document.querySelectorAll('[data-whatsapp-link]')) {
+    link.addEventListener('click', () => {
+      const url = link.dataset.whatsappLogUrl;
+      const csrf = link.dataset.whatsappCsrf;
+      if (!url || !csrf) return;
+      const body = new URLSearchParams({ _csrf: csrf });
+      try {
+        const payload = new Blob([body.toString()], {
+          type: 'application/x-www-form-urlencoded;charset=UTF-8',
+        });
+        if (navigator.sendBeacon?.(url, payload)) return;
+      } catch {
+        // O link direto continua funcionando mesmo sem logging.
+      }
+      try {
+        fetch(url, {
+          method: 'POST',
+          credentials: 'same-origin',
+          keepalive: true,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+          body,
+        }).catch(() => {});
+      } catch {
+        // O link direto continua funcionando mesmo sem logging.
       }
     });
   }
@@ -210,7 +241,6 @@ function setupFilterDrawer() {
 
 function setupFormLoading() {
   for (const form of document.querySelectorAll('form[method="post"]')) {
-    if (form.matches('[data-whatsapp-form]')) continue;
     form.addEventListener('submit', (event) => {
       if (event.defaultPrevented) return;
       if (form.dataset.confirm && !window.confirm(form.dataset.confirm)) {
@@ -403,6 +433,7 @@ function setupOfflineRetry() {
 }
 
 setupCopyPhoneActions();
+setupWhatsAppLogging();
 setupActionDisclosures();
 setupLostDialog();
 setupNavigationDrawer();

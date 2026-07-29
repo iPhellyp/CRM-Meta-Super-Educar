@@ -15,3 +15,13 @@
 - Componentes existentes padronizados sem mudança de regra comercial.
 - Link para pular navegação e nome acessível da navegação principal.
 - Documentação criada em `docs/design-system.md`.
+
+## Fase 2A
+
+- Importação via Graph renomeada para **Importar diretamente da Meta**.
+- Novo fluxo **Importar arquivo de leads** para CSV, XLSX e XLS.
+- Upload autenticado, CSRF obrigatório, memória limitada e descarte do buffer.
+- Prévia sem escrita em leads, com hash, contagens, amostra e classificação.
+- Confirmação transacional e idempotente, preservando etapa e isolamento tenant.
+- Migration aditiva `007_lead_file_imports.sql`.
+- Regras operacionais documentadas em `docs/spreadsheet-import.md`.

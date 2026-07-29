@@ -20,7 +20,6 @@ Este é um bridge operacional. Matrícula e pagamento continuam dependendo de co
 - gastos, CPM, CTR e CPC no CRM;
 - Pixel para website;
 - Conversions API para Web;
-- importação CSV;
 - automações comerciais avançadas.
 
 ## Como o fluxo funciona
@@ -34,6 +33,18 @@ Este é um bridge operacional. Matrícula e pagamento continuam dependendo de co
 7. Qualificado e oportunidade criam os eventos correspondentes; somente pagamento confirmado cria `Converted`.
 
 Os estados da fila são `PENDING`, `PROCESSING`, `COMPLETED`, `RETRY` e `FAILED`. O painel **Eventos Meta** permite reenfileirar somente jobs `FAILED`.
+
+### Importação de arquivo de leads
+
+Em **Importação e reconciliação**, a opção **Importar arquivo de leads** aceita
+CSV UTF-8, XLSX e XLS da Meta. O sistema gera uma prévia obrigatória, classifica
+novos registros, atualizações pelo mesmo ID Meta, possíveis duplicidades por
+telefone e linhas inválidas. Nenhum lead é alterado antes da confirmação.
+
+O arquivo é processado somente em memória e descartado após a requisição. A
+confirmação é autenticada, protegida por CSRF, transacional e idempotente.
+`lead_status` nunca altera a etapa comercial. Os formatos, limites e regras
+completos estão em [`docs/spreadsheet-import.md`](docs/spreadsheet-import.md).
 
 ## Variáveis de ambiente
 

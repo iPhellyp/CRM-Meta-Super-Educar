@@ -238,6 +238,9 @@
   .badge.awaiting-enrollment, .badge.awaiting-payment, .badge.enrolled { background: var(--color-success-bg); color: var(--stage-enrollment); }
   .badge.paid { background: #ccebd8; color: var(--stage-paid); }
   .badge.lost { background: var(--color-error-bg); color: var(--stage-closed); }
+  .badge.update { background: var(--color-info-bg); color: var(--color-info); }
+  .badge.possible-duplicate { background: var(--color-warning-bg); color: var(--color-warning); }
+  .badge.invalid { background: var(--color-error-bg); color: var(--color-error); }
 
   .table-wrap { width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; border-radius: var(--radius-md); }
   table { width: 100%; min-width: 1050px; border-collapse: collapse; font-size: var(--font-table); }
@@ -292,6 +295,7 @@
 }
 
 @layer utilities {
+  .break-anywhere { overflow-wrap: anywhere; }
   .ok { color: var(--color-success); font-weight: var(--font-weight-bold); }
   .error-text { color: var(--color-error) !important; }
   .empty { padding: var(--space-8); color: var(--color-text-secondary); text-align: center; }

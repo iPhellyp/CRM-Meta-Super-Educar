@@ -4,11 +4,14 @@ import express from 'express';
 import helmet from 'helmet';
 import compression from 'compression';
 import cookieParser from 'cookie-parser';
+import multer from 'multer';
 import { z } from 'zod';
 import {
   Wa2DataError,
   createMetaConnection,
   createMetaHistoricalImport,
+  createLeadFileImportPreview,
+  cancelLeadFileImport,
   createWa2Reconciliation,
   createWa2ContactLink,
   decideWa2StageConfirmation,
@@ -28,6 +31,7 @@ import {
   getWa2LabelJobCounts,
   getWa2LabelSyncStatusForLead,
   healthcheck,
+  confirmLeadFileImport,
   listLeads,
   listLeadHistory,
   listMetaConnections,
@@ -98,6 +102,8 @@ import {
   dashboardView,
   eventsView,
   historicalOperationsView,
+  leadFileImportPreviewView,
+  leadFileSheetSelectionView,
   leadDetailView,
   loginView,
   metaConnectionsView,
@@ -137,11 +143,28 @@ import {
 import { validateWa2ConfirmationState } from './wa2-link-rules.js';
 import { isWa2LabelStage } from './wa2-label-sync.js';
 import { createWhatsAppActionHandler } from './whatsapp-action.js';
+import {
+  LEAD_FILE_LIMITS,
+  parseLeadFile,
+  publicLeadFileImportError,
+} from './lead-file-import.js';
 
 const app = express();
 const loginAttempts = new Map();
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 5;
+const LEAD_FILE_TIMEOUT_MS = 15_000;
+const leadFileUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: LEAD_FILE_LIMITS.bytes,
+    files: 1,
+    fields: 2,
+    parts: 3,
+    fieldNameSize: 100,
+    fieldSize: 2_000,
+  },
+});
 app.set('trust proxy', 1);
 app.use(helmet());
 app.use(compression());
@@ -318,6 +341,74 @@ app.post('/webhooks/meta/leadgen', async (req, res) => {
 });
 
 app.use(requireAuth);
+
+function singleLeadFile(req, res, next) {
+  req.setTimeout(LEAD_FILE_TIMEOUT_MS);
+  leadFileUpload.single('leadFile')(req, res, (error) => {
+    if (!error) return next();
+    const code = error instanceof multer.MulterError ? error.code : 'UPLOAD_FAILED';
+    const message = code === 'LIMIT_FILE_SIZE'
+      ? 'O arquivo excede 5 MB.'
+      : code === 'LIMIT_UNEXPECTED_FILE'
+        ? 'Envie somente um arquivo no campo indicado.'
+        : 'Não foi possível receber o arquivo.';
+    return res.status(400).send(historicalOperationsView({
+      operations: {
+        cursor: null,
+        imports: [],
+        fileImports: [],
+        reconciliations: [],
+        conflicts: [],
+        confirmations: [],
+      },
+      instances: [],
+      metaForms: [],
+      message: '',
+      error: message,
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  });
+}
+
+app.post(
+  '/operations/file-imports/preview',
+  singleLeadFile,
+  requireCsrf,
+  async (req, res) => {
+    try {
+      if (!req.file?.buffer) {
+        return redirectWith(res, '/operations', 'error', 'Selecione um arquivo CSV, XLSX ou XLS.');
+      }
+      const parsed = parseLeadFile(req.file.buffer, req.file.originalname, {
+        sheetName: String(req.body.sheetName || ''),
+      });
+      const preview = await createLeadFileImportPreview(parsed, req.user.sub);
+      return res.send(leadFileImportPreviewView({
+        imported: preview,
+        csrfToken: issueCsrfToken(req, res),
+      }));
+    } catch (error) {
+      const safe = publicLeadFileImportError(error);
+      if (safe.code === 'SHEET_SELECTION_REQUIRED') {
+        return res.status(422).send(leadFileSheetSelectionView({
+          sheets: safe.details.sheets || [],
+          error: safe.message,
+          csrfToken: issueCsrfToken(req, res),
+        }));
+      }
+      console.error(JSON.stringify({
+        level: 'warn',
+        msg: 'Importação de arquivo rejeitada',
+        code: safe.code,
+      }));
+      return redirectWith(res, '/operations', 'error', safe.message);
+    } finally {
+      if (req.file?.buffer) req.file.buffer.fill(0);
+      if (req.file) req.file.buffer = null;
+    }
+  },
+);
+
 app.use((req, res, next) => req.method === 'POST' ? requireCsrf(req, res, next) : next());
 
 app.post('/logout', (_req, res) => {
@@ -394,6 +485,42 @@ app.post('/operations/meta-imports/:id/:action', async (req, res) => {
     '/operations',
     changed ? 'message' : 'error',
     changed ? 'Importação atualizada.' : 'Importação não está no estado permitido.',
+  );
+});
+
+app.post('/operations/file-imports/:id/confirm', async (req, res) => {
+  const id = z.string().uuid().safeParse(req.params.id);
+  if (!id.success || req.body.confirmation !== 'CONFIRM_LEAD_FILE_IMPORT') {
+    return redirectWith(res, '/operations', 'error', 'Confirmação de importação inválida.');
+  }
+  try {
+    const imported = await confirmLeadFileImport(id.data, req.user.sub);
+    if (!imported) {
+      return redirectWith(res, '/operations', 'error', 'Prévia não encontrada.');
+    }
+    if (imported.unavailable) {
+      return redirectWith(res, '/operations', 'error', 'Esta importação não pode ser confirmada.');
+    }
+    const message = imported.idempotent
+      ? `Importação já concluída: ${imported.counts.applied} lead(s) aplicado(s).`
+      : `Importação concluída: ${imported.counts.applied} lead(s) aplicado(s).`;
+    return redirectWith(res, '/operations', 'message', message);
+  } catch {
+    return redirectWith(res, '/operations', 'error', 'Não foi possível confirmar a importação.');
+  }
+});
+
+app.post('/operations/file-imports/:id/cancel', async (req, res) => {
+  const id = z.string().uuid().safeParse(req.params.id);
+  if (!id.success) {
+    return redirectWith(res, '/operations', 'error', 'Prévia inválida.');
+  }
+  const cancelled = await cancelLeadFileImport(id.data);
+  return redirectWith(
+    res,
+    '/operations',
+    cancelled ? 'message' : 'error',
+    cancelled ? 'Importação cancelada sem alterar leads.' : 'A importação não pode ser cancelada.',
   );
 });
 

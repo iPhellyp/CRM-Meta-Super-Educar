@@ -105,7 +105,7 @@ export function historicalOperationsView({
     ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
     ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
     <section class="panel">
-      <h2>Importação Meta</h2>
+      <h2>Importar diretamente da Meta</h2>
       <form method="post" action="/operations/meta-imports" class="stack">
         ${csrfField(csrfToken)}
         <label>Conexão, página e formulários
@@ -127,6 +127,31 @@ export function historicalOperationsView({
           ${['PAUSED', 'FAILED'].includes(run.status) ? `<form method="post" action="/operations/meta-imports/${esc(run.id)}/resume">${csrfField(csrfToken)}<button>Retomar</button></form>` : ''}
           ${['PENDING', 'PAUSED'].includes(run.status) ? `<form method="post" action="/operations/meta-imports/${esc(run.id)}/cancel">${csrfField(csrfToken)}<button>Cancelar</button></form>` : ''}
           </td></tr>`).join('')}</tbody></table>
+    </section>
+    <section class="panel">
+      <div class="panel-title"><div><h2>Importar arquivo de leads</h2>
+        <p>CSV, XLSX ou XLS da Meta · até 5 MB, 2.000 linhas e 50 colunas.</p></div></div>
+      <form method="post" action="/operations/file-imports/preview"
+        enctype="multipart/form-data" class="stack">
+        ${csrfField(csrfToken)}
+        <label>Arquivo de leads
+          <input type="file" name="leadFile" accept=".csv,.xlsx,.xls" required>
+        </label>
+        <button type="submit">Gerar prévia segura</button>
+      </form>
+      <p class="helper-text">A prévia não altera leads. Duplicidades possíveis nunca são mescladas automaticamente.</p>
+      <div class="table-wrap"><table><thead><tr><th>Arquivo</th><th>Status</th>
+        <th>Linhas</th><th>Aplicados</th><th>Criado</th></tr></thead><tbody>
+        ${(operations.fileImports || []).map((run) => `<tr>
+          <td><strong>${esc(run.original_filename)}</strong><small>${esc(run.format)} · ${esc(run.sheet_name)}</small></td>
+          <td>${esc({
+            PREVIEW: 'Aguardando confirmação', PROCESSING: 'Processando',
+            COMPLETED: 'Concluída', CANCELLED: 'Cancelada', FAILED: 'Falhou',
+          }[run.status] || run.status)}</td>
+          <td>${esc(run.total_count)}</td><td>${esc(run.applied_count)}</td>
+          <td>${detailValue(run.created_at)}</td></tr>`).join('')
+          || '<tr><td colspan="5" class="empty">Nenhum arquivo importado.</td></tr>'}
+      </tbody></table></div>
     </section>
     <section class="panel">
       <h2>Eventos WhatsApp</h2>
@@ -172,6 +197,87 @@ export function historicalOperationsView({
         <form method="post" action="/operations/confirmations/${esc(item.id)}/reject">${csrfField(csrfToken)}<button>Rejeitar</button></form>
       </li>`).join('') || '<li>Nenhuma.</li>'}
     </ul></section>
+  `, { csrfToken });
+}
+
+export function leadFileSheetSelectionView({
+  sheets = [],
+  error = '',
+  csrfToken = '',
+}) {
+  return layout('Selecionar planilha', `
+    <section class="hero"><div><h1>Selecionar planilha</h1>
+      <p>O arquivo contém mais de uma planilha com dados.</p></div></section>
+    ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+    <section class="panel">
+      <h2>Enviar novamente com a planilha escolhida</h2>
+      <p>Por segurança, o arquivo anterior já foi descartado e não foi salvo.</p>
+      <form method="post" action="/operations/file-imports/preview"
+        enctype="multipart/form-data" class="stack">
+        ${csrfField(csrfToken)}
+        <label>Planilha<select name="sheetName" required>
+          ${sheets.map((sheet) => `<option value="${esc(sheet)}">${esc(sheet)}</option>`).join('')}
+        </select></label>
+        <label>Arquivo<input type="file" name="leadFile" accept=".csv,.xlsx,.xls" required></label>
+        <button type="submit">Gerar prévia</button>
+      </form>
+    </section>
+    <div class="actions"><a class="button-link secondary" href="/operations">Cancelar</a></div>
+  `, { csrfToken });
+}
+
+export function leadFileImportPreviewView({ imported, csrfToken = '' }) {
+  const decisionLabels = {
+    NEW: 'Novo',
+    UPDATE: 'Atualizar pelo ID Meta',
+    POSSIBLE_DUPLICATE: 'Possível duplicidade',
+    INVALID: 'Inválido',
+  };
+  const samples = imported.items.slice(0, 100);
+  return layout('Prévia da importação', `
+    <section class="hero"><div><h1>Prévia da importação</h1>
+      <p>Nenhum lead foi alterado. Confira as decisões antes de confirmar.</p></div></section>
+    <section class="panel">
+      <div class="detail-grid">
+        <div><strong>Arquivo</strong><span>${esc(imported.original_filename)}</span></div>
+        <div><strong>Formato</strong><span>${esc(imported.format)}</span></div>
+        <div><strong>Planilha</strong><span>${esc(imported.sheet_name)}</span></div>
+        <div><strong>SHA-256</strong><span class="break-anywhere">${esc(imported.sha256)}</span></div>
+      </div>
+      <div class="metrics">
+        <article><span>Total</span><strong>${esc(imported.counts.total)}</strong></article>
+        <article><span>Novos</span><strong>${esc(imported.counts.new)}</strong></article>
+        <article><span>Atualizações</span><strong>${esc(imported.counts.update)}</strong></article>
+        <article><span>Possíveis duplicidades</span><strong>${esc(imported.counts.possibleDuplicate)}</strong></article>
+        <article><span>Inválidos</span><strong>${esc(imported.counts.invalid)}</strong></article>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-title"><h2>Amostra sanitizada</h2><span>${esc(samples.length)} de ${esc(imported.counts.total)}</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Linha</th><th>ID Meta</th><th>Nome</th>
+        <th>WhatsApp</th><th>Data Meta</th><th>Decisão</th><th>Validação</th></tr></thead><tbody>
+        ${samples.map((item) => `<tr>
+          <td>${esc(item.row_number)}</td><td>${detailValue(item.meta_lead_id)}</td>
+          <td>${detailValue(item.name)}</td><td>${detailValue(item.phone_normalized || item.phone)}</td>
+          <td>${detailValue(item.meta_created_at)}</td>
+          <td><span class="badge ${esc(item.decision.toLowerCase().replaceAll('_', '-'))}">${esc(decisionLabels[item.decision] || item.decision)}</span></td>
+          <td>${item.errors?.length ? esc(item.errors.join(', ')) : 'Válido'}</td>
+        </tr>`).join('')}
+      </tbody></table></div>
+      ${imported.status === 'PREVIEW' ? `<div class="actions">
+        <form method="post" action="/operations/file-imports/${esc(imported.id)}/confirm"
+          data-confirm="Confirmar a importação dos leads válidos?">
+          ${csrfField(csrfToken)}
+          <input type="hidden" name="confirmation" value="CONFIRM_LEAD_FILE_IMPORT">
+          <button type="submit">Confirmar importação</button>
+        </form>
+        <form method="post" action="/operations/file-imports/${esc(imported.id)}/cancel">
+          ${csrfField(csrfToken)}
+          <button type="submit" class="secondary">Cancelar</button>
+        </form>
+      </div>` : `<div class="alert success">Esta importação já foi processada.</div>
+        <div class="actions"><a class="button-link secondary" href="/operations">Voltar</a></div>`}
+    </section>
   `, { csrfToken });
 }
 

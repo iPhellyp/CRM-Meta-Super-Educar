@@ -448,6 +448,295 @@ export async function upsertLead(input, { client = pool } = {}) {
   return lead;
 }
 
+function leadFileImportSummary(row) {
+  return {
+    total: Number(row.total_count || 0),
+    new: Number(row.new_count || 0),
+    update: Number(row.update_count || 0),
+    possibleDuplicate: Number(row.possible_duplicate_count || 0),
+    invalid: Number(row.invalid_count || 0),
+    applied: Number(row.applied_count || 0),
+  };
+}
+
+export async function getLeadFileImport(importId, { client = pool, includeItems = true } = {}) {
+  const currentTenantId = tenantId();
+  const result = await client.query(
+    `SELECT * FROM lead_file_imports WHERE tenant_id = $1 AND id = $2`,
+    [currentTenantId, importId],
+  );
+  const imported = result.rows[0];
+  if (!imported) return null;
+  let items = [];
+  if (includeItems) {
+    const itemResult = await client.query(
+      `SELECT * FROM lead_file_import_items
+       WHERE tenant_id = $1 AND import_id = $2
+       ORDER BY row_number
+       LIMIT 2000`,
+      [currentTenantId, importId],
+    );
+    items = itemResult.rows;
+  }
+  return { ...imported, counts: leadFileImportSummary(imported), items };
+}
+
+export async function createLeadFileImportPreview(parsedFile, actor) {
+  const currentTenantId = tenantId();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query(
+      `SELECT id FROM lead_file_imports
+       WHERE tenant_id = $1 AND sha256 = $2 AND sheet_name = $3
+         AND status IN ('PREVIEW', 'PROCESSING', 'COMPLETED')`,
+      [currentTenantId, parsedFile.sha256, parsedFile.sheetName],
+    );
+    if (existing.rows[0]) {
+      await client.query('COMMIT');
+      return getLeadFileImport(existing.rows[0].id);
+    }
+
+    const metaLeadIds = [...new Set(parsedFile.rows.map((row) => row.metaLeadId).filter(Boolean))];
+    const phones = [...new Set(parsedFile.rows.map((row) => row.phoneNormalized).filter(Boolean))];
+    const leadResult = await client.query(
+      `SELECT id, meta_lead_id, phone_normalized, whatsapp_normalized
+       FROM leads
+       WHERE tenant_id = $1
+         AND (
+           meta_lead_id = ANY($2::text[])
+           OR COALESCE(phone_normalized, whatsapp_normalized) = ANY($3::text[])
+         )`,
+      [currentTenantId, metaLeadIds, phones],
+    );
+    const byMetaId = new Map();
+    const byPhone = new Map();
+    for (const lead of leadResult.rows) {
+      if (lead.meta_lead_id) byMetaId.set(lead.meta_lead_id, lead);
+      const phone = lead.phone_normalized || lead.whatsapp_normalized;
+      if (phone && !byPhone.has(phone)) byPhone.set(phone, lead);
+    }
+
+    const seenMetaIds = new Set();
+    const seenPhones = new Set();
+    const classifiedRows = parsedFile.rows.map((row) => {
+      const metaMatch = row.metaLeadId ? byMetaId.get(row.metaLeadId) : null;
+      const phoneMatch = row.phoneNormalized ? byPhone.get(row.phoneNormalized) : null;
+      const errors = [...row.errors];
+      if (row.metaLeadId && seenMetaIds.has(row.metaLeadId)) {
+        errors.push('DUPLICATE_META_ID_IN_FILE');
+      }
+      const decision = errors.length
+        ? 'INVALID'
+        : metaMatch
+          ? 'UPDATE'
+          : phoneMatch || (row.phoneNormalized && seenPhones.has(row.phoneNormalized))
+            ? 'POSSIBLE_DUPLICATE'
+            : 'NEW';
+      if (row.metaLeadId) seenMetaIds.add(row.metaLeadId);
+      if (row.phoneNormalized) seenPhones.add(row.phoneNormalized);
+      return {
+        ...row,
+        errors,
+        decision,
+        existingLeadId: metaMatch?.id || phoneMatch?.id || null,
+      };
+    });
+    const counts = classifiedRows.reduce((summary, row) => {
+      summary.total += 1;
+      if (row.decision === 'NEW') summary.new += 1;
+      if (row.decision === 'UPDATE') summary.update += 1;
+      if (row.decision === 'POSSIBLE_DUPLICATE') summary.possibleDuplicate += 1;
+      if (row.decision === 'INVALID') summary.invalid += 1;
+      return summary;
+    }, { total: 0, new: 0, update: 0, possibleDuplicate: 0, invalid: 0 });
+
+    const importResult = await client.query(
+      `INSERT INTO lead_file_imports (
+         tenant_id, status, original_filename, sha256, format, sheet_name,
+         total_count, new_count, update_count, possible_duplicate_count,
+         invalid_count, created_by, summary
+       ) VALUES (
+         $1,'PREVIEW',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12
+       ) RETURNING id`,
+      [
+        currentTenantId,
+        parsedFile.filename,
+        parsedFile.sha256,
+        parsedFile.format,
+        parsedFile.sheetName,
+        counts.total,
+        counts.new,
+        counts.update,
+        counts.possibleDuplicate,
+        counts.invalid,
+        String(actor || 'admin').slice(0, 200),
+        counts,
+      ],
+    );
+    const importId = importResult.rows[0].id;
+    for (const row of classifiedRows) {
+      await client.query(
+        `INSERT INTO lead_file_import_items (
+           tenant_id, import_id, row_number, meta_lead_id, name, phone,
+           phone_normalized, meta_created_at, meta_ad_id, meta_adset_id,
+           meta_campaign_id, meta_form_id, raw_meta, decision, errors,
+           existing_lead_id
+         ) VALUES (
+           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16
+         )`,
+        [
+          currentTenantId,
+          importId,
+          row.rowNumber,
+          row.metaLeadId || null,
+          row.name || null,
+          row.phone || null,
+          row.phoneNormalized || null,
+          row.metaCreatedAt || null,
+          row.metaAdId || null,
+          row.metaAdsetId || null,
+          row.metaCampaignId || null,
+          row.metaFormId || null,
+          row.rawMeta,
+          row.decision,
+          row.errors,
+          row.existingLeadId,
+        ],
+      );
+    }
+    await client.query('COMMIT');
+    return getLeadFileImport(importId);
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (
+      error?.code === '23505' &&
+      error?.constraint === 'lead_file_imports_active_hash_uidx'
+    ) {
+      const concurrent = await client.query(
+        `SELECT id FROM lead_file_imports
+         WHERE tenant_id = $1 AND sha256 = $2 AND sheet_name = $3
+           AND status IN ('PREVIEW', 'PROCESSING', 'COMPLETED')`,
+        [currentTenantId, parsedFile.sha256, parsedFile.sheetName],
+      );
+      if (concurrent.rows[0]) return getLeadFileImport(concurrent.rows[0].id);
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function confirmLeadFileImport(importId, actor) {
+  const currentTenantId = tenantId();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `SELECT * FROM lead_file_imports
+       WHERE tenant_id = $1 AND id = $2
+       FOR UPDATE`,
+      [currentTenantId, importId],
+    );
+    const imported = result.rows[0];
+    if (!imported) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    if (imported.status === 'COMPLETED') {
+      await client.query('COMMIT');
+      return { ...imported, counts: leadFileImportSummary(imported), idempotent: true };
+    }
+    if (imported.status !== 'PREVIEW') {
+      await client.query('ROLLBACK');
+      return { ...imported, counts: leadFileImportSummary(imported), unavailable: true };
+    }
+    await client.query(
+      `UPDATE lead_file_imports
+       SET status = 'PROCESSING', confirmed_at = now(),
+           summary = summary || jsonb_build_object('confirmedBy', $3::text)
+       WHERE tenant_id = $1 AND id = $2`,
+      [currentTenantId, importId, String(actor || 'admin').slice(0, 200)],
+    );
+    const items = await client.query(
+      `SELECT * FROM lead_file_import_items
+       WHERE tenant_id = $1 AND import_id = $2
+       ORDER BY row_number`,
+      [currentTenantId, importId],
+    );
+    let applied = 0;
+    let created = 0;
+    let updated = 0;
+    for (const item of items.rows) {
+      if (!['NEW', 'UPDATE'].includes(item.decision)) continue;
+      const lead = await upsertLead({
+        tenantId: currentTenantId,
+        name: item.name,
+        phone: item.phone,
+        phoneNormalized: item.phone_normalized,
+        source: 'META_INSTANT_FORM',
+        stage: 'NEW',
+        metaLeadId: item.meta_lead_id,
+        metaFormId: item.meta_form_id,
+        metaAdId: item.meta_ad_id,
+        metaAdsetId: item.meta_adset_id,
+        metaCampaignId: item.meta_campaign_id,
+        metaCreatedAt: item.meta_created_at,
+        sourceCreatedAt: item.meta_created_at,
+        rawMeta: item.raw_meta,
+      }, { client });
+      applied += 1;
+      if (item.decision === 'NEW') created += 1;
+      if (item.decision === 'UPDATE') updated += 1;
+      await client.query(
+        `UPDATE lead_file_import_items
+         SET applied_lead_id = $3, applied_at = now()
+         WHERE tenant_id = $1 AND id = $2`,
+        [currentTenantId, item.id, lead.id],
+      );
+    }
+    const summary = {
+      ...leadFileImportSummary(imported),
+      applied,
+      created,
+      updated,
+      possibleDuplicatesSkipped: Number(imported.possible_duplicate_count || 0),
+      invalidSkipped: Number(imported.invalid_count || 0),
+    };
+    const completed = await client.query(
+      `UPDATE lead_file_imports
+       SET status = 'COMPLETED', applied_count = $3, completed_at = now(),
+           summary = $4
+       WHERE tenant_id = $1 AND id = $2
+       RETURNING *`,
+      [currentTenantId, importId, applied, summary],
+    );
+    await client.query('COMMIT');
+    return {
+      ...completed.rows[0],
+      counts: leadFileImportSummary(completed.rows[0]),
+      idempotent: false,
+    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function cancelLeadFileImport(importId) {
+  const result = await pool.query(
+    `UPDATE lead_file_imports
+     SET status = 'CANCELLED',
+         summary = summary || '{"cancelled": true}'::jsonb
+     WHERE tenant_id = $1 AND id = $2 AND status = 'PREVIEW'
+     RETURNING id`,
+    [tenantId(), importId],
+  );
+  return result.rowCount === 1;
+}
+
 export async function listPhoneNormalizationConflicts() {
   const result = await pool.query(
     `SELECT phone_normalized, count(*)::int AS lead_count,
@@ -3242,10 +3531,15 @@ export async function decideWa2StageConfirmation(id, decision, actor) {
 }
 
 export async function listHistoricalOperations() {
-  const [cursor, imports, reconciliations, conflicts, confirmations] = await Promise.all([
+  const [cursor, imports, fileImports, reconciliations, conflicts, confirmations] = await Promise.all([
     pool.query('SELECT * FROM wa2_label_event_cursors WHERE tenant_id = $1', [tenantId()]),
     pool.query(
       `SELECT * FROM meta_historical_imports
+       WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 20`,
+      [tenantId()],
+    ),
+    pool.query(
+      `SELECT * FROM lead_file_imports
        WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 20`,
       [tenantId()],
     ),
@@ -3285,6 +3579,7 @@ export async function listHistoricalOperations() {
   return {
     cursor: cursor.rows[0] || null,
     imports: imports.rows,
+    fileImports: fileImports.rows,
     reconciliations: reconciliations.rows,
     conflicts: conflicts.rows,
     confirmations: confirmations.rows,

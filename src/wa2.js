@@ -416,6 +416,14 @@ function sanitizeContactByPhone(payload, requestedPhone) {
       chat = { id: chatId, jid: chatJid.jid };
     }
   }
+  const resolution = ['EXACT', 'ALIAS', 'LID_HISTORICAL'].includes(value.resolution)
+    ? value.resolution
+    : null;
+  if (typeof value.labeledCrm !== 'boolean' && value.labeledCrm != null) {
+    throw new Wa2Error('Classificação do contato WA2 incompatível', {
+      code: 'WA2_CONTACT_INVALID',
+    });
+  }
 
   return {
     contact: {
@@ -425,7 +433,35 @@ function sanitizeContactByPhone(payload, requestedPhone) {
       jid: contactJid.jid,
     },
     chat,
+    ...(resolution ? { resolution } : {}),
+    ...(typeof value.labeledCrm === 'boolean' ? { labeledCrm: value.labeledCrm } : {}),
   };
+}
+
+function sanitizeLabeledIdentities(payload) {
+  const value = payload?.data ?? payload;
+  if (!Array.isArray(value)) {
+    throw new Wa2Error('Identidades etiquetadas WA2 incompatíveis', {
+      code: 'WA2_RESPONSE_INVALID',
+    });
+  }
+  return value.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Wa2Error('Identidade etiquetada WA2 incompatível', {
+        code: 'WA2_RESPONSE_INVALID',
+      });
+    }
+    return {
+      chatId: validateWa2ResourceId(item.chatId, 'chat'),
+      phoneNormalized: item.phoneNormalized == null
+        ? null
+        : validateNormalizedPhone(item.phoneNormalized),
+      resolution: ['PN', 'LID_HISTORICAL', 'LID_UNRESOLVED'].includes(item.resolution)
+        ? item.resolution
+        : 'LID_UNRESOLVED',
+      labels: Array.isArray(item.labels) ? item.labels.map(sanitizeLabel) : [],
+    };
+  });
 }
 
 function sanitizeHealth(payload) {
@@ -824,6 +860,10 @@ export function createWa2Client({
         parse: (payload) => sanitizeContactByPhone(payload, phone),
       });
     },
+    listLabeledIdentities: (instanceId) => request(
+      instancePath(instanceId, '/identities/labeled'),
+      { parse: sanitizeLabeledIdentities },
+    ),
     listLabels: (instanceId) => request(instancePath(instanceId, '/labels'), {
       parse: sanitizeLabels,
     }),
@@ -900,6 +940,8 @@ export const getWa2InstanceQr = (instanceId, options) =>
   defaultClient(options).getInstanceQr(instanceId);
 export const getWa2ContactByPhone = (instanceId, phoneNormalized, options) =>
   defaultClient(options).getContactByPhone(instanceId, phoneNormalized);
+export const listWa2LabeledIdentities = (instanceId, options) =>
+  defaultClient(options).listLabeledIdentities(instanceId);
 export const listWa2Labels = (instanceId, options) =>
   defaultClient(options).listLabels(instanceId);
 export const listWa2ChatLabels = (instanceId, chatId, options) =>

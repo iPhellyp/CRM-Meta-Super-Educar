@@ -45,6 +45,7 @@ import {
   getWa2ContactByPhone,
   listWa2LabelEvents,
   listWa2ChatLabels,
+  listWa2LabeledIdentities,
   removeWa2ChatLabel,
   validateWa2Config,
 } from './wa2.js';
@@ -69,6 +70,22 @@ const HEARTBEAT_INTERVAL_MS = 10_000;
 let stopping = false;
 let lastHeartbeatAt = 0;
 let lastDailyScheduleCheckAt = 0;
+const labeledIdentityCache = new Map();
+
+async function getLabeledIdentityIndex(instanceId) {
+  const cached = labeledIdentityCache.get(instanceId);
+  if (cached && cached.expiresAt > Date.now()) return cached.byPhone;
+  const rows = await listWa2LabeledIdentities(instanceId);
+  const byPhone = new Map();
+  for (const row of rows) {
+    if (!row.phoneNormalized) continue;
+    const items = byPhone.get(row.phoneNormalized) || [];
+    items.push(row);
+    byPhone.set(row.phoneNormalized, items);
+  }
+  labeledIdentityCache.set(instanceId, { byPhone, expiresAt: Date.now() + 60_000 });
+  return byPhone;
+}
 
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -286,6 +303,12 @@ async function processWa2Reconciliation() {
     return true;
   }
   try {
+    const labeledByPhone = await getLabeledIdentityIndex(item.remote_instance_id);
+    const inverseMatches = labeledByPhone.get(phone.phoneNormalized) || [];
+    if (inverseMatches.length > 1) {
+      await failWa2ReconciliationItem(item, 'CONFLICT', 'WA2_INVERSE_AMBIGUOUS', false);
+      return true;
+    }
     const resolved = await getWa2ContactByPhone(
       item.remote_instance_id,
       phone.phoneNormalized,
@@ -305,6 +328,7 @@ async function processWa2Reconciliation() {
     );
     await completeWa2ReconciliationItem(item, {
       ...resolved,
+      labeledCrm: resolved.labeledCrm || inverseMatches.length === 1,
       remoteLabelIds: labels.map((label) => label.id),
     });
     return true;

@@ -3219,7 +3219,7 @@ export async function claimWa2ReconciliationItem() {
 
 export async function completeWa2ReconciliationItem(
   item,
-  { contact, chat, remoteLabelIds = [] },
+  { contact, chat, remoteLabelIds = [], resolution = 'EXACT', labeledCrm = false },
 ) {
   const client = await pool.connect();
   try {
@@ -3348,7 +3348,10 @@ export async function completeWa2ReconciliationItem(
         return 'LABEL_UNMAPPED';
       }
     }
-    await finishReconciliationItem(client, row, baseResult);
+    const matchCode = labeledCrm
+      ? `WA2_MATCH_LABELED_${resolution}`
+      : `WA2_MATCH_${resolution}`;
+    await finishReconciliationItem(client, row, baseResult, matchCode);
     await client.query('COMMIT');
     return baseResult;
   } catch (error) {
@@ -3359,13 +3362,13 @@ export async function completeWa2ReconciliationItem(
   }
 }
 
-async function finishReconciliationItem(client, item, result) {
+async function finishReconciliationItem(client, item, result, matchCode = null) {
   await client.query(
     `UPDATE wa2_reconciliation_items
-     SET status = 'DONE', result = $3, locked_at = NULL,
+     SET status = 'DONE', result = $3, last_error_code = $4, locked_at = NULL,
          finished_at = now(), updated_at = now()
      WHERE tenant_id = $1 AND id = $2`,
-    [tenantId(), item.id, result],
+    [tenantId(), item.id, result, matchCode],
   );
   await client.query(
     `UPDATE wa2_reconciliation_runs run

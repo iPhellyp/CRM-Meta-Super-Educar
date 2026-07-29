@@ -463,6 +463,43 @@ test('aceita chat LID somente quando contato canônico resolve o telefone', asyn
   assert.equal(result.chat.jid, '123@lid');
 });
 
+test('preserva classificação LID histórica e sinal de etiqueta inversa', async () => {
+  const client = clientWith(async () => jsonResponse({
+    ...BY_PHONE_RESPONSE,
+    chat: { ...BY_PHONE_RESPONSE.chat, jid: '123@lid' },
+    resolution: 'LID_HISTORICAL',
+    labeledCrm: true,
+  }));
+  const result = await client.getContactByPhone('instance-1', '5538999990000');
+  assert.equal(result.resolution, 'LID_HISTORICAL');
+  assert.equal(result.labeledCrm, true);
+});
+
+test('lista inversa aceita somente identidade etiquetada sanitizada', async () => {
+  let capturedUrl;
+  const client = clientWith(async (url) => {
+    capturedUrl = url;
+    return jsonResponse({ data: [{
+      chatId: 'chat-lid-1',
+      phoneNormalized: '5538999990000',
+      resolution: 'LID_HISTORICAL',
+      labels: [{ waLabelId: 'crm-01', name: 'CRM 01' }],
+      ignored: 'campo removido',
+    }] });
+  });
+  const rows = await client.listLabeledIdentities('instance-1');
+  assert.equal(
+    capturedUrl,
+    'http://localhost:3100/api/internal/v1/instances/instance-1/identities/labeled',
+  );
+  assert.deepEqual(rows, [{
+    chatId: 'chat-lid-1',
+    phoneNormalized: '5538999990000',
+    resolution: 'LID_HISTORICAL',
+    labels: [{ id: 'crm-01', name: 'CRM 01' }],
+  }]);
+});
+
 test('classifica e rejeita LID, grupo e broadcast no by-phone', async () => {
   assert.equal(classifyWa2Jid('123@lid'), 'lid');
   assert.equal(classifyWa2Jid('123@g.us'), 'group');

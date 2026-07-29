@@ -53,8 +53,9 @@ function layout(title, body, { logged = true, csrfToken = '' } = {}) {
   <script src="/app.js" defer></script>
 </head>
 <body>
-  ${logged ? `<header><strong>CRM Meta · Super Educar</strong><nav><a href="/">Leads</a><a href="/meta/connections">Conexões Meta</a><a href="/events">Eventos Meta</a><a href="/wa2">WA2</a><a href="/wa2/labels">Etiquetas WA2</a><a href="/wa2/label-jobs">Jobs WA2</a><a href="/operations">Importação e reconciliação</a><form method="post" action="/logout">${csrfField(csrfToken)}<button class="link">Sair</button></form></nav></header>` : ''}
-  <main>${body}</main>
+  <a class="skip-link" href="#main-content">Ir para o conteúdo principal</a>
+  ${logged ? `<header class="app-header"><strong>CRM Meta · Super Educar</strong><nav aria-label="Navegação principal"><a href="/">Leads</a><a href="/meta/connections">Conexões Meta</a><a href="/events">Eventos Meta</a><a href="/wa2">WA2</a><a href="/wa2/labels">Etiquetas WA2</a><a href="/wa2/label-jobs">Jobs WA2</a><a href="/operations">Importação e reconciliação</a><form method="post" action="/logout">${csrfField(csrfToken)}<button class="link">Sair</button></form></nav></header>` : ''}
+  <main id="main-content">${body}</main>
 </body>
 </html>`;
 }

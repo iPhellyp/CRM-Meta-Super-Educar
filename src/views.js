@@ -84,6 +84,7 @@ function layout(title, body, { logged = true, csrfToken = '' } = {}) {
   <title>${esc(title)} · CRM Super Educar</title>
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icons/app-icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/app-icon-192.png">
   <link rel="stylesheet" href="/app.css?v=4">
   <script src="/app.js?v=4" defer></script>
 </head>

@@ -38,6 +38,19 @@ preservados na paginação e nas principais ações comerciais.
 
 Os estados da fila são `PENDING`, `PROCESSING`, `COMPLETED`, `RETRY` e `FAILED`. O painel **Eventos Meta** permite reenfileirar somente jobs `FAILED`.
 
+### Arquitetura atual
+
+- Express entrega views HTML server-side e aplica Helmet, compressão, sessão,
+  autenticação, CSRF e `no-store` nas respostas dinâmicas.
+- PostgreSQL mantém leads, histórico, filas, imports e reconciliações isolados
+  por tenant.
+- O worker processa Meta e WA2 fora das transações de banco, com idempotência,
+  tentativas e erros sanitizados.
+- SheetJS existe somente no processo servidor de importação; nada da biblioteca
+  é enviado ao navegador.
+- O frontend usa HTML progressivo, CSS e JavaScript próprio, sem framework
+  cliente ou dependência visual adicional.
+
 ### Importação de arquivo de leads
 
 Em **Importação e reconciliação**, a opção **Importar arquivo de leads** aceita
@@ -230,6 +243,21 @@ Sem modo watch, os comandos equivalentes são:
 npm run start
 npm run worker
 ```
+
+### Validação local
+
+```powershell
+npm run check
+npm test
+npm audit
+node --test test/pwa.test.js
+node --test test/production-hardening.test.js
+```
+
+Para rollback local de código, escolha o commit anterior da fase desejada e
+crie uma nova branch a partir dele. Em produção, use somente o procedimento de
+tag imutável descrito em `docs/DEPLOY_PRODUCTION.md`; migrations aditivas não
+são revertidas automaticamente.
 
 ## VPS / Linux via SSH — Docker Swarm + Traefik
 

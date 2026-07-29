@@ -20,7 +20,12 @@ test('manifest é instalável, pt-BR e não contém dados privados', () => {
   assert.equal(manifest.display, 'standalone');
   assert.equal(manifest.orientation, 'any');
   assert.equal(manifest.lang, 'pt-BR');
-  assert.equal(manifest.icons.length, 2);
+  assert.equal(manifest.icons.length, 3);
+  assert.deepEqual(manifest.icons.map((icon) => icon.sizes), [
+    '192x192',
+    '512x512',
+    '512x512',
+  ]);
   for (const icon of manifest.icons) {
     assert.equal(fs.existsSync(path.join(root, 'public', icon.src)), true);
   }
@@ -34,6 +39,9 @@ test('service worker guarda somente assets públicos permitidos', () => {
     '/app.js?v=4',
     '/manifest.webmanifest',
     '/offline.html',
+    '/icons/app-icon-192.png',
+    '/icons/app-icon-512.png',
+    '/icons/app-icon-maskable-512.png',
     '/icons/app-icon.svg',
     '/icons/app-icon-maskable.svg',
   ]) {

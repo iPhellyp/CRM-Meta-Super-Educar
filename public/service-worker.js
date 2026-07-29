@@ -5,6 +5,9 @@ const PUBLIC_ASSETS = [
   '/app.js?v=4',
   '/manifest.webmanifest',
   '/offline.html',
+  '/icons/app-icon-192.png',
+  '/icons/app-icon-512.png',
+  '/icons/app-icon-maskable-512.png',
   '/icons/app-icon.svg',
   '/icons/app-icon-maskable.svg',
 ];

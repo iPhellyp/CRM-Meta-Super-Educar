@@ -57,3 +57,7 @@ node --test test/pwa.test.js
 npm run check
 npm test
 ```
+
+O teste de hardening também garante que nenhum CSV/XLS/XLSX, segredo ou chave
+privada foi colocado em `public`, que SheetJS não aparece no bundle cliente e
+que os inicializadores JavaScript não são registrados duas vezes.

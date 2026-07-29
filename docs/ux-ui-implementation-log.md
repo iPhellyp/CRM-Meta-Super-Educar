@@ -52,9 +52,21 @@
 
 # Fase 4 — PWA segura
 
-- Adicionados manifest, ícones vetoriais, shell instalável e página offline.
+- Adicionados manifest, ícones SVG/PNG, shell instalável e página offline.
 - Cache limitado por allowlist a assets públicos versionados.
 - Navegações e respostas dinâmicas mantidas em rede e com `no-store`.
 - Atualização exige ação explícita e protege formulários alterados.
 - Logout remove caches próprios e dados temporários da origem.
 - Estados de conexão e instrução específica para iPhone adicionados.
+
+# Fase 5 — Qualidade de produção
+
+- Adicionados budgets automatizados para CSS, JavaScript, service worker e HTML
+  com 100 leads.
+- Confirmado que SheetJS permanece no servidor e que `public` não contém
+  uploads, credenciais ou chaves privadas.
+- Verificados middleware de segurança, compressão, limites de body e `no-store`.
+- Seis viewports e ampliação a 200% revisados sem overflow operacional.
+- Matriz funcional, PWA, regressão da Fase 1A, segurança e audit executados.
+- Documentação de arquitetura, recuperação, cache, acessibilidade, teste e
+  rollback consolidada.

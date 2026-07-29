@@ -56,3 +56,15 @@ multipart ocorre antes da validação CSRF somente nessa rota, para disponibiliz
 o campo `_csrf`; `requireCsrf` continua obrigatório. O nome do arquivo é
 sanitizado e nunca é usado como caminho. Erros enviados ao navegador não incluem
 stack, caminho local, SQL ou conteúdo do arquivo.
+
+## Recuperação de erro
+
+- Arquivo recusado: corrija formato, tamanho, assinatura ou conteúdo e gere uma
+  nova prévia; o buffer anterior já foi descartado.
+- Mais de uma planilha: selecione a aba indicada e reenvie o mesmo arquivo.
+- Possível duplicidade: revise os leads existentes; a importação não faz merge.
+- Falha na confirmação: volte à prévia e tente novamente. A transação e o lock
+  impedem aplicação parcial silenciosa.
+- Confirmação repetida: o resultado concluído é retornado sem duplicar leads.
+
+Nunca mova o arquivo para `public` nem use CSV/XLS/XLSX como fixture de produção.

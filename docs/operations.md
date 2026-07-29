@@ -45,3 +45,17 @@ O shell instalável armazena somente CSS, JavaScript, manifest, ícones e a pág
 offline pública. Navegações autenticadas sempre consultam a rede e nunca são
 gravadas na Cache API. Logout remove os caches com prefixo próprio e o servidor
 também envia `Clear-Site-Data` restrito à origem.
+
+## Recuperação operacional
+
+- `FAILED`: a interface oferece enfileirar novamente somente quando o backend
+  ainda permite tentativas.
+- `PARTIAL`: a reconciliação oferece reenfileirar apenas itens com falha.
+- `PROCESSING` ou `RUNNING`: nenhuma ação duplicada é apresentada.
+- Upload ou preview com erro: o arquivo é descartado e deve ser selecionado de
+  novo.
+- QR expirado: atualize o estado e solicite um novo QR; nenhum QR anterior é
+  armazenado.
+
+Retries preservam histórico e contador de tentativas. O servidor continua sendo
+a autoridade de tenant, status e permissão.

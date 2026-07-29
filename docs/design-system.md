@@ -119,3 +119,16 @@ Evite estilos inline, ícones por caractere, botão sem nome acessível e placeh
 
 Datas visíveis usam pt-BR e `America/Sao_Paulo`. Badges sempre carregam o texto
 do estado; cor é apenas reforço.
+
+## Budgets verificados
+
+Na revisão final:
+
+- CSS: 32.432 bytes;
+- JavaScript do navegador: 16.609 bytes;
+- service worker: 1.718 bytes;
+- dashboard server-side com 100 leads: 1.188.218 bytes antes da compressão.
+
+Os limites automatizados são 100 KiB para CSS, 100 KiB para JavaScript, 20 KiB
+para o service worker e 2,5 MiB para o HTML de 100 leads. A resposta HTTP passa
+por compressão. SheetJS permanece exclusivamente no servidor.

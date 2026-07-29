@@ -51,3 +51,19 @@ cards, tabela, drawers e paginação. O CSS declara breakpoints para 360–767px
 - Status nunca depende apenas de cor; falhas usam texto e alerta.
 - IDs e cursores ficam em `details`, acessíveis por teclado.
 - Confirmações usam o diálogo nativo do navegador e preservam a proteção CSRF.
+
+## Matriz final
+
+Foram inspecionados os layouts em 360×800, 390×844, 768×1024, 1024×768,
+1366×768 e 1920×1080. Dashboard e operações ficaram sem overflow horizontal:
+cards são usados até 1023px e a tabela compacta aparece a partir de 1024px.
+Também foi verificado o layout ampliado a 200%.
+
+Os contrastes principais calculados variam de 5,85:1 a 16,65:1, incluindo texto
+secundário, foco, erro e aviso sobre suas superfícies. A suíte cobre semântica,
+landmarks, labels, estados, foco, Escape, focus trap, retorno de foco, toque,
+movimento reduzido, XSS e textos longos.
+
+Antes de cada deploy relevante, mantenha um smoke test manual com teclado e
+NVDA/VoiceOver no navegador-alvo. A suíte automatizada valida o contrato
+semântico, mas não substitui a audição real do leitor de tela.

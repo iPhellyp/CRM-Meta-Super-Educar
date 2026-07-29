@@ -49,3 +49,12 @@
 - Datas padronizadas em pt-BR no fuso de São Paulo.
 - Retries renomeados para enfileiramento e condicionados aos estados elegíveis.
 - QR WA2 mantido com `no-store`; nenhuma credencial passou a ser exibida.
+
+# Fase 4 — PWA segura
+
+- Adicionados manifest, ícones vetoriais, shell instalável e página offline.
+- Cache limitado por allowlist a assets públicos versionados.
+- Navegações e respostas dinâmicas mantidas em rede e com `no-store`.
+- Atualização exige ação explícita e protege formulários alterados.
+- Logout remove caches próprios e dados temporários da origem.
+- Estados de conexão e instrução específica para iPhone adicionados.

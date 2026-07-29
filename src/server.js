@@ -174,7 +174,21 @@ app.use(express.json({
   verify: (req, _res, buffer) => { req.rawBody = buffer; },
 }));
 app.use(cookieParser());
-app.use(express.static('public', { maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0 }));
+app.use(express.static('public', {
+  maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0,
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('service-worker.js')) {
+      res.set({
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Service-Worker-Allowed': '/',
+      });
+    }
+  },
+}));
+app.use((_req, res, next) => {
+  noStore(res);
+  next();
+});
 
 function validateServerConfig() {
   const errors = [];
@@ -426,6 +440,7 @@ app.use((req, res, next) => req.method === 'POST' ? requireCsrf(req, res, next) 
 
 app.post('/logout', (_req, res) => {
   clearSession(res);
+  res.set('Clear-Site-Data', '"cache", "storage"');
   res.redirect('/login');
 });
 

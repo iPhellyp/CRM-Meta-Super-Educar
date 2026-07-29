@@ -329,10 +329,156 @@ function setupRequiredSelections() {
   }
 }
 
+const PWA_CACHE_PREFIX = 'crm-meta-public-';
+const PWA_DISMISS_KEY = 'crm:pwa-install-dismissed';
+
+function safeSessionGet(key) {
+  try {
+    return window.sessionStorage?.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeSessionSet(key, value) {
+  try {
+    window.sessionStorage?.setItem(key, value);
+  } catch {
+    // Preferências de instalação não são essenciais para a operação.
+  }
+}
+
+async function clearOwnApplicationData() {
+  try {
+    navigator.serviceWorker?.controller?.postMessage({ type: 'CLEAR_APP_CACHES' });
+    if (typeof caches !== 'undefined') {
+      const keys = await caches.keys();
+      await Promise.all(
+        keys.filter((key) => key.startsWith(PWA_CACHE_PREFIX)).map((key) => caches.delete(key)),
+      );
+    }
+  } catch {
+    // O servidor também envia Clear-Site-Data no logout.
+  }
+  try {
+    window.sessionStorage?.removeItem(PWA_DISMISS_KEY);
+  } catch {
+    // Sem dados comerciais no sessionStorage.
+  }
+}
+
+function setupPwaShell() {
+  if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+  const installPanel = document.querySelector('[data-pwa-install-panel]');
+  const installButton = document.querySelector('[data-pwa-install]');
+  const installDismiss = document.querySelector('[data-pwa-install-dismiss]');
+  const iosNotice = document.querySelector('[data-pwa-ios]');
+  const iosDismiss = document.querySelector('[data-pwa-dismiss]');
+  const updateNotice = document.querySelector('[data-pwa-update]');
+  const reloadButton = document.querySelector('[data-pwa-reload]');
+  const connectionStatus = document.querySelector('[data-connection-status]');
+  let deferredInstallPrompt = null;
+  let waitingWorker = null;
+  let reloadRequested = false;
+
+  const dismissInstall = () => {
+    safeSessionSet(PWA_DISMISS_KEY, '1');
+    installPanel?.setAttribute('hidden', '');
+    iosNotice?.setAttribute('hidden', '');
+  };
+  installDismiss?.addEventListener('click', dismissInstall);
+  iosDismiss?.addEventListener('click', dismissInstall);
+
+  window.addEventListener('beforeinstallprompt', (event) => {
+    event.preventDefault();
+    deferredInstallPrompt = event;
+    if (!safeSessionGet(PWA_DISMISS_KEY)) installPanel?.removeAttribute('hidden');
+  });
+  installButton?.addEventListener('click', async () => {
+    if (!deferredInstallPrompt) return;
+    installPanel?.setAttribute('hidden', '');
+    await deferredInstallPrompt.prompt();
+    await deferredInstallPrompt.userChoice;
+    deferredInstallPrompt = null;
+    safeSessionSet(PWA_DISMISS_KEY, '1');
+  });
+  window.addEventListener('appinstalled', () => {
+    installPanel?.setAttribute('hidden', '');
+    iosNotice?.setAttribute('hidden', '');
+  });
+
+  const standalone = window.matchMedia?.('(display-mode: standalone)').matches ||
+    navigator.standalone === true;
+  const isiOS = /iphone|ipad|ipod/i.test(navigator.userAgent || '');
+  if (isiOS && !standalone && !safeSessionGet(PWA_DISMISS_KEY)) {
+    iosNotice?.removeAttribute('hidden');
+  }
+
+  const showUpdate = (worker) => {
+    waitingWorker = worker;
+    updateNotice?.removeAttribute('hidden');
+  };
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/service-worker.js', { scope: '/' }).then((registration) => {
+      if (registration.waiting) showUpdate(registration.waiting);
+      registration.addEventListener('updatefound', () => {
+        const worker = registration.installing;
+        worker?.addEventListener('statechange', () => {
+          if (worker.state === 'installed' && navigator.serviceWorker.controller) {
+            showUpdate(worker);
+          }
+        });
+      });
+    }).catch(() => {
+      // A aplicação continua funcional sem instalação PWA.
+    });
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloadRequested) window.location.reload();
+    });
+  }
+
+  for (const form of document.querySelectorAll('form')) {
+    const markDirty = () => { form.dataset.dirty = 'true'; };
+    form.addEventListener('input', markDirty);
+    form.addEventListener('change', markDirty);
+  }
+  reloadButton?.addEventListener('click', () => {
+    const hasDraft = document.querySelector('form[data-dirty="true"]');
+    if (hasDraft && !window.confirm('Há dados não enviados. Recarregar e descartá-los?')) return;
+    reloadRequested = true;
+    waitingWorker?.postMessage({ type: 'SKIP_WAITING' });
+  });
+
+  const syncConnection = () => {
+    const offline = navigator.onLine === false;
+    if (connectionStatus) connectionStatus.hidden = !offline;
+    if (!offline && document.querySelector('[data-offline-retry]')) window.location.reload();
+  };
+  window.addEventListener('online', syncConnection);
+  window.addEventListener('offline', syncConnection);
+  syncConnection();
+
+  for (const form of document.querySelectorAll('[data-pwa-logout]')) {
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      await clearOwnApplicationData();
+      form.submit();
+    });
+  }
+}
+
+function setupOfflineRetry() {
+  document.querySelector('[data-offline-retry]')?.addEventListener('click', () => {
+    window.location.reload();
+  });
+}
+
 setupWhatsAppActions();
 setupActionDisclosures();
 setupLostDialog();
 setupNavigationDrawer();
 setupFilterDrawer();
 setupRequiredSelections();
+setupPwaShell();
+setupOfflineRetry();
 setupFormLoading();

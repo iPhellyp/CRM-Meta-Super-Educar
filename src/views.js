@@ -66,7 +66,7 @@ function appNavigation(csrfToken) {
           <a href="/#whatsapp-settings">Mensagens</a>
           <a href="/meta/connections">Conexões</a><a href="/#lead-tools">Preferências</a></section>
       </div>
-      <form method="post" action="/logout" class="nav-logout">
+      <form method="post" action="/logout" class="nav-logout" data-pwa-logout>
         ${csrfField(csrfToken)}<button class="link">Sair</button>
       </form>
     </nav>
@@ -80,14 +80,35 @@ function layout(title, body, { logged = true, csrfToken = '' } = {}) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#35165f">
   <title>${esc(title)} · CRM Super Educar</title>
-  <link rel="stylesheet" href="/app.css">
-  <script src="/app.js" defer></script>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/app-icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css?v=4">
+  <script src="/app.js?v=4" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Ir para o conteúdo principal</a>
   ${logged ? `<header class="app-header">${appNavigation(csrfToken)}</header>` : ''}
   <main id="main-content">${body}</main>
+  <aside class="pwa-shell" aria-label="Aplicativo">
+    <div class="pwa-notice" data-pwa-install-panel hidden role="status">
+      <span>Instale o CRM para abrir como aplicativo.</span>
+      <button type="button" class="small" data-pwa-install>Instalar</button>
+      <button type="button" class="link" data-pwa-install-dismiss>Agora não</button>
+    </div>
+    <div class="pwa-notice" data-pwa-ios hidden role="status">
+      <span>No iPhone, use Compartilhar e “Adicionar à Tela de Início”.</span>
+      <button type="button" class="link" data-pwa-dismiss>Dispensar</button>
+    </div>
+    <div class="pwa-notice" data-pwa-update hidden role="status">
+      <span>Uma nova versão está disponível.</span>
+      <button type="button" class="small" data-pwa-reload>Recarregar quando for seguro</button>
+    </div>
+    <div class="pwa-notice offline" data-connection-status hidden role="status">
+      Sem conexão. As telas administrativas não são armazenadas offline.
+    </div>
+  </aside>
 </body>
 </html>`;
 }

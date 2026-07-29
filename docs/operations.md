@@ -36,5 +36,12 @@ dados de diagnóstico ficam em disclosures de detalhes técnicos.
   autoridade final.
 - Erros apresentados são os valores já sanitizados pelo backend.
 - QR WA2 usa `Cache-Control: private, no-store, max-age=0` tanto na página
-  quanto na imagem; não há service worker no projeto.
+  quanto na imagem e fica fora da allowlist do service worker.
 - Tokens e segredos Meta/WA2 nunca são retornados nas views.
+
+## PWA
+
+O shell instalável armazena somente CSS, JavaScript, manifest, ícones e a página
+offline pública. Navegações autenticadas sempre consultam a rede e nunca são
+gravadas na Cache API. Logout remove os caches com prefixo próprio e o servidor
+também envia `Clear-Site-Data` restrito à origem.

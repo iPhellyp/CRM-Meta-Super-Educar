@@ -50,6 +50,17 @@ confirmação é autenticada, protegida por CSRF, transacional e idempotente.
 `lead_status` nunca altera a etapa comercial. Os formatos, limites e regras
 completos estão em [`docs/spreadsheet-import.md`](docs/spreadsheet-import.md).
 
+### Instalação como PWA
+
+O CRM pode ser instalado pelo aviso discreto do navegador. No iPhone, use
+**Compartilhar → Adicionar à Tela de Início**. Apenas o shell público (CSS,
+JavaScript, manifest, ícones e página offline genérica) é armazenado.
+
+Leads, páginas autenticadas, Meta, WA2, jobs, importações, previews, QR e JSON
+privado nunca entram na Cache API. Atualizações aguardam confirmação para não
+descartar formulários em edição, e o logout remove caches próprios. A política
+completa está em [`docs/pwa.md`](docs/pwa.md).
+
 ## Variáveis de ambiente
 
 Crie o `.env` a partir do exemplo e nunca envie esse arquivo ao repositório:

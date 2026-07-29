@@ -1,0 +1,26 @@
+{
+  "name": "CRM Meta Super Educar",
+  "short_name": "CRM Super Educar",
+  "description": "Aplicativo administrativo para operação comercial da Super Educar.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "theme_color": "#35165f",
+  "background_color": "#f6f5f8",
+  "orientation": "any",
+  "lang": "pt-BR",
+  "icons": [
+    {
+      "src": "/icons/app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/app-icon-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

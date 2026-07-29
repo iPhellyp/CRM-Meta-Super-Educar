@@ -176,6 +176,20 @@ function operationStatus(status) {
   return `<span class="badge ${statusClass(status)}">${esc(labels[status] || status || 'Indisponível')}</span>`;
 }
 
+const reconciliationErrorLabels = {
+  CONTACT_NOT_FOUND: 'Não encontrado no WA2',
+  WA2_CONTACT_NOT_FOUND: 'Não encontrado no WA2',
+  WA2_LID_UNRESOLVED: 'LID não resolvido',
+  LID_UNRESOLVED: 'LID não resolvido',
+  CONTACT_AMBIGUOUS: 'Conflito',
+  WA2_CONTACT_AMBIGUOUS: 'Conflito',
+  WA2_AUTHENTICATION_FAILED: 'Erro de autenticação/configuração',
+  WA2_AUTHORIZATION_FAILED: 'Erro de autenticação/configuração',
+  WA2_RATE_LIMITED: 'Limite do WA2',
+  WA2_TEMPORARY_FAILURE: 'Falha temporária do WA2',
+  WA2_API_ROUTE_NOT_FOUND: 'Incompatibilidade de API',
+};
+
 function operationProgress(processed, total, label = 'Progresso') {
   const safeProcessed = Math.max(0, Number(processed) || 0);
   const safeTotal = Math.max(0, Number(total) || 0);
@@ -486,7 +500,7 @@ export function reconciliationItemsView({
     <section class="panel">
       <div class="panel-title"><h2>Registros</h2><span>${items.length} exibidos</span></div>
       <div class="table-wrap"><table><thead><tr><th>Lead</th><th>Resultado</th><th>Tentativas</th><th>Erro sanitizado</th><th>Finalizado</th></tr></thead><tbody>
-        ${items.map((item) => `<tr><td><a href="/leads/${esc(item.lead_id)}">${esc(item.lead_name)}</a><small>${esc(item.lead_id)}</small></td><td>${esc(labels[item.result] || item.result || 'Pendente')}</td><td>${esc(item.attempts)}</td><td>${detailValue(item.last_error_code)}</td><td>${formatDateTime(item.finished_at)}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">Nenhum registro.</td></tr>'}
+        ${items.map((item) => `<tr><td><a href="/leads/${esc(item.lead_id)}">${esc(item.lead_name)}</a><small>${esc(item.lead_id)}</small></td><td>${esc(labels[item.result] || item.result || 'Pendente')}</td><td>${esc(item.attempts)}</td><td>${detailValue(reconciliationErrorLabels[item.last_error_code] || item.last_error_code)}</td><td>${formatDateTime(item.finished_at)}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">Nenhum registro.</td></tr>'}
       </tbody></table></div>
     </section>
     <div class="actions"><a class="button-link secondary" href="/operations">Voltar</a><a class="button-link" href="/operations/reconciliations/${esc(runId)}/errors.csv">Exportar erros CSV</a></div>

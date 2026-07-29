@@ -177,6 +177,21 @@ function individualJidPhone(value) {
   };
 }
 
+function brazilianPhoneAliases(phoneNormalized) {
+  const aliases = new Set([phoneNormalized]);
+  if (!/^55\d{10,11}$/.test(phoneNormalized)) return aliases;
+  if (phoneNormalized.length === 12) {
+    aliases.add(`${phoneNormalized.slice(0, 4)}9${phoneNormalized.slice(4)}`);
+  } else if (phoneNormalized[4] === '9') {
+    aliases.add(`${phoneNormalized.slice(0, 4)}${phoneNormalized.slice(5)}`);
+  }
+  return aliases;
+}
+
+function sameResolvedPhone(requestedPhone, resolvedPhone) {
+  return brazilianPhoneAliases(requestedPhone).has(resolvedPhone);
+}
+
 function validateNormalizedPhone(value) {
   const phone = String(value || '');
   if (!phone || normalizeWhatsAppPhone(phone) !== phone) {
@@ -371,7 +386,7 @@ function sanitizeContactByPhone(payload, requestedPhone) {
     });
   }
   const contactJid = individualJidPhone(value.contact.jid);
-  if (contactJid.phoneNormalized !== requestedPhone) {
+  if (!sameResolvedPhone(requestedPhone, contactJid.phoneNormalized)) {
     throw new Wa2Error('JID do contato diverge do telefone', {
       code: 'WA2_JID_MISMATCH',
     });
@@ -383,16 +398,23 @@ function sanitizeContactByPhone(payload, requestedPhone) {
       throw new Wa2Error('Chat WA2 incompatível', { code: 'WA2_CHAT_INVALID' });
     }
     const chatId = requiredRemoteText(value.chat.id, 200, 'WA2_CHAT_INVALID');
-    const chatJid = individualJidPhone(value.chat.jid);
-    if (
-      chatJid.phoneNormalized !== requestedPhone ||
-      chatJid.phoneNormalized !== contactJid.phoneNormalized
-    ) {
-      throw new Wa2Error('JID do chat diverge do contato', {
-        code: 'WA2_JID_MISMATCH',
-      });
+    if (classifyWa2Jid(value.chat.jid) === 'lid') {
+      chat = {
+        id: chatId,
+        jid: requiredRemoteText(value.chat.jid, 200, 'WA2_CHAT_INVALID'),
+      };
+    } else {
+      const chatJid = individualJidPhone(value.chat.jid);
+      if (
+        !sameResolvedPhone(requestedPhone, chatJid.phoneNormalized) ||
+        chatJid.phoneNormalized !== contactJid.phoneNormalized
+      ) {
+        throw new Wa2Error('JID do chat diverge do contato', {
+          code: 'WA2_JID_MISMATCH',
+        });
+      }
+      chat = { id: chatId, jid: chatJid.jid };
     }
-    chat = { id: chatId, jid: chatJid.jid };
   }
 
   return {

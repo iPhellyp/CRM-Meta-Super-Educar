@@ -11,6 +11,7 @@ import {
 } from '../src/wa2.js';
 import {
   leadWa2View,
+  reconciliationItemsView,
   wa2DashboardView,
   wa2LabelBindingsView,
   wa2LabelJobsView,
@@ -31,6 +32,31 @@ const VALID_ENV = Object.freeze({
 });
 const PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
+test('reconciliação exibe a causa remota sanitizada em linguagem operacional', () => {
+  const codes = [
+    ['CONTACT_NOT_FOUND', 'Não encontrado no WA2'],
+    ['WA2_LID_UNRESOLVED', 'LID não resolvido'],
+    ['CONTACT_AMBIGUOUS', 'Conflito'],
+    ['WA2_AUTHENTICATION_FAILED', 'Erro de autenticação/configuração'],
+    ['WA2_RATE_LIMITED', 'Limite do WA2'],
+    ['WA2_TEMPORARY_FAILURE', 'Falha temporária do WA2'],
+    ['WA2_API_ROUTE_NOT_FOUND', 'Incompatibilidade de API'],
+  ];
+  const html = reconciliationItemsView({
+    runId: 'run-1',
+    items: codes.map(([last_error_code], index) => ({
+      lead_id: `lead-${index}`,
+      lead_name: `Lead ${index}`,
+      result: 'ERROR',
+      attempts: 1,
+      last_error_code,
+      finished_at: null,
+    })),
+  });
+  for (const [, label] of codes) assert.match(html, new RegExp(label));
+  assert.doesNotMatch(html, />WA2_HTTP_ERROR</);
+});
 
 function jsonResponse(payload, { status = 200, headers = {} } = {}) {
   return new Response(JSON.stringify(payload), {
@@ -406,6 +432,35 @@ test('aceita sufixos individuais garantidos pelo WA2 para o mesmo telefone', asy
   const result = await client.getContactByPhone('instance-1', '5538999990000');
   assert.equal(result.contact.jid, '5538999990000@c.us');
   assert.equal(result.chat.jid, '5538999990000@s.whatsapp.net');
+});
+
+test('aceita alias brasileiro unívoco retornado pelo WA2', async () => {
+  const client = clientWith(async () => jsonResponse({
+    ...BY_PHONE_RESPONSE,
+    contact: {
+      ...BY_PHONE_RESPONSE.contact,
+      jid: '553899990000@s.whatsapp.net',
+    },
+    chat: {
+      ...BY_PHONE_RESPONSE.chat,
+      jid: '553899990000@s.whatsapp.net',
+    },
+  }));
+  const result = await client.getContactByPhone('instance-1', '5538999990000');
+  assert.equal(result.contact.phoneNormalized, '5538999990000');
+  assert.equal(result.chat.jid, '553899990000@s.whatsapp.net');
+});
+
+test('aceita chat LID somente quando contato canônico resolve o telefone', async () => {
+  const client = clientWith(async () => jsonResponse({
+    ...BY_PHONE_RESPONSE,
+    chat: {
+      ...BY_PHONE_RESPONSE.chat,
+      jid: '123@lid',
+    },
+  }));
+  const result = await client.getContactByPhone('instance-1', '5538999990000');
+  assert.equal(result.chat.jid, '123@lid');
 });
 
 test('classifica e rejeita LID, grupo e broadcast no by-phone', async () => {

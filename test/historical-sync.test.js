@@ -5,6 +5,7 @@ import {
   decideInboundLabelAction,
   historicalRetryDelayMs,
   reconciliationFailureResult,
+  sanitizeHistoricalError,
 } from '../src/historical-sync.js';
 
 const baseEvent = {
@@ -138,6 +139,29 @@ test('backoff é limitado e resultados de reconciliação são legíveis', () =>
     [60_000, 300_000, 900_000, 3_600_000, 3_600_000],
   );
   assert.equal(reconciliationFailureResult({ remoteCode: 'WA2_LID_UNRESOLVED' }), 'LID_UNRESOLVED');
+  assert.equal(reconciliationFailureResult({ remoteCode: 'LID_UNRESOLVED' }), 'LID_UNRESOLVED');
   assert.equal(reconciliationFailureResult({ remoteCode: 'WA2_CONTACT_NOT_FOUND' }), 'NOT_FOUND_IN_WA2');
   assert.equal(reconciliationFailureResult({ code: 'other' }), 'ERROR');
+});
+
+test('erro histórico preserva causa remota e classifica HTTP sem mascarar', () => {
+  assert.equal(
+    sanitizeHistoricalError(
+      { code: 'WA2_HTTP_ERROR', remoteCode: 'CONTACT_NOT_FOUND', status: 404 },
+      'FALLBACK',
+    ).code,
+    'CONTACT_NOT_FOUND',
+  );
+  for (const [status, code] of [
+    [404, 'WA2_API_ROUTE_NOT_FOUND'],
+    [401, 'WA2_AUTHENTICATION_FAILED'],
+    [403, 'WA2_AUTHORIZATION_FAILED'],
+    [429, 'WA2_RATE_LIMITED'],
+    [500, 'WA2_TEMPORARY_FAILURE'],
+  ]) {
+    assert.equal(
+      sanitizeHistoricalError({ code: 'WA2_HTTP_ERROR', status }, 'FALLBACK').code,
+      code,
+    );
+  }
 });

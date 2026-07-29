@@ -101,9 +101,24 @@ export function historicalRetryDelayMs(attempts) {
 }
 
 export function sanitizeHistoricalError(error, fallbackCode) {
-  const code = /^[A-Za-z0-9_.:-]{1,80}$/.test(String(error?.code || ''))
+  const remoteCode = /^[A-Za-z0-9_.:-]{1,80}$/.test(String(error?.remoteCode || ''))
+    ? String(error.remoteCode)
+    : null;
+  const statusCode = {
+    401: 'WA2_AUTHENTICATION_FAILED',
+    403: 'WA2_AUTHORIZATION_FAILED',
+    429: 'WA2_RATE_LIMITED',
+  }[error?.status] || (
+    Number.isInteger(error?.status) && error.status >= 500
+      ? 'WA2_TEMPORARY_FAILURE'
+      : error?.status === 404
+        ? 'WA2_API_ROUTE_NOT_FOUND'
+        : null
+  );
+  const localCode = /^[A-Za-z0-9_.:-]{1,80}$/.test(String(error?.code || ''))
     ? String(error.code)
-    : fallbackCode;
+    : null;
+  const code = remoteCode || statusCode || localCode || fallbackCode;
   const message = String(error?.message || 'Falha de processamento')
     .replace(/[\r\n\t]+/g, ' ')
     .slice(0, 500);
@@ -117,6 +132,7 @@ export function reconciliationFailureResult(error) {
     WA2_CONTACT_AMBIGUOUS: 'CONFLICT',
     CONTACT_AMBIGUOUS: 'CONFLICT',
     WA2_LID_UNRESOLVED: 'LID_UNRESOLVED',
+    LID_UNRESOLVED: 'LID_UNRESOLVED',
     WA2_GROUP_UNSUPPORTED: 'ERROR',
     WA2_BROADCAST_UNSUPPORTED: 'ERROR',
     WA2_PHONE_INVALID: 'PHONE_INVALID',

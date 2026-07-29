@@ -36,6 +36,7 @@ const FIELD_LIMITS = Object.freeze({
 const INVISIBLE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B-\u200D\u2060\uFEFF]/u;
 const SCIENTIFIC = /^[+-]?\d+(?:[.,]\d+)?e[+-]?\d+$/i;
 const MOJIBAKE_MARKERS = /[ÃÂâð]/u;
+const MOJIBAKE_MARKERS_GLOBAL = /[ÃÂâð]/gu;
 
 export class LeadFileImportError extends Error {
   constructor(code, message, details = {}) {
@@ -49,11 +50,19 @@ export class LeadFileImportError extends Error {
 export function normalizeLeadImportOriginalName(originalName) {
   const original = String(originalName || '');
   if (!MOJIBAKE_MARKERS.test(original)) return original;
-  const repaired = Buffer.from(original.replaceAll('Ã_', 'Ã¡'), 'latin1').toString('utf8');
-  if (repaired.includes('\uFFFD')) return original;
-  const originalMarkers = (original.match(MOJIBAKE_MARKERS) || []).length;
-  const repairedMarkers = (repaired.match(MOJIBAKE_MARKERS) || []).length;
-  return repairedMarkers < originalMarkers ? repaired : original;
+  let current = original;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const knownMultipartRepair = current
+      .replaceAll('Ã_Â_', 'Ã¡')
+      .replaceAll('Ã_', 'Ã¡');
+    const repaired = Buffer.from(knownMultipartRepair, 'latin1').toString('utf8');
+    if (repaired.includes('\uFFFD')) break;
+    const currentMarkers = [...current.matchAll(MOJIBAKE_MARKERS_GLOBAL)].length;
+    const repairedMarkers = [...repaired.matchAll(MOJIBAKE_MARKERS_GLOBAL)].length;
+    if (repairedMarkers >= currentMarkers) break;
+    current = repaired;
+  }
+  return current;
 }
 
 export function sanitizeLeadImportFilename(originalName) {
@@ -232,7 +241,7 @@ function readWorkbook(buffer, detection) {
       // Mantém datas de SpreadsheetML como serial/texto para que valores sem
       // timezone sejam interpretados explicitamente em America/Sao_Paulo.
       cellDates: false,
-      cellFormula: true,
+      cellFormula: detection.detectedFormat !== 'SPREADSHEETML',
       cellHTML: false,
       cellNF: false,
       WTF: false,

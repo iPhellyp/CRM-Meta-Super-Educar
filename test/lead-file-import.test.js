@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import express from 'express';
+import multer from 'multer';
 import * as XLSX from 'xlsx';
 import {
   detectLeadFileContent,
@@ -94,6 +96,68 @@ test('SpreadsheetML preserva texto iniciado por fórmula, zeros, índice e célu
   assert.equal(row.name, '=texto comum');
   assert.equal(row.phone, '+5538999999999');
   assert.deepEqual(row.errors, []);
+});
+
+test('SpreadsheetML aceita ID Number seguro e rejeita Number acima do limite seguro', () => {
+  const xml = Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+    <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+      xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+      <Worksheet ss:Name="Leads"><Table>
+        <Row><Cell><Data ss:Type="String">id</Data></Cell>
+          <Cell><Data ss:Type="String">Nome</Data></Cell>
+          <Cell><Data ss:Type="String">WhatsApp</Data></Cell></Row>
+        <Row><Cell><Data ss:Type="Number">123456789012345</Data></Cell>
+          <Cell><Data ss:Type="String">Fixture segura</Data></Cell>
+          <Cell><Data ss:Type="String">+5538999999999</Data></Cell></Row>
+        <Row><Cell><Data ss:Type="Number">9007199254740992</Data></Cell>
+          <Cell><Data ss:Type="String">Fixture insegura</Data></Cell>
+          <Cell><Data ss:Type="String">+5538999999998</Data></Cell></Row>
+      </Table></Worksheet>
+    </Workbook>`);
+  const parsed = parseLeadFile(xml, 'fixture.xls');
+  assert.equal(parsed.rows[0].metaLeadId, '123456789012345');
+  assert.equal(parsed.rows[0].errors.includes('ID_MUST_BE_TEXT'), false);
+  assert.equal(parsed.rows[1].errors.includes('ID_MUST_BE_TEXT'), true);
+});
+
+test('SpreadsheetML realista preserva 356 telefones +55, números e IDs seguros', () => {
+  const rows = Array.from({ length: 366 }, (_, index) => {
+    const row = index + 1;
+    const id = row <= 32
+      ? `<Data ss:Type="Number">${700000000000000 + row}</Data>`
+      : `<Data ss:Type="String">fixture-${row}</Data>`;
+    let phone;
+    let type = 'String';
+    if (row === 364) phone = '+551199999999999';
+    else if (row === 365) phone = '+5501999999999';
+    else if (row === 366) phone = 'telefone-ficticio';
+    else if (row > 356 && row <= 362) {
+      phone = String(5538910000000 + row);
+      type = 'Number';
+    } else if (row === 363) phone = '3891000363';
+    else phone = `+55389${String(10000000 + row).slice(-8)}`;
+    return `<Row><Cell>${id}</Cell>
+      <Cell><Data ss:Type="String">Fixture ${row}</Data></Cell>
+      <Cell><Data ss:Type="${type}">${phone}</Data></Cell></Row>`;
+  }).join('');
+  const xml = Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+    <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+      xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+      <Worksheet ss:Name="Leads"><Table>
+        <Row><Cell><Data ss:Type="String">id</Data></Cell>
+          <Cell><Data ss:Type="String">Nome</Data></Cell>
+          <Cell><Data ss:Type="String">WhatsApp</Data></Cell></Row>
+        ${rows}
+      </Table></Worksheet>
+    </Workbook>`);
+  const parsed = parseLeadFile(xml, 'fixture.xls');
+  const errorCounts = parsed.rows.flatMap((row) => row.errors)
+    .reduce((counts, error) => ({ ...counts, [error]: (counts[error] || 0) + 1 }), {});
+  assert.equal(parsed.rows.length, 366);
+  assert.equal(parsed.rows.filter((row) => row.errors.length === 0).length, 363);
+  assert.equal(parsed.rows.filter((row) => row.errors.length > 0).length, 3);
+  assert.equal(errorCounts.WHATSAPP_UNSAFE_VALUE || 0, 0);
+  assert.equal(errorCounts.ID_MUST_BE_TEXT || 0, 0);
 });
 
 test('binário desconhecido não é interpretado como texto Windows-1252', () => {
@@ -299,6 +363,42 @@ test('nome multipart corrige mojibake conservador sem alterar UTF-8 correto', ()
   assert.equal(sanitizeLeadImportFilename('VeterinÃ_ria.xls'), 'Veterinária.xls');
   assert.equal(sanitizeLeadImportFilename('arquivo ASCII.csv'), 'arquivo ASCII.csv');
   assert.throws(() => sanitizeLeadImportFilename('arquivo\0.csv'), /Nome de arquivo inválido/);
+});
+
+test('preview multipart recebe e normaliza filename acentuado sem dupla conversão', async () => {
+  const app = express();
+  const upload = multer({ storage: multer.memoryStorage() });
+  app.post(
+    '/operations/file-imports/preview',
+    upload.single('leadFile'),
+    (req, res) => res.json({
+      originalname: req.file.originalname,
+      filename: sanitizeLeadImportFilename(req.file.originalname),
+    }),
+  );
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    const port = server.address().port;
+    for (const [sent, received, normalized] of [
+      ['Veterinária.xls', 'VeterinÃ¡ria.xls', 'Veterinária.xls'],
+      ['VeterinÃ¡ria.xls', 'VeterinÃ\u0083Â¡ria.xls', 'Veterinária.xls'],
+      ['arquivo ASCII.xls', 'arquivo ASCII.xls', 'arquivo ASCII.xls'],
+    ]) {
+      const body = new FormData();
+      body.append('leadFile', new Blob(['fixture']), sent);
+      const response = await fetch(
+        `http://127.0.0.1:${port}/operations/file-imports/preview`,
+        { method: 'POST', body },
+      );
+      assert.equal(response.status, 200);
+      const result = await response.json();
+      assert.equal(result.originalname, received);
+      assert.equal(result.filename, normalized);
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test('preview escapa XSS e mantém hash, contagens e confirmação CSRF', () => {

@@ -37,3 +37,15 @@
 - Indicadores reorganizados por prioridade comercial.
 - Novo lead e mensagem inicial movidos para painéis recolhíveis.
 - Critérios registrados em `docs/accessibility.md`.
+
+# Fase 3 — Integrações, operações e monitoramento
+
+- Separadas importações diretas da Meta e por arquivo.
+- Formulários Meta convertidos em checklist com prevenção de envio vazio.
+- Histórico, eventos WhatsApp e reconciliações reorganizados em cards,
+  métricas, progresso e detalhes técnicos progressivos.
+- Eventos Meta, jobs, conexões e instâncias recebem representação mobile sem
+  rolagem horizontal operacional.
+- Datas padronizadas em pt-BR no fuso de São Paulo.
+- Retries renomeados para enfileiramento e condicionados aos estados elegíveis.
+- QR WA2 mantido com `no-store`; nenhuma credencial passou a ser exibida.

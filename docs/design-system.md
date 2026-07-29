@@ -107,3 +107,15 @@ Use o elemento `dialog`, nomeado por `aria-labelledby` e descrito por `aria-desc
 ```
 
 Evite estilos inline, ícones por caractere, botão sem nome acessível e placeholder como único rótulo.
+
+## Operações administrativas
+
+- `.operation-source` diferencia a origem Meta da origem por arquivo.
+- `.operation-card` reúne status, progresso, métricas e ações permitidas.
+- `.operation-progress` combina contagem textual e `role="progressbar"`.
+- `.admin-card-list` substitui tabelas administrativas no celular.
+- `.technical-details` recolhe IDs, cursores e metadados de diagnóstico.
+- Retry deve ser nomeado como “Enfileirar novamente” e solicitar confirmação.
+
+Datas visíveis usam pt-BR e `America/Sao_Paulo`. Badges sempre carregam o texto
+do estado; cor é apenas reforço.

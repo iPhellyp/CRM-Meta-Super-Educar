@@ -122,6 +122,51 @@ function operationDuration(startedAt, completedAt) {
   return minutes < 60 ? `${minutes}min ${seconds % 60}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}min`;
 }
 
+function formatDateTime(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '—';
+  return esc(new Intl.DateTimeFormat('pt-BR', {
+    dateStyle: 'short',
+    timeStyle: 'short',
+    timeZone: 'America/Sao_Paulo',
+  }).format(date).replace(',', ' às'));
+}
+
+function operationStatus(status) {
+  const labels = {
+    REQUESTED: 'Solicitada',
+    PENDING: 'Na fila',
+    RETRY: 'Nova tentativa',
+    PROCESSING: 'Processando',
+    RUNNING: 'Processando',
+    PREVIEW: 'Aguardando confirmação',
+    COMPLETED: 'Concluída',
+    DONE: 'Concluído',
+    PARTIAL: 'Concluída com pendências',
+    PAUSED: 'Pausada',
+    CANCELLED: 'Cancelada',
+    FAILED: 'Falhou',
+    VALID: 'Válida',
+    INVALID: 'Inválida',
+    ERROR: 'Erro',
+  };
+  return `<span class="badge ${statusClass(status)}">${esc(labels[status] || status || 'Indisponível')}</span>`;
+}
+
+function operationProgress(processed, total, label = 'Progresso') {
+  const safeProcessed = Math.max(0, Number(processed) || 0);
+  const safeTotal = Math.max(0, Number(total) || 0);
+  const percent = safeTotal ? Math.min(100, Math.round((safeProcessed / safeTotal) * 100)) : 0;
+  return `<div class="operation-progress">
+    <div class="progress-label"><span>${esc(label)}</span><strong>${safeProcessed}/${safeTotal}</strong></div>
+    <div class="progress-track" role="progressbar" aria-label="${esc(label)}" aria-valuemin="0"
+      aria-valuemax="${safeTotal}" aria-valuenow="${safeProcessed}">
+      <span style="width:${percent}%"></span>
+    </div>
+  </div>`;
+}
+
 export function historicalOperationsView({
   operations,
   instances,
@@ -131,93 +176,157 @@ export function historicalOperationsView({
   csrfToken = '',
 }) {
   const cursor = operations.cursor;
+  const enabledInstances = instances.filter((item) => item.enabled);
+  const openReconciliations = operations.reconciliations.filter(
+    (run) => !['COMPLETED', 'CANCELLED'].includes(run.status),
+  ).length;
+  const reconciliationFailures = operations.reconciliations.reduce(
+    (total, run) => total + Number(run.results?.ERROR || 0) + Number(run.results?.CONFLICT || 0),
+    0,
+  );
+  const resultLabels = {
+    MATCHED: 'Correspondências encontradas',
+    UPDATED: 'Leads atualizados',
+    PHONE_EMPTY: 'Telefone vazio',
+    PHONE_INVALID: 'Telefone inválido',
+    NOT_FOUND_IN_WA2: 'Não encontrado no WA2',
+    LID_UNRESOLVED: 'LID não resolvido',
+    LABEL_UNMAPPED: 'Etiqueta sem vínculo',
+    CONFLICT: 'Conflito',
+    ERROR: 'Erro',
+  };
   return layout('Importação e reconciliação', `
-    <section class="hero"><div><h1>Importação histórica e WA2</h1>
-      <p>Operações retomáveis por tenant, executadas em lotes pelo worker.</p></div></section>
+    <section class="hero"><div><h1>Importações e reconciliações</h1>
+      <p>Acompanhe operações em lote sem perder o contexto comercial dos leads.</p></div></section>
     ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
     ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+    <section class="stats operation-summary" aria-label="Resumo operacional">
+      ${stat('Importações Meta', operations.imports.length)}
+      ${stat('Arquivos enviados', (operations.fileImports || []).length)}
+      ${stat('Reconciliações abertas', openReconciliations)}
+      ${stat('Falhas ou conflitos', reconciliationFailures, reconciliationFailures ? 'attention' : '')}
+    </section>
+    <div class="operation-columns">
+      <section class="panel operation-source meta-source">
+        <div class="panel-title"><div><span class="eyebrow">Direto da integração</span>
+          <h2>Importar diretamente da Meta</h2><p>Escolha formulários válidos e, se necessário, limite o período.</p></div>
+          <span class="badge contact-started">Meta</span></div>
+        ${metaForms.length ? `<form method="post" action="/operations/meta-imports" class="stack" data-required-selection>
+          ${csrfField(csrfToken)}
+          <fieldset class="selection-list"><legend>Formulários disponíveis</legend>
+            ${metaForms.map((form) => `<label class="selection-option">
+              <input type="checkbox" name="formRecordIds" value="${esc(form.id)}">
+              <span><strong>${esc(form.name)}</strong>
+                <small>${esc(form.connection_name)} · ${esc(form.page_name)}</small></span>
+            </label>`).join('')}
+          </fieldset>
+          <p class="selection-feedback" data-selection-feedback role="status">Selecione ao menos um formulário.</p>
+          <div class="date-range">
+            <label>Início do período<input type="date" name="periodStart"></label>
+            <label>Fim do período<input type="date" name="periodEnd"></label>
+          </div>
+          <button type="submit" data-selection-submit>Iniciar importação</button>
+        </form>` : `<div class="empty-state"><h3>Nenhum formulário disponível</h3>
+          <p>Adicione e valide uma conexão, uma página e um formulário Meta antes de importar.</p>
+          <a class="button-link" href="/meta/connections">Configurar Meta</a></div>`}
+      </section>
+      <section class="panel operation-source file-source">
+        <div class="panel-title"><div><span class="eyebrow">Arquivo controlado</span>
+          <h2>Importar arquivo de leads</h2><p>CSV, XLSX ou XLS da Meta · até 5 MB, 2.000 linhas e 50 colunas.</p></div>
+          <span class="badge qualified">Arquivo</span></div>
+        <form method="post" action="/operations/file-imports/preview"
+          enctype="multipart/form-data" class="stack">
+          ${csrfField(csrfToken)}
+          <label>Arquivo de leads<input type="file" name="leadFile" accept=".csv,.xlsx,.xls" required></label>
+          <button type="submit">Gerar prévia segura</button>
+        </form>
+        <p class="helper-text">A prévia não altera leads. Duplicidades possíveis nunca são mescladas automaticamente.</p>
+      </section>
+    </div>
     <section class="panel">
-      <h2>Importar diretamente da Meta</h2>
-      <form method="post" action="/operations/meta-imports" class="stack">
-        ${csrfField(csrfToken)}
-        <label>Conexão, página e formulários
-          <select name="formRecordIds" multiple required size="${Math.min(Math.max(metaForms.length, 3), 8)}">
-            ${metaForms.map((form) => `<option value="${esc(form.id)}">${esc(form.connection_name)} · ${esc(form.page_name)} · ${esc(form.name)}</option>`).join('')}
-          </select>
-        </label>
-        <label>Início do período<input type="date" name="periodStart"></label>
-        <label>Fim do período<input type="date" name="periodEnd"></label>
-        <button type="submit">Iniciar importação</button>
-      </form>
-      <table><thead><tr><th>Form</th><th>Status</th><th>Recebidos</th>
-        <th>Criados</th><th>Atualizados</th><th>Inválidos</th><th>Cursor</th><th>Ação</th></tr></thead>
-        <tbody>${operations.imports.map((run) => `<tr>
-          <td>${esc(run.form_id)}</td><td>${esc(run.status)}</td>
-          <td>${esc(run.received_count)}</td><td>${esc(run.created_count)}</td>
-          <td>${esc(run.updated_count)}</td><td>${esc(run.invalid_count)}</td>
-          <td>${esc(run.cursor_value || '—')}</td><td>
-          ${['PAUSED', 'FAILED'].includes(run.status) ? `<form method="post" action="/operations/meta-imports/${esc(run.id)}/resume">${csrfField(csrfToken)}<button>Retomar</button></form>` : ''}
-          ${['PENDING', 'PAUSED'].includes(run.status) ? `<form method="post" action="/operations/meta-imports/${esc(run.id)}/cancel">${csrfField(csrfToken)}<button>Cancelar</button></form>` : ''}
-          </td></tr>`).join('')}</tbody></table>
+      <div class="panel-title"><div><h2>Histórico de importações</h2>
+        <p>Operações diretas e por arquivo aparecem separadas.</p></div>
+        <span>${operations.imports.length + (operations.fileImports || []).length} registros</span></div>
+      <div class="operation-card-list">
+        ${operations.imports.map((run) => `<article class="operation-card meta-operation">
+          <header><div><span class="eyebrow">Meta · formulário</span><h3>${esc(run.form_name || run.form_id)}</h3></div>${operationStatus(run.status)}</header>
+          <div class="metric-grid compact">
+            ${stat('Recebidos', run.received_count || 0)}${stat('Criados', run.created_count || 0)}
+            ${stat('Atualizados', run.updated_count || 0)}${stat('Inválidos', run.invalid_count || 0)}
+          </div>
+          <details class="technical-details"><summary>Detalhes técnicos</summary>
+            <dl><div><dt>ID da operação</dt><dd>${esc(run.id)}</dd></div>
+              <div><dt>ID do formulário</dt><dd>${esc(run.form_id)}</dd></div>
+              <div><dt>Cursor</dt><dd>${detailValue(run.cursor_value)}</dd></div></dl></details>
+          <div class="actions">
+            ${['PAUSED', 'FAILED'].includes(run.status) ? `<form method="post" action="/operations/meta-imports/${esc(run.id)}/resume">${csrfField(csrfToken)}<button>Retomar</button></form>` : ''}
+            ${['PENDING', 'PAUSED'].includes(run.status) ? `<form method="post" action="/operations/meta-imports/${esc(run.id)}/cancel" data-confirm="Cancelar esta importação Meta?">${csrfField(csrfToken)}<button class="danger">Cancelar</button></form>` : ''}
+          </div>
+        </article>`).join('')}
+        ${(operations.fileImports || []).map((run) => `<article class="operation-card file-operation">
+          <header><div><span class="eyebrow">Arquivo · ${esc(run.format)}</span><h3>${esc(run.original_filename)}</h3>
+            <small>Planilha: ${esc(run.sheet_name)}</small></div>${operationStatus(run.status)}</header>
+          ${operationProgress(run.applied_count, run.total_count, 'Linhas aplicadas')}
+          <p class="muted">Criada em ${formatDateTime(run.created_at)}</p>
+        </article>`).join('')}
+        ${!operations.imports.length && !(operations.fileImports || []).length
+          ? '<div class="empty-state"><h3>Nenhuma importação ainda</h3><p>Inicie pela Meta ou envie uma planilha para acompanhar o processamento aqui.</p></div>'
+          : ''}
+      </div>
     </section>
     <section class="panel">
-      <div class="panel-title"><div><h2>Importar arquivo de leads</h2>
-        <p>CSV, XLSX ou XLS da Meta · até 5 MB, 2.000 linhas e 50 colunas.</p></div></div>
-      <form method="post" action="/operations/file-imports/preview"
-        enctype="multipart/form-data" class="stack">
-        ${csrfField(csrfToken)}
-        <label>Arquivo de leads
-          <input type="file" name="leadFile" accept=".csv,.xlsx,.xls" required>
-        </label>
-        <button type="submit">Gerar prévia segura</button>
-      </form>
-      <p class="helper-text">A prévia não altera leads. Duplicidades possíveis nunca são mescladas automaticamente.</p>
-      <div class="table-wrap"><table><thead><tr><th>Arquivo</th><th>Status</th>
-        <th>Linhas</th><th>Aplicados</th><th>Criado</th></tr></thead><tbody>
-        ${(operations.fileImports || []).map((run) => `<tr>
-          <td><strong>${esc(run.original_filename)}</strong><small>${esc(run.format)} · ${esc(run.sheet_name)}</small></td>
-          <td>${esc({
-            PREVIEW: 'Aguardando confirmação', PROCESSING: 'Processando',
-            COMPLETED: 'Concluída', CANCELLED: 'Cancelada', FAILED: 'Falhou',
-          }[run.status] || run.status)}</td>
-          <td>${esc(run.total_count)}</td><td>${esc(run.applied_count)}</td>
-          <td>${detailValue(run.created_at)}</td></tr>`).join('')
-          || '<tr><td colspan="5" class="empty">Nenhum arquivo importado.</td></tr>'}
-      </tbody></table></div>
+      <div class="panel-title"><div><h2>Eventos WhatsApp</h2><p>Atividade recebida e classificada pelo cursor.</p></div>
+        ${operationStatus(cursor?.status || 'PENDING')}</div>
+      <div class="metric-grid">
+        ${stat('Processados', cursor?.processed_count || 0)}
+        ${stat('Pendentes', cursor?.pending_count || 0)}
+        ${stat('Conflitos', cursor?.conflict_count || 0, cursor?.conflict_count ? 'attention' : '')}
+        ${stat('Ignorados', cursor?.ignored_count || 0, 'secondary-stat')}
+      </div>
+      ${cursor?.last_error_code ? `<div class="alert error"><strong>Último erro:</strong> ${esc(cursor.last_error_code)}</div>` : ''}
+      <details class="technical-details"><summary>Cursor e detalhes técnicos</summary>
+        <dl><div><dt>Cursor atual</dt><dd>${esc(cursor?.cursor_value || 'Inicial')}</dd></div>
+          <div><dt>Atividade</dt><dd>${formatDateTime(cursor?.updated_at || cursor?.last_processed_at)}</dd></div></dl>
+      </details>
     </section>
-    <section class="panel">
-      <h2>Eventos WhatsApp</h2>
-      <p>Cursor: ${esc(cursor?.cursor_value || 'inicial')} · Status: ${esc(cursor?.status || 'IDLE')}</p>
-      <p><strong>${esc(cursor?.ignored_count || 0)} eventos internos ignorados por não representarem alteração comercial.</strong></p>
-      <p>Processados: ${esc(cursor?.processed_count || 0)} · Conflitos: ${esc(cursor?.conflict_count || 0)} ·
-        Pendências: ${esc(cursor?.pending_count || 0)} · Erro atual: ${detailValue(cursor?.last_error_code)}</p>
-    </section>
-    <section class="panel">
-      <h2>Reconciliação WA2</h2>
-      <form method="post" action="/operations/reconciliations" class="stack">
+    <section class="panel" id="reconciliacoes">
+      <div class="panel-title"><div><h2>Reconciliação WA2</h2>
+        <p>Compare os leads do CRM com uma instância WhatsApp validada.</p></div>
+        <span>${openReconciliations} abertas</span></div>
+      ${enabledInstances.length ? `<form method="post" action="/operations/reconciliations" class="compact-form stack">
         ${csrfField(csrfToken)}
-        <label>Instância<select name="instanceId" required>
-          ${instances.filter((item) => item.enabled).map((item) =>
-            `<option value="${esc(item.id)}">${esc(item.name || item.remote_instance_id)}</option>`).join('')}
-        </select></label><button type="submit">Iniciar lote</button>
-      </form>
-      <table><thead><tr><th>Instância</th><th>Status</th><th>Progresso</th>
-        <th>Resultados</th><th>Ação</th></tr></thead><tbody>
-        ${operations.reconciliations.map((run) => `<tr>
-          <td><strong>${esc(run.instance_name)}</strong><small>Job ${esc(run.id)}</small><small>Criado: ${detailValue(run.created_at)}</small><small>Tenant: ${detailValue(run.tenant_id)}</small></td><td>${esc({
-            PENDING: 'Pendente', RUNNING: 'Processando', COMPLETED: 'Concluído',
-            PARTIAL: 'Concluído com pendências', FAILED: 'Falhou', CANCELLED: 'Cancelado',
-          }[run.status] || run.status)}<small>Início: ${detailValue(run.started_at)} · Fim: ${detailValue(run.completed_at)}</small><small>Lock: ${detailValue(run.locked_at)} · Heartbeat: ${detailValue(run.heartbeat_at)}</small></td>
-          <td>${esc(run.processed_count)}/${esc(run.total_count)}<small>Duração: ${esc(operationDuration(run.started_at, run.completed_at))} · ${esc(run.retry_count || 0)} retry(s)</small>${run.last_error ? `<small class="error-text">${esc(run.last_error)}</small>` : ''}</td>
-          <td>${Object.entries(run.results || {}).map(([result, count]) => `<div><strong>${esc(count)}</strong> · <a href="/operations/reconciliations/${esc(run.id)}/items?result=${esc(result)}">${esc({
-            MATCHED: 'Correspondências encontradas', UPDATED: 'Leads atualizados',
-            PHONE_EMPTY: 'Telefone vazio', PHONE_INVALID: 'Telefone inválido',
-            NOT_FOUND_IN_WA2: 'Não encontrado no WA2', LID_UNRESOLVED: 'LID não resolvido',
-            LABEL_UNMAPPED: 'Etiqueta sem vínculo', CONFLICT: 'Conflito', ERROR: 'Erro',
-          }[result] || result)}</a></div>`).join('') || 'Sem resultados'}<small><a href="/operations/reconciliations/${esc(run.id)}/errors.csv">Exportar erros CSV</a></small></td>
-          <td><form method="post" action="/operations/reconciliations/${esc(run.id)}/retry">
-            ${csrfField(csrfToken)}<button${!['PARTIAL','FAILED'].includes(run.status) ? ' disabled title="Não há falhas elegíveis para retry"' : ''}>Retry falhas</button></form></td></tr>`).join('')}
-      </tbody></table>
+        <label>Instância<select name="instanceId" required><option value="">Selecione uma instância</option>
+          ${enabledInstances.map((item) =>
+            `<option value="${esc(item.id)}">${esc(item.name || item.remote_instance_id)}${item.is_default ? ' · padrão' : ''}</option>`).join('')}
+        </select></label><button type="submit">Iniciar reconciliação</button>
+      </form>` : `<div class="empty-state"><h3>Nenhuma instância habilitada</h3>
+        <p>Valide e habilite uma instância WA2 antes de iniciar a reconciliação.</p>
+        <a class="button-link" href="/wa2">Configurar WhatsApp</a></div>`}
+      <div class="operation-card-list reconciliation-list">
+        ${operations.reconciliations.map((run) => `<article class="operation-card reconciliation-card">
+          <header><div><span class="eyebrow">Reconciliação WA2</span><h3>${esc(run.instance_name)}</h3>
+            <small>Criada em ${formatDateTime(run.created_at)}</small></div>${operationStatus(run.status)}</header>
+          ${operationProgress(run.processed_count, run.total_count)}
+          <p class="muted">Duração: ${esc(operationDuration(run.started_at, run.completed_at))} · ${esc(run.retry_count || 0)} nova(s) tentativa(s)</p>
+          ${run.last_error ? `<div class="alert error">${esc(run.last_error)}</div>` : ''}
+          <div class="result-groups">
+            ${Object.entries(run.results || {}).map(([result, count]) => `<a href="/operations/reconciliations/${esc(run.id)}/items?result=${esc(result)}">
+              <strong>${esc(count)}</strong><span>${esc(resultLabels[result] || result)}</span></a>`).join('')
+              || '<p class="muted">Os resultados aparecerão após o início do processamento.</p>'}
+          </div>
+          <div class="actions">
+            <a class="button-link secondary small" href="/operations/reconciliations/${esc(run.id)}/errors.csv">Exportar erros CSV</a>
+            ${['PARTIAL', 'FAILED'].includes(run.status) ? `<form method="post" action="/operations/reconciliations/${esc(run.id)}/retry"
+              data-confirm="Enfileirar novamente somente as falhas elegíveis desta reconciliação?">
+              ${csrfField(csrfToken)}<button>Enfileirar falhas</button></form>` : ''}
+          </div>
+          <details class="technical-details"><summary>Detalhes técnicos</summary><dl>
+            <div><dt>ID da operação</dt><dd>${esc(run.id)}</dd></div>
+            <div><dt>Início</dt><dd>${formatDateTime(run.started_at)}</dd></div>
+            <div><dt>Fim</dt><dd>${formatDateTime(run.completed_at)}</dd></div>
+          </dl></details>
+        </article>`).join('') || '<div class="empty-state"><h3>Nenhuma reconciliação</h3><p>Selecione uma instância para iniciar o primeiro lote.</p></div>'}
+      </div>
     </section>
     <section class="panel"><h2>Conflitos abertos</h2><ul>
       ${operations.conflicts.map((item) =>
@@ -291,7 +400,7 @@ export function leadFileImportPreviewView({ imported, csrfToken = '' }) {
         ${samples.map((item) => `<tr>
           <td>${esc(item.row_number)}</td><td>${detailValue(item.meta_lead_id)}</td>
           <td>${detailValue(item.name)}</td><td>${detailValue(item.phone_normalized || item.phone)}</td>
-          <td>${detailValue(item.meta_created_at)}</td>
+          <td>${formatDateTime(item.meta_created_at)}</td>
           <td><span class="badge ${esc(item.decision.toLowerCase().replaceAll('_', '-'))}">${esc(decisionLabels[item.decision] || item.decision)}</span></td>
           <td>${item.errors?.length ? esc(item.errors.join(', ')) : 'Válido'}</td>
         </tr>`).join('')}
@@ -335,7 +444,7 @@ export function reconciliationItemsView({
     <section class="panel">
       <div class="panel-title"><h2>Registros</h2><span>${items.length} exibidos</span></div>
       <div class="table-wrap"><table><thead><tr><th>Lead</th><th>Resultado</th><th>Tentativas</th><th>Erro sanitizado</th><th>Finalizado</th></tr></thead><tbody>
-        ${items.map((item) => `<tr><td><a href="/leads/${esc(item.lead_id)}">${esc(item.lead_name)}</a><small>${esc(item.lead_id)}</small></td><td>${esc(labels[item.result] || item.result || 'Pendente')}</td><td>${esc(item.attempts)}</td><td>${detailValue(item.last_error_code)}</td><td>${detailValue(item.finished_at)}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">Nenhum registro.</td></tr>'}
+        ${items.map((item) => `<tr><td><a href="/leads/${esc(item.lead_id)}">${esc(item.lead_name)}</a><small>${esc(item.lead_id)}</small></td><td>${esc(labels[item.result] || item.result || 'Pendente')}</td><td>${esc(item.attempts)}</td><td>${detailValue(item.last_error_code)}</td><td>${formatDateTime(item.finished_at)}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">Nenhum registro.</td></tr>'}
       </tbody></table></div>
     </section>
     <div class="actions"><a class="button-link secondary" href="/operations">Voltar</a><a class="button-link" href="/operations/reconciliations/${esc(runId)}/errors.csv">Exportar erros CSV</a></div>
@@ -675,7 +784,7 @@ export function dashboardView({
       <div class="panel-title">
         <div>
           <h2>Fila de leads</h2>
-          ${operationStartAt ? `<small>Operação iniciada em ${esc(new Date(operationStartAt).toLocaleString('pt-BR'))}. Leads anteriores permanecem armazenados.</small>` : ''}
+          ${operationStartAt ? `<small>Operação iniciada em ${formatDateTime(operationStartAt)}. Leads anteriores permanecem armazenados.</small>` : ''}
         </div>
         <span>${leads.length} exibidos</span>
       </div>
@@ -740,7 +849,7 @@ export function leadDetailView({
   const timeline = history.map((item) => `
     <li>
       <strong>${esc(activityLabels[item.activity_type] || 'Atividade')}</strong>
-      <small>${esc(new Date(item.changed_at).toLocaleString('pt-BR'))} · ${esc(item.origin || '—')} · ${esc(item.changed_by || 'Sistema')}</small>
+      <small>${formatDateTime(item.changed_at)} · ${esc(item.origin || '—')} · ${esc(item.changed_by || 'Sistema')}</small>
       ${item.previous_stage !== item.new_stage ? `<div>${esc(STAGE_LABELS[item.previous_stage] || item.previous_stage)} → <strong>${esc(STAGE_LABELS[item.new_stage] || item.new_stage)}</strong></div>` : ''}
       ${item.reason ? `<div>Motivo: ${esc(LOST_REASON_LABELS[item.reason] || item.reason)}</div>` : ''}
       ${item.observation ? `<div>${esc(item.observation)}</div>` : ''}
@@ -820,7 +929,22 @@ export function metaConnectionsView({
     </section>
     <section class="panel">
       <div class="panel-title"><h2>Conexões cadastradas</h2><span>${connections.length}</span></div>
-      <div class="table-wrap"><table><thead><tr><th>Conexão/BM</th><th>Status</th><th>Recursos</th><th>Último erro</th><th>Ações</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">Nenhuma conexão cadastrada.</td></tr>'}</tbody></table></div>
+      <div class="admin-card-list mobile-admin-only">
+        ${connections.map((connection) => `<article class="admin-card">
+          <header><div><span class="eyebrow">Conexão Meta</span><h3>${esc(connection.name)}</h3></div>
+            ${operationStatus(connection.status)}</header>
+          <dl><div><dt>Estado</dt><dd>${connection.active ? 'Ativa' : 'Inativa'}</dd></div>
+            <div><dt>Recursos</dt><dd>${esc(connection.page_count)} página(s) · ${esc(connection.form_count)} formulário(s) · ${esc(connection.dataset_count)} dataset(s)</dd></div></dl>
+          ${connection.last_error ? `<div class="alert error">${esc(connection.last_error)}</div>` : ''}
+          <div class="actions"><a class="button-link secondary" href="/meta/connections?connectionId=${esc(connection.id)}">Configurar</a>
+            <form method="post" action="/meta/connections/${esc(connection.id)}/active"${connection.active ? ' data-confirm="Desativar esta conexão Meta? O histórico será preservado."' : ''}>
+              ${csrfField(csrfToken)}<input type="hidden" name="active" value="${connection.active ? 'false' : 'true'}">
+              ${connection.active ? '<input type="hidden" name="confirmation" value="DEACTIVATE_META_CONNECTION">' : ''}
+              <button class="${connection.active ? 'danger' : 'success'}">${connection.active ? 'Desativar' : 'Ativar'}</button></form></div>
+          <details class="technical-details"><summary>Identificadores</summary><p>Business Manager: ${esc(connection.business_id)}</p></details>
+        </article>`).join('') || '<div class="empty-state"><h3>Nenhuma conexão cadastrada</h3><p>Adicione uma conexão para validar páginas e formulários.</p></div>'}
+      </div>
+      <div class="table-wrap desktop-admin-only"><table><thead><tr><th>Conexão/BM</th><th>Status</th><th>Recursos</th><th>Último erro</th><th>Ações</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">Nenhuma conexão cadastrada.</td></tr>'}</tbody></table></div>
     </section>
     ${selected ? `
       <section class="panel">
@@ -831,7 +955,7 @@ export function metaConnectionsView({
       </section>
       ${remoteForms.length ? `<section class="panel"><h2>Formulários da página ${esc(selectedPageId)}</h2><form method="post" action="/meta/connections/${esc(selected.id)}/forms" class="compact-form stack">${csrfField(csrfToken)}<input type="hidden" name="pageId" value="${esc(selectedPageId)}"><label>Página salva<select name="pageRecordId" required>${savedPageOptions}</select></label><label>Formulário<select name="formId" required><option value="">Selecione</option>${formOptions}</select></label><button>Adicionar formulário</button></form></section>` : ''}
       <section class="panel"><h2>Dataset/pixel</h2><form method="post" action="/meta/connections/${esc(selected.id)}/datasets" class="filter-grid">${csrfField(csrfToken)}<label>Nome<input name="name" required maxlength="200"></label><label>Dataset ID<input name="datasetId" required inputmode="numeric"></label><label>Test Event Code opcional<input name="testEventCode" type="password"></label><button>Salvar dataset</button></form>
-        <div class="table-wrap"><table><thead><tr><th>Dataset</th><th>ID</th><th>Estado</th><th>Última validação</th><th>Erro/ação</th></tr></thead><tbody>${selected.datasets.map((dataset) => `<tr><td>${esc(dataset.name)}</td><td>${esc(dataset.dataset_id)}</td><td>${dataset.active ? 'Ativo' : 'Inativo'}</td><td>${dataset.last_test_at ? esc(new Date(dataset.last_test_at).toLocaleString('pt-BR')) : '—'}</td><td>${detailValue(dataset.last_error)}${dataset.active ? `<form method="post" action="/meta/connections/${esc(selected.id)}/datasets/${esc(dataset.id)}/validate">${csrfField(csrfToken)}<button class="small">Validar dataset</button></form>` : ''}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">Nenhum dataset configurado.</td></tr>'}</tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>Dataset</th><th>ID</th><th>Estado</th><th>Última validação</th><th>Erro/ação</th></tr></thead><tbody>${selected.datasets.map((dataset) => `<tr><td>${esc(dataset.name)}</td><td>${esc(dataset.dataset_id)}</td><td>${dataset.active ? 'Ativo' : 'Inativo'}</td><td>${formatDateTime(dataset.last_test_at)}</td><td>${detailValue(dataset.last_error)}${dataset.active ? `<form method="post" action="/meta/connections/${esc(selected.id)}/datasets/${esc(dataset.id)}/validate">${csrfField(csrfToken)}<button class="small">Validar dataset</button></form>` : ''}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">Nenhum dataset configurado.</td></tr>'}</tbody></table></div>
       </section>
       <section class="panel"><h2>Renovar token</h2><form method="post" action="/meta/connections/${esc(selected.id)}/token" class="compact-form stack">${csrfField(csrfToken)}<label>Novo access token<input name="accessToken" type="password" required autocomplete="new-password"></label><button>Validar e substituir</button></form></section>
     ` : ''}
@@ -839,10 +963,10 @@ export function metaConnectionsView({
 }
 
 function statusClass(status) {
-  if (['SENT', 'COMPLETED', 'DONE'].includes(status)) return 'paid';
-  if (status === 'FAILED') return 'lost';
+  if (['SENT', 'COMPLETED', 'DONE', 'VALID', 'CONNECTED'].includes(status)) return 'paid';
+  if (['FAILED', 'ERROR', 'INVALID', 'CANCELLED', 'DISCONNECTED'].includes(status)) return 'lost';
   if (status === 'RETRY') return 'contact-started';
-  if (['PROCESSING', 'RUNNING'].includes(status)) return 'opportunity';
+  if (['PROCESSING', 'RUNNING', 'PARTIAL', 'CONNECTING', 'QR_REQUIRED'].includes(status)) return 'opportunity';
   return 'new';
 }
 
@@ -863,7 +987,7 @@ export function eventsView({ events, jobs, message = '', error = '', csrfToken =
       <td><strong>${esc(event.event_name)}</strong><small>${event.event_id.endsWith(':test') ? 'TESTE' : 'PRODUÇÃO'} · ${esc(event.event_id)}</small></td>
       <td>${esc(event.lead_name)}<small>${esc(event.meta_lead_id || 'sem lead_id')}</small></td>
       <td><span class="badge ${statusClass(event.status)}">${esc(statusLabels[event.status] || event.status)}</span><small>${esc(event.attempts)} tentativa(s)</small></td>
-      <td>${event.sent_at ? esc(new Date(event.sent_at).toLocaleString('pt-BR')) : '—'}${event.last_error ? `<small class="error-text">${esc(event.last_error)}</small>` : ''}</td>
+      <td>${formatDateTime(event.sent_at)}${event.last_error ? `<small class="error-text">${esc(event.last_error)}</small>` : ''}</td>
     </tr>`).join('');
 
   const jobRows = jobs.map((job) => `
@@ -872,17 +996,18 @@ export function eventsView({ events, jobs, message = '', error = '', csrfToken =
         <strong>${job.job_type === 'LEAD_IMPORT' ? 'Importação de lead' : esc(job.event_name || 'Conversão')}</strong>
         <small>${job.event_id ? `${job.event_id.endsWith(':test') ? 'TESTE' : 'PRODUÇÃO'} · ` : ''}${esc(job.meta_lead_id || job.id)}</small>
       </td>
-      <td>${esc(job.lead_name || '—')}<small>${esc(new Date(job.created_at).toLocaleString('pt-BR'))}</small></td>
+      <td>${esc(job.lead_name || '—')}<small>${formatDateTime(job.created_at)}</small></td>
       <td>
         <span class="badge ${statusClass(job.status)}">${esc(statusLabels[job.status] || job.status)}</span>
-        <small>${esc(job.attempts)} tentativa(s)${job.status === 'RETRY' ? `<br>Próxima: ${esc(new Date(job.next_attempt_at).toLocaleString('pt-BR'))}` : ''}</small>
+        <small>${esc(job.attempts)} tentativa(s)${job.status === 'RETRY' ? `<br>Próxima: ${formatDateTime(job.next_attempt_at)}` : ''}</small>
       </td>
       <td>
         ${job.last_error ? `<small class="error-text">${esc(job.last_error)}</small>` : '—'}
         ${job.status === 'FAILED' ? `
-          <form method="post" action="/jobs/${job.id}/retry" class="retry-form">
+          <form method="post" action="/jobs/${esc(job.id)}/retry" class="retry-form"
+            data-confirm="Enfileirar novamente este job Meta?">
             ${csrfField(csrfToken)}
-            <button type="submit" class="small">Reenviar</button>
+            <button type="submit" class="small">Enfileirar novamente</button>
           </form>` : ''}
       </td>
     </tr>`).join('');
@@ -893,12 +1018,38 @@ export function eventsView({ events, jobs, message = '', error = '', csrfToken =
     <section class="hero"><div><h1>Eventos e fila Meta</h1><p>Conversões e importações são processadas de forma assíncrona pelo worker.</p></div></section>
     <section class="panel">
       <div class="panel-title"><h2>Fila persistente</h2><span>${jobs.length} exibidos</span></div>
-      <div class="table-wrap"><table>
+      <div class="admin-card-list mobile-admin-only">
+        ${jobs.map((job) => `<article class="admin-card">
+          <header><div><span class="eyebrow">Job Meta</span><h3>${job.job_type === 'LEAD_IMPORT' ? 'Importação de lead' : esc(job.event_name || 'Conversão')}</h3></div>
+            <span class="badge ${statusClass(job.status)}">${esc(statusLabels[job.status] || job.status)}</span></header>
+          <dl><div><dt>Lead</dt><dd>${esc(job.lead_name || '—')}</dd></div>
+            <div><dt>Criado</dt><dd>${formatDateTime(job.created_at)}</dd></div>
+            <div><dt>Tentativas</dt><dd>${esc(job.attempts)}</dd></div>
+            ${job.status === 'RETRY' ? `<div><dt>Próxima tentativa</dt><dd>${formatDateTime(job.next_attempt_at)}</dd></div>` : ''}
+          </dl>
+          ${job.last_error ? `<div class="alert error">${esc(job.last_error)}</div>` : ''}
+          ${job.status === 'FAILED' ? `<form method="post" action="/jobs/${esc(job.id)}/retry"
+            data-confirm="Enfileirar novamente este job Meta?">${csrfField(csrfToken)}
+            <button>Enfileirar novamente</button></form>` : ''}
+          <details class="technical-details"><summary>Identificadores</summary><p>${esc(job.meta_lead_id || job.id)}</p></details>
+        </article>`).join('') || '<div class="empty-state"><h3>Nenhum job registrado</h3><p>A fila aparecerá aqui quando uma operação for solicitada.</p></div>'}
+      </div>
+      <div class="table-wrap desktop-admin-only"><table>
         <thead><tr><th>Job</th><th>Lead/criação</th><th>Status</th><th>Erro/ação</th></tr></thead>
         <tbody>${jobRows || '<tr><td colspan="4" class="empty">Nenhum job registrado.</td></tr>'}</tbody>
       </table></div>
     </section>
-    <section class="panel"><div class="table-wrap"><table>
+    <section class="panel"><div class="panel-title"><h2>Eventos enviados</h2><span>${events.length} exibidos</span></div>
+      <div class="admin-card-list mobile-admin-only">
+        ${events.map((event) => `<article class="admin-card"><header><div><span class="eyebrow">Evento Meta</span>
+          <h3>${esc(event.event_name)}</h3></div><span class="badge ${statusClass(event.status)}">${esc(statusLabels[event.status] || event.status)}</span></header>
+          <dl><div><dt>Lead</dt><dd>${esc(event.lead_name)}</dd></div><div><dt>Envio</dt><dd>${formatDateTime(event.sent_at)}</dd></div>
+            <div><dt>Tentativas</dt><dd>${esc(event.attempts)}</dd></div></dl>
+          ${event.last_error ? `<div class="alert error">${esc(event.last_error)}</div>` : ''}
+          <details class="technical-details"><summary>Identificadores</summary><p>${esc(event.event_id)} · ${esc(event.meta_lead_id || 'sem lead_id')}</p></details>
+        </article>`).join('') || '<div class="empty-state"><h3>Nenhum evento enviado</h3><p>As conversões processadas aparecerão aqui.</p></div>'}
+      </div>
+      <div class="table-wrap desktop-admin-only"><table>
       <thead><tr><th>Evento</th><th>Lead</th><th>Status</th><th>Envio/erro</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="4" class="empty">Nenhum evento enviado.</td></tr>'}</tbody>
     </table></div></section>
@@ -1006,14 +1157,43 @@ export function wa2DashboardView({
     </div>
     <section class="panel">
       <div class="panel-title"><h2>Instâncias</h2><span>${instances.length} exibidas</span></div>
-      <div class="table-wrap"><table>
+      <div class="admin-card-list mobile-admin-only">
+        ${instances.map((instance) => `<article class="admin-card">
+          <header><div><span class="eyebrow">Instância WA2</span><h3>${detailValue(instance.name || instance.id)}</h3></div>
+            <span class="badge ${statusClass(instance.status)}">${esc(wa2RemoteStatusLabel(instance.status))}</span></header>
+          <dl><div><dt>Telefone</dt><dd>${detailValue(instance.phone)}</dd></div>
+            <div><dt>Função</dt><dd>${detailValue(instance.role)}</dd></div>
+            <div><dt>Principal</dt><dd>${instance.isDefault ? 'Sim' : 'Não'}</dd></div></dl>
+          <div class="actions"><a class="button-link secondary" href="/wa2/instances/${encodeURIComponent(instance.id)}">Ver detalhes</a>
+            ${localByRemoteId.has(instance.id) ? '<span class="ok">Salva no CRM</span>' : `<form method="post" action="/wa2/instances/import">
+              ${csrfField(csrfToken)}<input type="hidden" name="remoteInstanceId" value="${esc(instance.id)}">
+              <button>Validar e salvar</button></form>`}</div>
+          <details class="technical-details"><summary>Identificador técnico</summary><p>${esc(instance.id)}</p></details>
+        </article>`).join('') || '<div class="empty-state"><h3>Nenhuma instância disponível</h3><p>Confira a conexão do WA2 e tente novamente.</p></div>'}
+      </div>
+      <div class="table-wrap desktop-admin-only"><table>
         <thead><tr><th>Instância</th><th>Função</th><th>Telefone</th><th>Status</th><th>Principal</th><th>Ação</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="6" class="empty">Nenhuma instância disponível.</td></tr>'}</tbody>
       </table></div>
     </section>
     <section class="panel">
       <div class="panel-title"><h2>Instâncias salvas no CRM</h2><span>${localInstances.length} exibidas</span></div>
-      <div class="table-wrap"><table>
+      <div class="admin-card-list mobile-admin-only">
+        ${localInstances.map((instance) => `<article class="admin-card">
+          <header><div><span class="eyebrow">Instância local</span><h3>${detailValue(instance.name || instance.remote_instance_id)}</h3></div>
+            <span class="badge ${instance.enabled ? 'paid' : 'new'}">${instance.enabled ? 'Habilitada' : 'Desabilitada'}</span></header>
+          <dl><div><dt>Função</dt><dd>${detailValue(instance.role)}</dd></div>
+            <div><dt>Principal</dt><dd>${instance.is_default ? 'Sim' : 'Não'}</dd></div></dl>
+          <div class="actions">
+            ${!instance.is_default && instance.enabled ? `<form method="post" action="/wa2/local-instances/${esc(instance.id)}/default">${csrfField(csrfToken)}<button>Definir padrão</button></form>` : ''}
+            ${instance.enabled ? `<form method="post" action="/wa2/local-instances/${esc(instance.id)}/disable">
+              ${csrfField(csrfToken)}${instance.is_default ? '<input type="hidden" name="confirmation" value="DISABLE_DEFAULT_WA2_INSTANCE">' : ''}
+              <button class="danger">${instance.is_default ? 'Desabilitar e remover padrão' : 'Desabilitar'}</button></form>`
+              : `<form method="post" action="/wa2/local-instances/${esc(instance.id)}/enable">${csrfField(csrfToken)}<button>Habilitar</button></form>`}
+          </div><details class="technical-details"><summary>Identificador técnico</summary><p>${esc(instance.remote_instance_id)}</p></details>
+        </article>`).join('') || '<div class="empty-state"><h3>Nenhuma instância salva</h3><p>Valide uma instância disponível para usá-la no CRM.</p></div>'}
+      </div>
+      <div class="table-wrap desktop-admin-only"><table>
         <thead><tr><th>Instância</th><th>Função</th><th>Estado local</th><th>Principal</th><th>Ações</th></tr></thead>
         <tbody>${localRows || '<tr><td colspan="5" class="empty">Nenhuma instância validada no CRM.</td></tr>'}</tbody>
       </table></div>
@@ -1062,8 +1242,8 @@ export function wa2LabelBindingsView({
             ${binding
               ? `<span class="badge ${binding.enabled ? 'enrolled' : 'new'}">${binding.enabled ? 'ATIVO' : 'DESABILITADO'}</span>
                  <small>${esc(binding.lead_count || 0)} lead(s)</small>
-                 <small>Verificado: ${detailValue(binding.last_verified_at)}</small>
-                 <small>Última sincronização: ${detailValue(binding.last_sync_at)}</small>
+                 <small>Verificado: ${formatDateTime(binding.last_verified_at)}</small>
+                 <small>Última sincronização: ${formatDateTime(binding.last_sync_at)}</small>
                  ${binding.last_error ? `<small class="error-text">${esc(binding.last_error)}</small>` : ''}`
               : suggestion
                 ? '<span class="ok">Correspondência equivalente sugerida; confirme antes de salvar</span>'
@@ -1143,19 +1323,20 @@ export function wa2LabelJobsView({
     <tr>
       <td><strong>${esc(job.lead_name)}</strong><small>${esc(job.id)}</small></td>
       <td>${detailValue(job.target_stage)}<small>${detailValue(job.target_remote_label_id)}</small></td>
-      <td>${detailValue(job.instance_name || job.remote_instance_id)}<small>${detailValue(job.created_at)}</small></td>
+      <td>${detailValue(job.instance_name || job.remote_instance_id)}<small>${formatDateTime(job.created_at)}</small></td>
       <td>
         <span class="badge ${statusClass(job.status)}">${esc(statusLabels[job.status] || job.status)}</span>
         ${job.stale ? '<small class="error-text">Processamento travado; elegível para recuperação</small>' : ''}
         <small>${esc(job.attempts)}/${esc(job.max_attempts)} tentativa(s)</small>
-        ${job.status === 'PENDING' ? `<small>Próxima: ${detailValue(job.available_at)}</small>` : ''}
+        ${job.status === 'PENDING' ? `<small>Próxima: ${formatDateTime(job.available_at)}</small>` : ''}
       </td>
       <td>
         ${job.last_error_code ? `<small class="error-text">${esc(job.last_error_code)} · ${esc(job.last_error_message || '')}</small>` : '—'}
         ${job.status === 'FAILED' && job.attempts < 10 ? `
-          <form method="post" action="/wa2/label-jobs/${esc(job.id)}/retry" class="retry-form">
+          <form method="post" action="/wa2/label-jobs/${esc(job.id)}/retry" class="retry-form"
+            data-confirm="Enfileirar novamente este job de etiqueta?">
             ${csrfField(csrfToken)}
-            <button class="small">Reenviar</button>
+            <button class="small">Enfileirar novamente</button>
           </form>` : ''}
       </td>
     </tr>`).join('');
@@ -1171,7 +1352,26 @@ export function wa2LabelJobsView({
       ${stat('Travados', counts.stale || 0)}
     </section>
     <section class="panel">
-      <div class="table-wrap"><table>
+      <div class="panel-title"><h2>Jobs recentes</h2><span>${jobs.length} exibidos</span></div>
+      <div class="admin-card-list mobile-admin-only">
+        ${jobs.map((job) => `<article class="admin-card">
+          <header><div><span class="eyebrow">Etiqueta WA2</span><h3>${esc(job.lead_name)}</h3></div>
+            <span class="badge ${statusClass(job.status)}">${esc(statusLabels[job.status] || job.status)}</span></header>
+          <dl><div><dt>Etapa</dt><dd>${detailValue(job.target_stage)}</dd></div>
+            <div><dt>Instância</dt><dd>${detailValue(job.instance_name || job.remote_instance_id)}</dd></div>
+            <div><dt>Criado</dt><dd>${formatDateTime(job.created_at)}</dd></div>
+            <div><dt>Tentativas</dt><dd>${esc(job.attempts)}/${esc(job.max_attempts)}</dd></div>
+            ${job.status === 'PENDING' ? `<div><dt>Próxima tentativa</dt><dd>${formatDateTime(job.available_at)}</dd></div>` : ''}</dl>
+          ${job.stale ? '<div class="alert warning">Processamento travado; elegível para recuperação.</div>' : ''}
+          ${job.last_error_code ? `<div class="alert error">${esc(job.last_error_code)} · ${esc(job.last_error_message || '')}</div>` : ''}
+          ${job.status === 'FAILED' && job.attempts < 10 ? `<form method="post" action="/wa2/label-jobs/${esc(job.id)}/retry"
+            data-confirm="Enfileirar novamente este job de etiqueta?">${csrfField(csrfToken)}
+            <button>Enfileirar novamente</button></form>` : ''}
+          <details class="technical-details"><summary>Identificadores</summary>
+            <p>${esc(job.id)} · ${detailValue(job.target_remote_label_id)}</p></details>
+        </article>`).join('') || '<div class="empty-state"><h3>Nenhum job de etiqueta</h3><p>As sincronizações aparecerão aqui.</p></div>'}
+      </div>
+      <div class="table-wrap desktop-admin-only"><table>
         <thead><tr><th>Lead/job</th><th>Etapa/etiqueta</th><th>Instância/data</th><th>Status</th><th>Erro/ação</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="5" class="empty">Nenhum job de etiqueta registrado.</td></tr>'}</tbody>
       </table></div>
@@ -1195,11 +1395,11 @@ export function wa2InstanceView({
     </section>
     <section class="panel detail-grid">
       <div><strong>Telefone</strong><span>${detailValue(status.phone)}</span></div>
-      <div><strong>Conectada em</strong><span>${detailValue(status.connectedAt)}</span></div>
-      <div><strong>Última sincronização</strong><span>${detailValue(status.lastSyncAt)}</span></div>
+      <div><strong>Conectada em</strong><span>${formatDateTime(status.connectedAt)}</span></div>
+      <div><strong>Última sincronização</strong><span>${formatDateTime(status.lastSyncAt)}</span></div>
       <div><strong>Requer QR</strong><span>${status.requiresQr ? 'Sim' : 'Não'}</span></div>
       <div><strong>Último código de erro</strong><span>${detailValue(status.lastErrorCode)}</span></div>
-      <div><strong>Atualizada em</strong><span>${detailValue(status.updatedAt)}</span></div>
+      <div><strong>Atualizada em</strong><span>${formatDateTime(status.updatedAt)}</span></div>
     </section>
     <section class="panel">
       <h2>Ações</h2>
@@ -1271,7 +1471,7 @@ export function leadWa2View({
       <td>${detailValue(link.instance_name || link.remote_instance_id)}</td>
       <td>${detailValue(link.remote_contact_id)}</td>
       <td>${detailValue(link.remote_chat_id)}<small>${esc(maskJid(link.jid))}</small></td>
-      <td>${detailValue(link.last_verified_at)}</td>
+      <td>${formatDateTime(link.last_verified_at)}</td>
       <td>
         <div class="actions">
           <form method="post" action="/leads/${esc(lead.id)}/wa2/verify">

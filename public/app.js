@@ -309,9 +309,30 @@ function setupFormLoading() {
   }
 }
 
+function setupRequiredSelections() {
+  for (const form of document.querySelectorAll('[data-required-selection]')) {
+    const choices = [...form.querySelectorAll('input[type="checkbox"][name="formRecordIds"]')];
+    const submit = form.querySelector('[data-selection-submit]');
+    const feedback = form.querySelector('[data-selection-feedback]');
+    if (!choices.length || !submit) continue;
+    const sync = () => {
+      const selected = choices.filter((choice) => choice.checked).length;
+      submit.disabled = selected === 0;
+      if (feedback) {
+        feedback.textContent = selected
+          ? `${selected} formulário(s) selecionado(s).`
+          : 'Selecione ao menos um formulário.';
+      }
+    };
+    for (const choice of choices) choice.addEventListener('change', sync);
+    sync();
+  }
+}
+
 setupWhatsAppActions();
 setupActionDisclosures();
 setupLostDialog();
 setupNavigationDrawer();
 setupFilterDrawer();
+setupRequiredSelections();
 setupFormLoading();

@@ -42,3 +42,12 @@
 Os testes de views inspecionam landmarks, headings, rótulos, CSRF, escape XSS,
 cards, tabela, drawers e paginação. O CSS declara breakpoints para 360–767px,
 768–1023px, 1024px e 1440px+, além de movimento reduzido e zoom de 200%.
+
+## Integrações e monitoramento
+
+- Operações em lote expõem contagem textual junto ao `progressbar`.
+- Seleções Meta usam fieldset, legend e feedback com `role="status"`.
+- Tabelas de eventos, jobs, conexões e instâncias ganham cards até 767px.
+- Status nunca depende apenas de cor; falhas usam texto e alerta.
+- IDs e cursores ficam em `details`, acessíveis por teclado.
+- Confirmações usam o diálogo nativo do navegador e preservam a proteção CSRF.

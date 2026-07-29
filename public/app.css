@@ -328,6 +328,51 @@
   .timeline { margin: 0; padding: 0; list-style: none; }
   .timeline li { position: relative; margin-left: 7px; padding: 0 0 var(--space-6) 18px; border-left: 3px solid #a98bd5; }
   .timeline li::before { position: absolute; top: 4px; left: -7px; width: 11px; height: 11px; border-radius: 50%; background: var(--color-brand); content: ""; }
+  .operation-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
+  .operation-source { border-top: 4px solid var(--color-brand); }
+  .file-source { border-top-color: var(--stage-qualified); }
+  .eyebrow { display: block; margin-bottom: var(--space-1); color: var(--color-text-secondary); font-size: var(--font-caption); font-weight: var(--font-weight-bold); letter-spacing: .06em; text-transform: uppercase; }
+  .selection-list { display: grid; gap: var(--space-2); margin: 0; border: 0; padding: 0; }
+  .selection-list legend { margin-bottom: var(--space-2); font-weight: var(--font-weight-bold); }
+  .selection-option { display: grid; grid-template-columns: 24px minmax(0, 1fr); align-items: start; gap: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-3); background: var(--color-surface); cursor: pointer; }
+  .selection-option:has(input:checked) { border-color: var(--color-brand); background: var(--color-brand-light); }
+  .selection-option input { width: 22px; min-height: 22px; margin-top: 1px; }
+  .selection-option small { display: block; margin-top: var(--space-1); color: var(--color-text-secondary); }
+  .selection-feedback { margin: 0; color: var(--color-text-secondary); font-size: var(--font-caption); }
+  .date-range { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+  .operation-card-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: var(--space-4); margin-top: var(--space-4); }
+  .operation-card { min-width: 0; border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: var(--space-4); background: var(--color-surface); box-shadow: var(--shadow-sm); }
+  .operation-card > header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-4); }
+  .operation-card h3 { margin: 0; overflow-wrap: anywhere; }
+  .operation-card .actions { margin-top: var(--space-4); }
+  .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(125px, 1fr)); gap: var(--space-3); margin: var(--space-4) 0; }
+  .metric-grid.compact .stat { padding: var(--space-3); }
+  .secondary-stat { opacity: .76; }
+  .attention strong { color: var(--color-error); }
+  .operation-progress { margin: var(--space-4) 0; }
+  .progress-label { display: flex; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-2); font-size: var(--font-label); }
+  .progress-track { height: 10px; overflow: hidden; border-radius: var(--radius-full); background: var(--color-surface-secondary); }
+  .progress-track > span { display: block; height: 100%; border-radius: inherit; background: var(--color-brand); }
+  .result-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--space-2); margin-top: var(--space-4); }
+  .result-groups a { display: flex; min-width: 0; flex-direction: column; border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-3); color: var(--color-text); text-decoration: none; }
+  .result-groups a:hover { border-color: var(--color-brand); background: var(--color-brand-light); }
+  .result-groups strong { font-size: var(--font-h3); }
+  .technical-details { margin-top: var(--space-4); border-top: 1px solid var(--color-border); padding-top: var(--space-3); }
+  .technical-details > summary { min-height: var(--touch-target); color: var(--color-brand); cursor: pointer; font-size: var(--font-label); font-weight: var(--font-weight-bold); }
+  .technical-details dl { display: grid; gap: var(--space-2); margin: var(--space-2) 0 0; }
+  .technical-details dt { color: var(--color-text-secondary); font-size: var(--font-caption); }
+  .technical-details dd { margin: 0; overflow-wrap: anywhere; }
+  .empty-state { grid-column: 1 / -1; border: 1px dashed var(--color-border); border-radius: var(--radius-md); padding: var(--space-6); text-align: center; }
+  .empty-state h3 { margin-bottom: var(--space-2); }
+  .admin-card-list { display: grid; gap: var(--space-4); }
+  .admin-card { min-width: 0; border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: var(--space-4); background: var(--color-surface); }
+  .admin-card > header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-3); }
+  .admin-card h3 { margin: 0; overflow-wrap: anywhere; }
+  .admin-card dl { display: grid; gap: var(--space-2); margin: 0 0 var(--space-3); }
+  .admin-card dl div { min-width: 0; }
+  .admin-card dt { color: var(--color-text-secondary); font-size: var(--font-caption); }
+  .admin-card dd { margin: 0; overflow-wrap: anywhere; }
+  .mobile-admin-only { display: none; }
 
   .icon { width: 18px; height: 18px; flex: 0 0 auto; }
   .lead-actions { position: relative; display: flex; width: min(100%, 290px); flex-direction: column; gap: var(--space-2); }
@@ -439,6 +484,15 @@
     .bulk-toolbar select, .bulk-toolbar input, .bulk-toolbar button, .bulk-toolbar .button-link { width: 100%; min-width: 0; }
     .lead-card .lead-actions { width: 100%; }
     .lead-card .whatsapp-action .whatsapp { width: 100%; }
+    .operation-columns, .date-range { grid-template-columns: 1fr; }
+    .operation-card > header { align-items: flex-start; flex-direction: column; }
+    .operation-card .actions { display: grid; grid-template-columns: 1fr; }
+    .operation-card .actions > *, .operation-card .actions button, .operation-card .actions .button-link { width: 100%; }
+    .result-groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .mobile-admin-only { display: grid; }
+    .desktop-admin-only { display: none; }
+    .admin-card > header { flex-direction: column; }
+    .admin-card form button { width: 100%; }
     .pagination { justify-content: center; }
     .login-card { margin: 7vh var(--space-4); padding: var(--space-6); }
     button, .button-link, .action-button, input, select { min-height: var(--control-height-mobile); }

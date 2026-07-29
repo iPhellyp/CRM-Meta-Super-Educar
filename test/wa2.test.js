@@ -481,6 +481,7 @@ test('lista inversa aceita somente identidade etiquetada sanitizada', async () =
     capturedUrl = url;
     return jsonResponse({ data: [{
       chatId: 'chat-lid-1',
+      jid: '123@lid',
       phoneNormalized: '5538999990000',
       resolution: 'LID_HISTORICAL',
       labels: [{ waLabelId: 'crm-01', name: 'CRM 01' }],
@@ -494,6 +495,7 @@ test('lista inversa aceita somente identidade etiquetada sanitizada', async () =
   );
   assert.deepEqual(rows, [{
     chatId: 'chat-lid-1',
+    jid: '123@lid',
     phoneNormalized: '5538999990000',
     resolution: 'LID_HISTORICAL',
     labels: [{ id: 'crm-01', name: 'CRM 01' }],

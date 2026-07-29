@@ -48,6 +48,7 @@ import {
   listWa2LabeledIdentities,
   removeWa2ChatLabel,
   validateWa2Config,
+  brazilianPhoneAliases,
 } from './wa2.js';
 import {
   isTemporaryWa2LabelError,
@@ -304,9 +305,31 @@ async function processWa2Reconciliation() {
   }
   try {
     const labeledByPhone = await getLabeledIdentityIndex(item.remote_instance_id);
-    const inverseMatches = labeledByPhone.get(phone.phoneNormalized) || [];
+    const inverseMatches = [...brazilianPhoneAliases(phone.phoneNormalized)]
+      .flatMap((alias) => labeledByPhone.get(alias) || [])
+      .filter((row, index, rows) =>
+        rows.findIndex((candidate) => candidate.chatId === row.chatId) === index
+      );
     if (inverseMatches.length > 1) {
       await failWa2ReconciliationItem(item, 'CONFLICT', 'WA2_INVERSE_AMBIGUOUS', false);
+      return true;
+    }
+    if (inverseMatches.length === 1) {
+      const inverse = inverseMatches[0];
+      await completeWa2ReconciliationItem(item, {
+        contact: {
+          id: inverse.chatId,
+          phoneNormalized: phone.phoneNormalized,
+          name: null,
+          jid: `${phone.phoneNormalized}@s.whatsapp.net`,
+        },
+        chat: { id: inverse.chatId, jid: inverse.jid },
+        remoteLabelIds: inverse.labels.map((label) => label.id),
+        resolution: inverse.resolution === 'LID_HISTORICAL'
+          ? 'LID_HISTORICAL'
+          : inverse.phoneNormalized === phone.phoneNormalized ? 'EXACT' : 'ALIAS',
+        labeledCrm: true,
+      });
       return true;
     }
     const resolved = await getWa2ContactByPhone(

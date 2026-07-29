@@ -177,7 +177,7 @@ function individualJidPhone(value) {
   };
 }
 
-function brazilianPhoneAliases(phoneNormalized) {
+export function brazilianPhoneAliases(phoneNormalized) {
   const aliases = new Set([phoneNormalized]);
   if (!/^55\d{10,11}$/.test(phoneNormalized)) return aliases;
   if (phoneNormalized.length === 12) {
@@ -451,8 +451,15 @@ function sanitizeLabeledIdentities(payload) {
         code: 'WA2_RESPONSE_INVALID',
       });
     }
+    const jid = requiredRemoteText(item.jid, 200, 'WA2_RESPONSE_INVALID');
+    if (!['lid', 'individual_phone'].includes(classifyWa2Jid(jid))) {
+      throw new Wa2Error('JID etiquetado WA2 incompatível', {
+        code: 'WA2_RESPONSE_INVALID',
+      });
+    }
     return {
       chatId: validateWa2ResourceId(item.chatId, 'chat'),
+      jid,
       phoneNormalized: item.phoneNormalized == null
         ? null
         : validateNormalizedPhone(item.phoneNormalized),

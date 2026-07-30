@@ -146,6 +146,10 @@ import {
 import { validateWa2ConfirmationState } from './wa2-link-rules.js';
 import { isWa2LabelStage } from './wa2-label-sync.js';
 import {
+  prepareWa2Reconciliation,
+  wa2ReconciliationInstanceIds,
+} from './wa2-reconciliation.js';
+import {
   createWhatsAppActionHandler,
   createWhatsAppOpenedHandler,
 } from './whatsapp-action.js';
@@ -567,27 +571,26 @@ app.post('/operations/file-imports/:id/cancel', async (req, res) => {
 });
 
 app.post('/operations/reconciliations', async (req, res) => {
-  const instanceId = z.string().uuid().safeParse(req.body.instanceId);
-  if (!instanceId.success) {
+  const localInstanceId = z.string().uuid().safeParse(req.body.instanceId);
+  if (!localInstanceId.success) {
     return redirectWith(res, '/operations', 'error', 'Instância inválida.');
   }
   try {
+    const localInstance = await getWa2InstanceLocalById(localInstanceId.data);
+    const ids = wa2ReconciliationInstanceIds(localInstance);
     const candidatePhones = await listWa2ReconciliationCandidatePhones();
-    await rebuildWa2Identities(instanceId.data, candidatePhones);
-    const deadline = Date.now() + 120_000;
-    while (Date.now() < deadline) {
-      const rebuild = await getWa2IdentityRebuildStatus(instanceId.data);
-      if (rebuild.status === 'complete') break;
-      if (rebuild.status === 'failed') {
-        throw new Error('WA2_IDENTITY_REBUILD_FAILED');
-      }
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
-    }
-    if ((await getWa2IdentityRebuildStatus(instanceId.data)).status !== 'complete') {
-      throw new Error('WA2_IDENTITY_REBUILD_TIMEOUT');
-    }
+    await prepareWa2Reconciliation({
+      ids,
+      candidatePhones,
+      health: getWa2Health,
+      getStatus: getWa2InstanceStatus,
+      connect: connectWa2Instance,
+      quickSync: syncWa2Instance,
+      rebuild: rebuildWa2Identities,
+      getRebuildStatus: getWa2IdentityRebuildStatus,
+    });
     await createWa2Reconciliation({
-      instanceId: instanceId.data,
+      instanceId: ids.localInstanceId,
       actor: req.user.sub,
     });
     return redirectWith(res, '/operations', 'message', 'Reconciliação enfileirada.');

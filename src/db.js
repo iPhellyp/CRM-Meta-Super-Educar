@@ -3117,7 +3117,8 @@ export async function listWa2ReconciliationCandidatePhones() {
   return result.rows.map((row) => row.phone);
 }
 
-export async function enqueueDailyWa2Reconciliations() {
+export async function enqueueDailyWa2Reconciliations(readyLocalInstanceIds) {
+  if (!Array.isArray(readyLocalInstanceIds) || readyLocalInstanceIds.length === 0) return 0;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -3140,7 +3141,7 @@ export async function enqueueDailyWa2Reconciliations() {
        )
        SELECT tenant_id, id, 'daily-schedule'
        FROM wa2_instances
-       WHERE tenant_id = $1 AND enabled = true
+       WHERE tenant_id = $1 AND enabled = true AND id = ANY($2::uuid[])
        ON CONFLICT (tenant_id, wa2_instance_id)
          WHERE status IN ('PENDING', 'RUNNING')
        DO NOTHING
@@ -3574,7 +3575,7 @@ export async function listHistoricalOperations() {
     pool.query(
       `SELECT * FROM lead_file_imports
        WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 20`,
-      [tenantId()],
+      [tenantId(), readyLocalInstanceIds],
     ),
     pool.query(
       `SELECT run.*, instance.name AS instance_name,

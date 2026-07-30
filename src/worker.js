@@ -19,6 +19,8 @@ import {
   getMetaSourceContext,
   enqueueDailyWa2Reconciliations,
   getWa2LabelJobContext,
+  listWa2InstancesLocal,
+  listWa2ReconciliationCandidatePhones,
   markMetaEventFailed,
   markMetaEventProcessing,
   markMetaEventSent,
@@ -42,11 +44,17 @@ import {
 } from './meta.js';
 import {
   applyWa2ChatLabel,
+  connectWa2Instance,
+  getWa2Health,
+  getWa2InstanceStatus,
+  getWa2IdentityRebuildStatus,
   getWa2ContactByPhone,
   listWa2LabelEvents,
   listWa2ChatLabels,
   listWa2LabeledIdentities,
   removeWa2ChatLabel,
+  rebuildWa2Identities,
+  syncWa2Instance,
   validateWa2Config,
   brazilianPhoneAliases,
 } from './wa2.js';
@@ -57,6 +65,10 @@ import {
   wa2LabelJobCompletionDecision,
   wa2LabelRetryDelayMs,
 } from './wa2-label-sync.js';
+import {
+  prepareWa2Reconciliation,
+  wa2ReconciliationInstanceIds,
+} from './wa2-reconciliation.js';
 import {
   historicalRetryDelayMs,
   reconciliationFailureResult,
@@ -378,7 +390,24 @@ async function scheduleDailyReconciliationIfNeeded() {
   if (Date.now() - lastDailyScheduleCheckAt < 60_000) return;
   lastDailyScheduleCheckAt = Date.now();
   try {
-    const scheduled = await enqueueDailyWa2Reconciliations();
+    const instances = await listWa2InstancesLocal({ enabledOnly: true });
+    const candidatePhones = await listWa2ReconciliationCandidatePhones();
+    const readyLocalInstanceIds = [];
+    for (const instance of instances) {
+      const ids = wa2ReconciliationInstanceIds(instance);
+      await prepareWa2Reconciliation({
+        ids,
+        candidatePhones,
+        health: getWa2Health,
+        getStatus: getWa2InstanceStatus,
+        connect: connectWa2Instance,
+        quickSync: syncWa2Instance,
+        rebuild: rebuildWa2Identities,
+        getRebuildStatus: getWa2IdentityRebuildStatus,
+      });
+      readyLocalInstanceIds.push(ids.localInstanceId);
+    }
+    const scheduled = await enqueueDailyWa2Reconciliations(readyLocalInstanceIds);
     if (scheduled > 0) {
       console.log(JSON.stringify({
         level: 'info',

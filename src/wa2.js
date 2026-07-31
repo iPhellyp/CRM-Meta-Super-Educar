@@ -13,6 +13,7 @@ const CONNECT_MODES = new Set(['auto', 'resume', 'new_qr']);
 const SYNC_SCOPES = new Set(['quick', 'catalog', 'history']);
 const LABEL_EVENT_OPERATIONS = new Set(['APPLY', 'REMOVE']);
 const LABEL_EVENT_SOURCES = new Set(['INTERNAL_API', 'WHATSAPP', 'UNKNOWN']);
+const INSTANCE_ROLES = new Set(['SALES', 'SUPPORT', 'BILLING', 'POST_SALES', 'AFFILIATE', 'GENERAL']);
 
 export class Wa2Error extends Error {
   constructor(message, {
@@ -509,6 +510,19 @@ function sanitizeInstance(value) {
   };
 }
 
+function sanitizeCreateInstance(payload) {
+  const value = objectPayload(payload);
+  if (typeof value.created !== 'boolean') {
+    throw new Wa2Error('Resposta de criação de instância incompatível', {
+      code: 'WA2_RESPONSE_INVALID',
+    });
+  }
+  return {
+    instance: sanitizeInstance(value.instance),
+    created: value.created,
+  };
+}
+
 function sanitizeInstances(payload) {
   const value = payload?.data ?? payload;
   const instances = Array.isArray(value)
@@ -596,6 +610,28 @@ function sanitizeMutation(payload, operation) {
     status: value.status,
     enqueued: value.enqueued,
     jobId,
+  };
+}
+
+function sanitizeDeleteMutation(payload) {
+  const value = objectPayload(payload);
+  const instanceId = safeText(value.instanceId, 128);
+  if (
+    !instanceId ||
+    !INSTANCE_ID_PATTERN.test(instanceId) ||
+    value.status !== 'deleting' ||
+    typeof value.enqueued !== 'boolean' ||
+    !Object.hasOwn(value, 'jobId')
+  ) {
+    throw new Wa2Error('Resposta de exclusão incompatível', {
+      code: 'WA2_RESPONSE_INVALID',
+    });
+  }
+  return {
+    instanceId,
+    status: value.status,
+    enqueued: value.enqueued,
+    jobId: sanitizeJobId(value.jobId),
   };
 }
 
@@ -835,6 +871,19 @@ export function createWa2Client({
   return {
     getHealth: () => request('/api/internal/v1/health', { parse: sanitizeHealth }),
     listInstances: () => request('/api/internal/v1/instances', { parse: sanitizeInstances }),
+    createInstance: (name, role) => {
+      const normalizedName = String(name || '').trim();
+      if (!normalizedName || normalizedName.length > 200 || !INSTANCE_ROLES.has(role)) {
+        throw new Wa2Error('Dados da instância inválidos', {
+          code: 'WA2_INSTANCE_INPUT_INVALID',
+        });
+      }
+      return request('/api/internal/v1/instances', {
+        method: 'POST',
+        body: { name: normalizedName, role },
+        parse: sanitizeCreateInstance,
+      });
+    },
     listLabelEvents: ({ after = null, limit = 100 } = {}) => {
       if (
         (after != null && !/^[A-Za-z0-9_-]{1,500}$/.test(String(after))) ||
@@ -954,6 +1003,10 @@ export function createWa2Client({
         parse: (payload) => sanitizeMutation(payload, 'sync'),
       });
     },
+    deleteInstance: (instanceId) => request(instancePath(instanceId, ''), {
+      method: 'DELETE',
+      parse: sanitizeDeleteMutation,
+    }),
     disconnectInstance: (instanceId) => request(instancePath(instanceId, '/disconnect'), {
       method: 'POST',
       body: { preserveSession: true },
@@ -968,6 +1021,10 @@ function defaultClient(options) {
 
 export const getWa2Health = (options) => defaultClient(options).getHealth();
 export const listWa2Instances = (options) => defaultClient(options).listInstances();
+export const createWa2Instance = (name, role, options) =>
+  defaultClient(options).createInstance(name, role);
+export const deleteWa2Instance = (instanceId, options) =>
+  defaultClient(options).deleteInstance(instanceId);
 export const listWa2LabelEvents = (page, options) =>
   defaultClient(options).listLabelEvents(page);
 export const getWa2InstanceStatus = (instanceId, options) =>

@@ -442,3 +442,12 @@ setupRequiredSelections();
 setupPwaShell();
 setupOfflineRetry();
 setupFormLoading();
+
+
+{
+  const autoRefreshElement = document.querySelector('[data-auto-refresh-ms]');
+  const autoRefreshMs = Number(autoRefreshElement?.getAttribute('data-auto-refresh-ms') || 0);
+  if (Number.isFinite(autoRefreshMs) && autoRefreshMs >= 1000) {
+    window.setTimeout(() => window.location.reload(), autoRefreshMs);
+  }
+}

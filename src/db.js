@@ -1052,6 +1052,43 @@ export async function listWa2InstancesLocal({ enabledOnly = false } = {}) {
   return result.rows;
 }
 
+export async function disableMissingWa2Instances(remoteInstanceIds) {
+  const ids = [...new Set(
+    (Array.isArray(remoteInstanceIds) ? remoteInstanceIds : [])
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+  )];
+  const result = await pool.query(
+    `UPDATE wa2_instances
+     SET enabled = false,
+         is_default = false,
+         remote_status = 'REMOTE_DELETED',
+         last_error = 'INSTANCE_NOT_FOUND',
+         updated_at = now()
+     WHERE tenant_id = $1
+       AND enabled = true
+       AND NOT (remote_instance_id = ANY($2::text[]))
+     RETURNING *`,
+    [tenantId(), ids],
+  );
+  return result.rows;
+}
+
+export async function disableWa2InstanceByRemoteId(remoteInstanceId) {
+  const result = await pool.query(
+    `UPDATE wa2_instances
+     SET enabled = false,
+         is_default = false,
+         remote_status = 'REMOTE_DELETED',
+         last_error = 'INSTANCE_NOT_FOUND',
+         updated_at = now()
+     WHERE tenant_id = $1 AND remote_instance_id = $2
+     RETURNING *`,
+    [tenantId(), String(remoteInstanceId)],
+  );
+  return result.rows[0] || null;
+}
+
 export async function getWa2InstanceLocalById(id) {
   const result = await pool.query(
     'SELECT * FROM wa2_instances WHERE id = $1 AND tenant_id = $2',

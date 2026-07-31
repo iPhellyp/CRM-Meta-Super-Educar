@@ -16,6 +16,8 @@ import {
   createWa2ContactLink,
   decideWa2StageConfirmation,
   disableWa2Instance,
+  disableMissingWa2Instances,
+  disableWa2InstanceByRemoteId,
   enableWa2Instance,
   enqueueLeadgenJobs,
   enqueueLeadWa2Resync,
@@ -120,6 +122,8 @@ import {
 import {
   Wa2Error,
   connectWa2Instance,
+  createWa2Instance,
+  deleteWa2Instance,
   disconnectWa2Instance,
   getWa2ContactByPhone,
   getWa2Health,
@@ -663,16 +667,28 @@ app.get('/wa2', async (req, res) => {
   let health = null;
   let instances = [];
   let unavailable = false;
-  const localInstances = await listWa2InstancesLocal();
+  let localInstances = await listWa2InstancesLocal();
+
   if (configStatus.state === 'configured') {
     const [healthResult, instancesResult] = await Promise.allSettled([
       getWa2Health(),
       listWa2Instances(),
     ]);
     if (healthResult.status === 'fulfilled') health = healthResult.value;
-    if (instancesResult.status === 'fulfilled') instances = instancesResult.value;
+    if (instancesResult.status === 'fulfilled') {
+      instances = instancesResult.value;
+      await Promise.all(
+        instances.map((instance) => upsertVerifiedWa2Instance(instance, req.user.sub)),
+      );
+      await disableMissingWa2Instances(instances.map((instance) => instance.id));
+      const remoteIds = new Set(instances.map((instance) => instance.id));
+      localInstances = (await listWa2InstancesLocal()).filter(
+        (instance) => remoteIds.has(instance.remote_instance_id),
+      );
+    }
     unavailable = healthResult.status === 'rejected' || instancesResult.status === 'rejected';
   }
+
   res.send(wa2DashboardView({
     configStatus,
     health,
@@ -683,6 +699,59 @@ app.get('/wa2', async (req, res) => {
     error: req.query.error || '',
     csrfToken: issueCsrfToken(req, res),
   }));
+});
+
+app.post('/wa2/instances/create', async (req, res) => {
+  try {
+    const name = z.string().trim().min(1).max(200).parse(req.body.name);
+    const role = z.enum([
+      'SALES', 'SUPPORT', 'BILLING', 'POST_SALES', 'AFFILIATE', 'GENERAL',
+    ]).parse(req.body.role);
+    const created = await createWa2Instance(name, role);
+    await upsertVerifiedWa2Instance(created.instance, req.user.sub);
+    await connectWa2Instance(created.instance.id, 'new_qr');
+    return redirectWith(
+      res,
+      `/wa2/instances/${encodeURIComponent(created.instance.id)}/qr`,
+      'message',
+      'Instância criada. Preparando o mesmo QR para o CRM e o WA2.',
+    );
+  } catch (error) {
+    return redirectWith(res, '/wa2', 'error', wa2LinkErrorMessage(error));
+  }
+});
+
+app.post('/wa2/instances/:id/delete', async (req, res) => {
+  let instanceId = '';
+  try {
+    instanceId = validateWa2InstanceId(req.params.id);
+    if (req.body.confirmation !== 'DELETE_WA2_INSTANCE') {
+      return redirectWith(res, '/wa2', 'error', 'Confirmação de exclusão inválida.');
+    }
+
+    try {
+      await deleteWa2Instance(instanceId);
+    } catch (error) {
+      const alreadyMissing = error instanceof Wa2Error &&
+        (error.remoteCode === 'INSTANCE_NOT_FOUND' || error.status === 404);
+      if (!alreadyMissing) throw error;
+    }
+
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      const remote = await listWa2Instances();
+      if (!remote.some((instance) => instance.id === instanceId)) break;
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+
+    await disableWa2InstanceByRemoteId(instanceId);
+    return redirectWith(res, '/wa2', 'message', 'Instância removida do WA2 e ocultada no CRM.');
+  } catch (error) {
+    const path = instanceId
+      ? `/wa2/instances/${encodeURIComponent(instanceId)}`
+      : '/wa2';
+    return redirectWith(res, path, 'error', wa2LinkErrorMessage(error));
+  }
 });
 
 app.post('/wa2/instances/import', async (req, res) => {
@@ -946,11 +1015,16 @@ app.post('/wa2/instances/:id/connect', async (req, res) => {
     instanceId = validateWa2InstanceId(req.params.id);
     const mode = z.enum(['auto', 'resume', 'new_qr']).parse(req.body.mode);
     await connectWa2Instance(instanceId, mode);
+    const returnPath = mode === 'new_qr'
+      ? `/wa2/instances/${encodeURIComponent(instanceId)}/qr`
+      : `/wa2/instances/${encodeURIComponent(instanceId)}`;
     return redirectWith(
       res,
-      `/wa2/instances/${encodeURIComponent(instanceId)}`,
+      returnPath,
       'message',
-      'Solicitação de conexão enviada ao WA2.',
+      mode === 'new_qr'
+        ? 'Preparando QR no WA2. Esta página será atualizada automaticamente.'
+        : 'Solicitação de conexão enviada ao WA2.',
     );
   } catch (error) {
     const path = instanceId

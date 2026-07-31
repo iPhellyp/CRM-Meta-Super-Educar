@@ -1234,6 +1234,23 @@ export function wa2DashboardView({
         ${configStatus.errors.length ? `<small>${esc(configStatus.errors.join('. '))}</small>` : ''}
       </div>
     </section>
+    <section class="panel">
+      <h2>Criar instância WhatsApp</h2>
+      <form method="post" action="/wa2/instances/create" class="filter-grid">
+        ${csrfField(csrfToken)}
+        <label>Nome<input name="name" required maxlength="200" placeholder="Ex: UNIVC - 2298"></label>
+        <label>Função<select name="role" required>
+          <option value="GENERAL">Geral</option>
+          <option value="SALES">Vendas</option>
+          <option value="SUPPORT">Suporte</option>
+          <option value="BILLING">Cobrança</option>
+          <option value="POST_SALES">Pós-venda</option>
+          <option value="AFFILIATE">Afiliados</option>
+        </select></label>
+        <button>Criar e gerar QR</button>
+      </form>
+      <small>A instância real é criada no WA2 e espelhada automaticamente no CRM.</small>
+    </section>
     <div class="actions">
       <a class="button-link" href="/wa2/labels">Configurar etiquetas CRM</a>
       <a class="button-link" href="/wa2/label-jobs">Acompanhar jobs de etiquetas</a>
@@ -1504,6 +1521,12 @@ export function wa2InstanceView({
           ${csrfField(csrfToken)}
           <button class="small danger">Desconectar preservando sessão</button>
         </form>
+        <form method="post" action="/wa2/instances/${encodeURIComponent(instanceId)}/delete"
+          data-confirm="Excluir esta instância do WA2 e ocultá-la no CRM?">
+          ${csrfField(csrfToken)}
+          <input type="hidden" name="confirmation" value="DELETE_WA2_INSTANCE">
+          <button class="small danger">Excluir instância</button>
+        </form>
       </div>
     </section>
     <a href="/wa2">Voltar para instâncias</a>
@@ -1517,10 +1540,12 @@ export function wa2QrView({ instanceId, status, error = '', csrfToken = '' }) {
       <div><h1>QR da instância</h1><p>O QR é consultado no WA2 e não é armazenado pelo CRM.</p></div>
       <span class="badge ${statusClass(status.status)}">${detailValue(status.status)}</span>
     </section>
-    <section class="panel qr-panel">
+    <section class="panel qr-panel" data-auto-refresh-ms="${['connecting', 'qr'].includes(String(status.status || '').toLowerCase()) ? '3000' : '0'}">
       ${status.requiresQr
         ? `<img class="qr-image" src="/wa2/instances/${encodeURIComponent(instanceId)}/qr/image" alt="QR temporário da instância WA2" referrerpolicy="no-referrer">`
-        : '<p>Esta instância não solicita QR no momento.</p>'}
+        : `<p>${String(status.status || '').toLowerCase() === 'connected'
+          ? 'WhatsApp conectado.'
+          : 'Preparando QR no worker do WA2...'}</p>`}
       <p class="muted">O QR pode expirar. Atualize esta página para consultar novamente o estado da instância.</p>
       <div class="actions">
         <a class="small button-link" href="/wa2/instances/${encodeURIComponent(instanceId)}/qr">Atualizar estado</a>

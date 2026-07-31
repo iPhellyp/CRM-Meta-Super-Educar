@@ -479,9 +479,14 @@ function sanitizeHealth(payload) {
       code: 'WA2_RESPONSE_INVALID',
     });
   }
+  const status = safeText(value.status, 40);
+  const ok = typeof value.ok === 'boolean'
+    ? value.ok
+    : status === 'healthy';
+
   return {
-    ok: value.ok === true,
-    status: safeText(value.status, 40),
+    ok,
+    status,
     service: safeText(value.service, 100),
     version: safeText(value.version, 40),
   };

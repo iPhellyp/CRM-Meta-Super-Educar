@@ -107,7 +107,7 @@ test('backfill é limitado, tenant-safe, reutiliza importação e não roda auto
   assert.doesNotMatch(script, /DELETE|TRUNCATE|UPDATE\s+leads/i);
 });
 
-test('Dockerfile inclui somente o script autorizado de backfill Meta', async () => {
+test('Dockerfile inclui somente os scripts autorizados de backfill Meta', async () => {
   const dockerfile = await readFile(
     new URL('../Dockerfile', import.meta.url),
     'utf8',
@@ -135,6 +135,7 @@ test('Dockerfile inclui somente o script autorizado de backfill Meta', async () 
 
   assert.deepEqual(copiedScriptSources, [
     'scripts/backfill-meta-phones.js',
+    'scripts/backfill-meta-qualified.js',
   ]);
   assert.equal(copiedScriptSources.some((source) => (
     /^\.?\/?scripts\/?$/.test(source)

@@ -135,7 +135,7 @@ test('dashboard prioriza trabalho pendente e recolhe formulários administrativo
     assert.ok(index > previous, `${label} deve respeitar a prioridade visual`);
     previous = index;
   }
-  assert.match(html, /<details class="panel dashboard-tool" id="lead-tools">/);
+  assert.doesNotMatch(html, /Novo lead manual|id="lead-tools"/);
   assert.match(html, /<details class="panel dashboard-tool" id="whatsapp-settings">/);
 });
 

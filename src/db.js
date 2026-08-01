@@ -1798,15 +1798,25 @@ async function enqueueConversionJob(client, event) {
 }
 
 async function ensureMetaEventForStage(client, { lead, stage, eventTime, mode }) {
-  const eventName = getStageEventName(stage);
-  if (!eventName || !lead.meta_lead_id) return { event: null, jobCreated: false };
-  const event = await createOrGetMetaEvent(client, {
-    lead,
-    eventName,
-    eventTime: eventTime || new Date(),
-    mode,
-  });
-  return { event, jobCreated: await enqueueConversionJob(client, event) };
+  if (!lead.meta_lead_id) return { event: null, jobCreated: false };
+  const eventNames = [getStageEventName(stage)];
+  if (['NEGOTIATING', 'OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT'].includes(stage)) {
+    eventNames.unshift('Marketing Qualified Lead');
+  }
+  const uniqueNames = [...new Set(eventNames.filter(Boolean))];
+  let primaryEvent = null;
+  let jobCreated = false;
+  for (const eventName of uniqueNames) {
+    const event = await createOrGetMetaEvent(client, {
+      lead,
+      eventName,
+      eventTime: eventTime || new Date(),
+      mode,
+    });
+    primaryEvent ||= event;
+    jobCreated = (await enqueueConversionJob(client, event)) || jobCreated;
+  }
+  return { event: primaryEvent, jobCreated };
 }
 
 async function enqueueWa2LabelJobs(
@@ -1990,13 +2000,12 @@ export async function moveLeadStage(id, stage, {
     let event = null;
     let jobCreated = false;
     if (eventName && lead.meta_lead_id) {
-      event = await createOrGetMetaEvent(client, {
+      ({ event, jobCreated } = await ensureMetaEventForStage(client, {
         lead,
-        eventName,
+        stage,
         eventTime: timestampColumn ? lead[timestampColumn] : new Date(),
         mode,
-      });
-      jobCreated = await enqueueConversionJob(client, event);
+      }));
       await client.query(
         `UPDATE lead_stage_history
          SET meta_event_id = $3,
@@ -2133,7 +2142,8 @@ export async function backfillMetaQualifiedEvents({ batchSize = 50, execute = fa
     `SELECT lead.*
      FROM leads lead
      WHERE lead.tenant_id = $1
-       AND lead.stage = 'QUALIFIED'
+       AND lead.stage IN ('QUALIFIED', 'NEGOTIATING', 'OPPORTUNITY',
+                          'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT')
        AND lead.meta_lead_id IS NOT NULL
        AND NOT EXISTS (
          SELECT 1 FROM meta_conversion_events event
@@ -2156,7 +2166,7 @@ export async function backfillMetaQualifiedEvents({ batchSize = 50, execute = fa
     for (const lead of candidates.rows) {
       const result = await ensureMetaEventForStage(client, {
         lead,
-        stage: 'QUALIFIED',
+        stage: lead.stage,
         eventTime: lead.qualified_at || lead.updated_at,
         mode: process.env.META_TEST_MODE === 'true' ? 'test' : 'live',
       });

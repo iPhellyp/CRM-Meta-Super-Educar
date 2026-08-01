@@ -849,19 +849,6 @@ export function dashboardView({
       ${stat('Taxa de matrícula', `${counts.matriculationRate}%`)}
     </section>
 
-    <details class="panel dashboard-tool" id="lead-tools">
-      <summary>Novo lead manual</summary>
-      <form method="post" action="/leads" class="grid-form">
-        ${csrfField(csrfToken)}
-        <label>Nome<input name="name" required></label>
-        <label>Telefone<input name="phone"></label>
-        <label>E-mail<input name="email" type="email"></label>
-        <label>Curso<input name="course"></label>
-        <label>Cidade<input name="city"></label>
-        <button type="submit">Adicionar lead</button>
-      </form>
-    </details>
-
     <details class="panel dashboard-tool" id="whatsapp-settings">
       <summary>Mensagem inicial do WhatsApp</summary>
       <p class="muted">Configuração isolada deste tenant. Use {{nome}} para personalizar.</p>

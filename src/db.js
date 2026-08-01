@@ -3154,6 +3154,30 @@ export async function listWa2ReconciliationCandidatePhones() {
   return result.rows.map((row) => row.phone);
 }
 
+export async function hasWa2ReconciliationRunToday() {
+  const result = await pool.query(
+    `SELECT (
+       EXISTS (
+         SELECT 1
+         FROM scheduled_task_runs
+         WHERE tenant_id = $1
+           AND task_name = 'WA2_DAILY_RECONCILIATION'
+           AND local_run_date =
+             (now() AT TIME ZONE 'America/Sao_Paulo')::date
+       )
+       OR EXISTS (
+         SELECT 1
+         FROM wa2_reconciliation_runs
+         WHERE tenant_id = $1
+           AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date =
+             (now() AT TIME ZONE 'America/Sao_Paulo')::date
+       )
+     ) AS scheduled`,
+    [tenantId()],
+  );
+  return result.rows[0]?.scheduled === true;
+}
+
 export async function enqueueDailyWa2Reconciliations(readyLocalInstanceIds) {
   if (!Array.isArray(readyLocalInstanceIds) || readyLocalInstanceIds.length === 0) return 0;
   const client = await pool.connect();

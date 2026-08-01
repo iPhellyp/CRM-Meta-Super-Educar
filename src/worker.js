@@ -18,6 +18,7 @@ import {
   getMetaEventContext,
   getMetaSourceContext,
   enqueueDailyWa2Reconciliations,
+  hasWa2ReconciliationRunToday,
   getWa2LabelJobContext,
   listWa2InstancesLocal,
   listWa2ReconciliationCandidatePhones,
@@ -390,6 +391,7 @@ async function scheduleDailyReconciliationIfNeeded() {
   if (Date.now() - lastDailyScheduleCheckAt < 60_000) return;
   lastDailyScheduleCheckAt = Date.now();
   try {
+    if (await hasWa2ReconciliationRunToday()) return;
     const instances = await listWa2InstancesLocal({ enabledOnly: true });
     const candidatePhones = await listWa2ReconciliationCandidatePhones();
     const readyLocalInstanceIds = [];

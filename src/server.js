@@ -403,11 +403,11 @@ app.use(requireAuth);
 
 app.get('/api/leads/changes', async (req, res) => {
   res.set('Cache-Control', 'no-store');
-  const rawCursor = String(req.query.cursor || '1970-01-01T00:00:00.000Z');
-  const parsed = new Date(rawCursor);
-  if (!Number.isFinite(parsed.getTime())) return res.status(400).json({ error: 'INVALID_CURSOR' });
+  const rawCursor = String(req.query.cursor || '');
   const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
-  const { changes } = await listLeadChangesSince(parsed.toISOString(), limit);
+  let page;
+  try { page = await listLeadChangesSince(rawCursor || null, limit); } catch { return res.status(400).json({ error: 'INVALID_CURSOR' }); }
+  const { changes } = page;
   const leads = [];
   for (const change of changes) {
     const lead = await getLeadById(change.leadId);
@@ -427,7 +427,7 @@ app.get('/api/leads/changes', async (req, res) => {
       });
     }
   }
-  res.json({ cursor: new Date().toISOString(), leads });
+  res.json({ cursor: page.nextCursor, hasMore: page.hasMore, leads });
 });
 
 function singleLeadFile(req, res, next) {

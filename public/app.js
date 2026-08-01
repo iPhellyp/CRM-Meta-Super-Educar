@@ -445,7 +445,7 @@ setupFormLoading();
 
 function setupLeadChangesPolling() {
   if (!document.querySelector('[data-lead-id]')) return;
-  let cursor = new Date(0).toISOString();
+  let cursor = document.querySelector('[data-lead-changes-start]')?.getAttribute('data-lead-changes-start') || '';
   let running = false;
   let timer = 0;
   const poll = async () => {
@@ -481,6 +481,7 @@ function setupLeadChangesPolling() {
           if (replacement) { card.replaceWith(replacement); if (checked) replacement.querySelector('.lead-select')?.click(); }
         }
       }
+      if (data.hasMore) { await poll(); return; }
     } catch { /* reconecta no próximo ciclo */ }
     finally { running = false; }
   };

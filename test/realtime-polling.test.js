@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+process.env.DATABASE_URL ||= 'postgresql://test:test@localhost:5432/test';
+const { encodeLeadChangesCursor, decodeLeadChangesCursor } = await import('../src/db.js');
+
+test('cursor de mudanças é composto, opaco e reversível', () => {
+  const encoded = encodeLeadChangesCursor('2026-08-01T23:21:15.357Z', '11111111-1111-4111-8111-111111111111');
+  assert.notEqual(encoded, '2026-08-01T23:21:15.357Z');
+  const decoded = decodeLeadChangesCursor(encoded);
+  assert.equal(decoded.changedAt.toISOString(), '2026-08-01T23:21:15.357Z');
+  assert.equal(decoded.leadId, '11111111-1111-4111-8111-111111111111');
+});
+
+test('cursor legado por timestamp continua válido e cursor inválido é rejeitado', () => {
+  const decoded = decodeLeadChangesCursor('2026-08-01T23:21:15.357Z');
+  assert.equal(decoded.changedAt.toISOString(), '2026-08-01T23:21:15.357Z');
+  assert.throws(() => decodeLeadChangesCursor('not-a-cursor'), /INVALID_CURSOR/);
+});
+
+test('renderização compartilhada preserva fragmentos completos e identificador do lead', async () => {
+  const { renderLeadRow, renderLeadCard } = await import('../src/views.js');
+  const lead = { id: '11111111-1111-4111-8111-111111111111', name: '<img src=x>', stage: 'QUALIFIED', course: 'EJA', city: 'Montes', source: 'MANUAL', created_at: '2026-08-01T23:00:00Z', phone: null, email: null, wa2_labels: [{ id: '36', name: 'FEZ PROVA' }], mql_status: 'SENT', opportunity_status: null };
+  const row = renderLeadRow(lead, { csrfToken: 'csrf', returnPath: '/?stage=QUALIFIED', whatsappMessage: 'Oi {{nome}}' });
+  const card = renderLeadCard(lead, { csrfToken: 'csrf', returnPath: '/?stage=QUALIFIED', whatsappMessage: 'Oi {{nome}}' });
+  assert.match(row, /<tr data-lead-id=/);
+  assert.match(card, /<article class="lead-card" data-lead-id=/);
+  assert.match(row, /FEZ PROVA/);
+  assert.match(row, /value="csrf"/);
+  assert.match(row, /returnTo/);
+  assert.doesNotMatch(row, /<img src=x>/);
+});

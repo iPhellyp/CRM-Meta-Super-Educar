@@ -3636,7 +3636,7 @@ export async function listHistoricalOperations() {
     pool.query(
       `SELECT * FROM lead_file_imports
        WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 20`,
-      [tenantId(), readyLocalInstanceIds],
+      [tenantId()],
     ),
     pool.query(
       `SELECT run.*, instance.name AS instance_name,

@@ -42,6 +42,11 @@ test('endpoint de mudanças é autenticado, sem cache e preserva filtros da pág
   assert.match(route, /cardHtml: renderLeadCard/);
   assert.match(route, /removed: true/);
   assert.doesNotMatch(route, /max\s*\(status\)/i);
+  const dbSource = fs.readFileSync(new URL('../src/db.js', import.meta.url), 'utf8');
+  const changesQuery = dbSource.slice(dbSource.indexOf('export async function listLeadChangesSince'), dbSource.indexOf('export async function getTenantWhatsAppMessage'));
+  assert.match(changesQuery, /wa2_inbound_label_actions/);
+  assert.match(changesQuery, /wa2_label_event_receipts/);
+  assert.match(changesQuery, /changed_at/);
 });
 
 test('polling envia os filtros atuais e não recarrega a página', () => {

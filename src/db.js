@@ -389,8 +389,17 @@ export async function listLeadChangesSince(cursorValue = null, limit = 50) {
   const result = await pool.query(
     `WITH changes AS (
        SELECT id AS lead_id, updated_at AS changed_at FROM leads WHERE tenant_id = $1
-       UNION ALL SELECT lead_id, created_at FROM lead_stage_history WHERE tenant_id = $1
-       UNION ALL SELECT lead_id, created_at FROM wa2_label_event_receipts WHERE tenant_id = $1
+       UNION ALL SELECT lead_id, changed_at FROM lead_stage_history WHERE tenant_id = $1
+       UNION ALL
+       SELECT action.lead_id, receipt.received_at
+       FROM wa2_inbound_label_actions action
+       JOIN wa2_label_event_receipts receipt
+         ON receipt.tenant_id = action.tenant_id AND receipt.id = action.receipt_id
+       WHERE action.tenant_id = $1 AND action.lead_id IS NOT NULL
+       UNION ALL
+       SELECT action.lead_id, action.processed_at
+       FROM wa2_inbound_label_actions action
+       WHERE action.tenant_id = $1 AND action.lead_id IS NOT NULL AND action.processed_at IS NOT NULL
        UNION ALL SELECT lead_id, updated_at FROM meta_conversion_events WHERE tenant_id = $1
      )
      SELECT lead_id, MAX(changed_at) AS changed_at

@@ -1776,7 +1776,37 @@ async function enqueueConversionJob(client, event) {
      RETURNING id`,
     [event.tenant_id, `conversion:${event.event_id}`, { eventId: event.id }],
   );
-  return result.rowCount === 1;
+  if (result.rowCount === 1) return true;
+  const requeued = await client.query(
+    `UPDATE meta_jobs
+     SET status = 'RETRY', attempts = 0, last_error = NULL,
+         next_attempt_at = now(), locked_at = NULL, completed_at = NULL,
+         updated_at = now()
+     WHERE tenant_id = $1 AND dedupe_key = $2
+       AND status IN ('FAILED', 'COMPLETED')
+     RETURNING id`,
+    [event.tenant_id, `conversion:${event.event_id}`],
+  );
+  if (!requeued.rowCount) return false;
+  await client.query(
+    `UPDATE meta_conversion_events
+     SET status = 'RETRY', attempts = 0, last_error = NULL, updated_at = now()
+     WHERE id = $1 AND tenant_id = $2 AND status <> 'SENT'`,
+    [event.id, event.tenant_id],
+  );
+  return true;
+}
+
+async function ensureMetaEventForStage(client, { lead, stage, eventTime, mode }) {
+  const eventName = getStageEventName(stage);
+  if (!eventName || !lead.meta_lead_id) return { event: null, jobCreated: false };
+  const event = await createOrGetMetaEvent(client, {
+    lead,
+    eventName,
+    eventTime: eventTime || new Date(),
+    mode,
+  });
+  return { event, jobCreated: await enqueueConversionJob(client, event) };
 }
 
 async function enqueueWa2LabelJobs(
@@ -2095,6 +2125,52 @@ export async function enqueueLeadgenJobs(payload) {
   }
 
   return { accepted, duplicates: jobs.length - accepted };
+}
+
+export async function backfillMetaQualifiedEvents({ batchSize = 50, execute = false } = {}) {
+  const limit = Math.max(1, Math.min(Number(batchSize) || 50, 500));
+  const candidates = await pool.query(
+    `SELECT lead.*
+     FROM leads lead
+     WHERE lead.tenant_id = $1
+       AND lead.stage = 'QUALIFIED'
+       AND lead.meta_lead_id IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM meta_conversion_events event
+         WHERE event.tenant_id = lead.tenant_id
+           AND event.lead_id = lead.id
+           AND event.event_name = 'Marketing Qualified Lead'
+       )
+     ORDER BY lead.updated_at, lead.id
+     LIMIT $2`,
+    [tenantId(), limit],
+  );
+  if (!execute || candidates.rowCount === 0) {
+    return { selected: candidates.rows.length, created: 0, queued: 0, leads: candidates.rows };
+  }
+  const client = await pool.connect();
+  let created = 0;
+  let queued = 0;
+  try {
+    await client.query('BEGIN');
+    for (const lead of candidates.rows) {
+      const result = await ensureMetaEventForStage(client, {
+        lead,
+        stage: 'QUALIFIED',
+        eventTime: lead.qualified_at || lead.updated_at,
+        mode: process.env.META_TEST_MODE === 'true' ? 'test' : 'live',
+      });
+      if (result.event) created += 1;
+      if (result.jobCreated) queued += 1;
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+  return { selected: candidates.rows.length, created, queued, leads: candidates.rows };
 }
 
 export async function getDashboardCounts({ createdAfter = operationStartAt() } = {}) {
@@ -3381,12 +3457,13 @@ export async function completeWa2ReconciliationItem(
         const timestampUpdate = timestampColumn
           ? `, ${timestampColumn} = COALESCE(${timestampColumn}, now())`
           : '';
-        await client.query(
+        const updated = await client.query(
           `UPDATE leads SET stage = $3, updated_at = now() ${timestampUpdate},
              lost_reason = CASE WHEN $3 = 'LOST' THEN 'OTHER' ELSE NULL END,
              lost_notes = CASE WHEN $3 = 'LOST'
                THEN 'Perda recebida na reconciliação WA2.' ELSE NULL END
-           WHERE tenant_id = $1 AND id = $2`,
+           WHERE tenant_id = $1 AND id = $2
+           RETURNING *`,
           [tenantId(), row.lead_id, decision.targetStage],
         );
         await client.query(
@@ -3400,6 +3477,12 @@ export async function completeWa2ReconciliationItem(
            )`,
           [tenantId(), row.lead_id, row.stage, decision.targetStage],
         );
+        await ensureMetaEventForStage(client, {
+          lead: updated.rows[0],
+          stage: decision.targetStage,
+          eventTime: new Date(row.created_at || Date.now()),
+          mode: process.env.META_TEST_MODE === 'true' ? 'test' : 'live',
+        });
       } else if (['CONFLICT', 'PENDING_CONFIRMATION'].includes(decision.action)) {
         await finishReconciliationItem(client, row, 'CONFLICT');
         await client.query('COMMIT');

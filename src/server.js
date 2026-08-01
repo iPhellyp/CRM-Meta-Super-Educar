@@ -380,6 +380,7 @@ app.post('/internal/wa2/label-events', async (req, res) => {
     eventId: z.string().uuid(), instanceId: z.string().min(1).max(200),
     chatId: z.string().min(1).max(200), jid: z.string().min(1).max(200),
     phoneNormalized: z.string().nullable().optional(), waLabelId: z.string().min(1).max(200),
+    waLabelName: z.string().min(1).max(200).nullable().optional(),
     operation: z.enum(['APPLY', 'REMOVE']), source: z.enum(['WHATSAPP', 'INTERNAL_API', 'UNKNOWN']),
     observedAt: z.string().datetime(), eligibleForCrm: z.boolean(),
     ineligibleReason: z.string().nullable().optional(), correlationKey: z.string().nullable().optional(),

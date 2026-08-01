@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   canonicalInboundStage,
+  canAdvanceByOfficialCrmLabel,
   decideInboundLabelAction,
   historicalRetryDelayMs,
   reconciliationFailureResult,
@@ -142,6 +143,26 @@ test('backoff é limitado e resultados de reconciliação são legíveis', () =>
   assert.equal(reconciliationFailureResult({ remoteCode: 'LID_UNRESOLVED' }), 'LID_UNRESOLVED');
   assert.equal(reconciliationFailureResult({ remoteCode: 'WA2_CONTACT_NOT_FOUND' }), 'NOT_FOUND_IN_WA2');
   assert.equal(reconciliationFailureResult({ code: 'other' }), 'ERROR');
+});
+
+test('etiquetas oficiais permitem apenas avanços comerciais diretos', () => {
+  const cases = [
+    ['NEW', 'QUALIFIED'], ['NEW', 'NEGOTIATING'], ['NEW', 'OPPORTUNITY'],
+    ['QUALIFIED', 'NEGOTIATING'], ['QUALIFIED', 'OPPORTUNITY'],
+    ['NEGOTIATING', 'OPPORTUNITY'],
+  ];
+  for (const [current, desired] of cases) {
+    assert.equal(canAdvanceByOfficialCrmLabel(current, desired), true, `${current} -> ${desired}`);
+    const result = decideInboundLabelAction({
+      event: baseEvent,
+      currentStage: current,
+      eventBindingStages: [desired],
+      currentCrmLabelStages: [[desired]],
+    });
+    assert.equal(result.action, 'STAGE_CHANGED', `${current} -> ${desired}: ${result.code}`);
+  }
+  assert.equal(canAdvanceByOfficialCrmLabel('OPPORTUNITY', 'QUALIFIED'), false);
+  assert.equal(canAdvanceByOfficialCrmLabel('NEW', 'ENROLLED'), false);
 });
 
 test('erro histórico preserva causa remota e classifica HTTP sem mascarar', () => {

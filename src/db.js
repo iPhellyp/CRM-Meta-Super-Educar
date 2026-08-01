@@ -365,6 +365,59 @@ export async function getLeadById(id) {
   return result.rows[0] || null;
 }
 
+export function encodeLeadChangesCursor(changedAt, leadId) {
+  return Buffer.from(JSON.stringify({ changedAt: new Date(changedAt).toISOString(), leadId }), 'utf8').toString('base64url');
+}
+
+const EMPTY_LEAD_CURSOR = '00000000-0000-0000-0000-000000000000';
+export function decodeLeadChangesCursor(value) {
+  if (!value) return { changedAt: new Date(0), leadId: EMPTY_LEAD_CURSOR };
+  try {
+    const parsed = JSON.parse(Buffer.from(String(value), 'base64url').toString('utf8'));
+    const changedAt = new Date(parsed.changedAt);
+    if (!parsed.leadId || !Number.isFinite(changedAt.getTime())) throw new Error('invalid cursor');
+    return { changedAt, leadId: String(parsed.leadId) };
+  } catch {
+    const changedAt = new Date(value);
+    if (Number.isFinite(changedAt.getTime())) return { changedAt, leadId: EMPTY_LEAD_CURSOR };
+    throw new Error('INVALID_CURSOR');
+  }
+}
+
+export async function listLeadChangesSince(cursorValue = null, limit = 50) {
+  const cursor = decodeLeadChangesCursor(cursorValue);
+  const result = await pool.query(
+    `WITH changes AS (
+       SELECT id AS lead_id, updated_at AS changed_at FROM leads WHERE tenant_id = $1
+       UNION ALL SELECT lead_id, changed_at FROM lead_stage_history WHERE tenant_id = $1
+       UNION ALL
+       SELECT action.lead_id, receipt.received_at
+       FROM wa2_inbound_label_actions action
+       JOIN wa2_label_event_receipts receipt
+         ON receipt.tenant_id = action.tenant_id AND receipt.id = action.receipt_id
+       WHERE action.tenant_id = $1 AND action.lead_id IS NOT NULL
+       UNION ALL
+       SELECT action.lead_id, action.processed_at
+       FROM wa2_inbound_label_actions action
+       WHERE action.tenant_id = $1 AND action.lead_id IS NOT NULL AND action.processed_at IS NOT NULL
+       UNION ALL SELECT lead_id, updated_at FROM meta_conversion_events WHERE tenant_id = $1
+     )
+     SELECT lead_id, MAX(changed_at) AS changed_at
+     FROM changes WHERE lead_id IS NOT NULL AND (changed_at, lead_id) > ($2, $3)
+     GROUP BY lead_id ORDER BY changed_at ASC, lead_id ASC LIMIT $4`,
+    [tenantId(), cursor.changedAt, cursor.leadId, Math.min(Math.max(Number(limit) || 50, 1), 100) + 1],
+  );
+  const max = Math.min(Math.max(Number(limit) || 50, 1), 100);
+  const hasMore = result.rows.length > max;
+  const selected = hasMore ? result.rows.slice(0, max) : result.rows;
+  const last = selected.at(-1);
+  return {
+    hasMore,
+    nextCursor: last ? encodeLeadChangesCursor(last.changed_at, last.lead_id) : cursorValue,
+    changes: selected.map((row) => ({ leadId: row.lead_id, changedAt: new Date(row.changed_at).toISOString() })),
+  };
+}
+
 export async function getTenantWhatsAppMessage() {
   const result = await pool.query(
     `SELECT whatsapp_initial_message FROM tenant_settings WHERE tenant_id = $1`,
@@ -2993,16 +3046,12 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
           `Evento WA2 ${event.eventId}`,
         ],
       );
-      const eventName = getStageEventName(decision.targetStage);
-      if (eventName && lead.meta_lead_id) {
-        const metaEvent = await createOrGetMetaEvent(client, {
-          lead: updated.rows[0],
-          eventName,
-          eventTime: new Date(event.observedAt),
-          mode: process.env.META_TEST_MODE === 'true' ? 'test' : 'live',
-        });
-        await enqueueConversionJob(client, metaEvent);
-      }
+      await ensureMetaEventForStage(client, {
+        lead: updated.rows[0],
+        stage: decision.targetStage,
+        eventTime: new Date(event.observedAt),
+        mode: process.env.META_TEST_MODE === 'true' ? 'test' : 'live',
+      });
       void history;
     }
     await client.query('COMMIT');

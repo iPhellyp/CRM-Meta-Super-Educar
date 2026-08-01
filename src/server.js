@@ -73,6 +73,8 @@ import {
   updateMetaConnectionValidation,
   updateMetaConnectionName,
   updateMetaDatasetValidation,
+  processWa2LabelEvent,
+  listLeadChangesSince,
 } from './db.js';
 import { runStartupMigrations } from './startup-migrations.js';
 import {
@@ -118,6 +120,8 @@ import {
   wa2LabelBindingsView,
   wa2LabelJobsView,
   wa2QrView,
+  renderLeadRow,
+  renderLeadCard,
 } from './views.js';
 import {
   Wa2Error,
@@ -369,7 +373,115 @@ app.post('/webhooks/meta/leadgen', async (req, res) => {
   }
 });
 
+app.post('/internal/wa2/label-events', async (req, res) => {
+  const expected = String(process.env.CRM_INTERNAL_API_SECRET || '').trim();
+  const supplied = String(req.get('authorization') || '').replace(/^Bearer\s+/i, '').trim();
+  if (!expected || supplied.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) {
+    return res.status(401).json({ error: 'UNAUTHORIZED' });
+  }
+  const schema = z.object({
+    eventId: z.string().uuid(), instanceId: z.string().min(1).max(200),
+    chatId: z.string().min(1).max(200), jid: z.string().min(1).max(200),
+    phoneNormalized: z.string().nullable().optional(), waLabelId: z.string().min(1).max(200),
+    waLabelName: z.string().min(1).max(200).nullable().optional(),
+    operation: z.enum(['APPLY', 'REMOVE']), source: z.enum(['WHATSAPP', 'INTERNAL_API', 'UNKNOWN']),
+    observedAt: z.string().datetime(), eligibleForCrm: z.boolean(),
+    ineligibleReason: z.string().nullable().optional(), correlationKey: z.string().nullable().optional(),
+    currentRemoteLabelIds: z.array(z.string().min(1).max(200)).max(100).optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'INVALID_PAYLOAD' });
+  try {
+    const result = await processWa2LabelEvent(parsed.data, parsed.data.currentRemoteLabelIds || []);
+    return res.status(result.duplicate ? 200 : 202).json({ ok: true, ...result });
+  } catch {
+    return res.status(503).json({ error: 'PROCESSING_UNAVAILABLE' });
+  }
+});
+
 app.use(requireAuth);
+
+function dashboardFiltersFromQuery(query = {}) {
+  const page = Math.min(Math.max(Number.parseInt(query.page, 10) || 1, 1), 10_000);
+  const dateFrom = parseCalendarDate(query.dateFrom);
+  const dateTo = parseCalendarDate(query.dateTo, { endOfDay: true });
+  const filters = {
+    search: String(query.search || '').trim().slice(0, 200),
+    course: String(query.course || '').trim().slice(0, 200),
+    city: String(query.city || '').trim().slice(0, 200),
+    stage: String(query.stage || ''),
+    commercial: query.commercial === 'mql' ? 'mql' : '',
+    lostReason: String(query.lostReason || ''),
+    instanceId: String(query.instanceId || ''),
+    labelId: String(query.labelId || '').trim().slice(0, 200),
+    metaConnectionId: String(query.metaConnectionId || ''),
+    businessId: String(query.businessId || '').trim().slice(0, 100),
+    pageId: String(query.pageId || '').trim().slice(0, 100),
+    formId: String(query.formId || '').trim().slice(0, 100),
+    campaignId: String(query.campaignId || '').trim().slice(0, 200),
+    adsetId: String(query.adsetId || '').trim().slice(0, 200),
+    adId: String(query.adId || '').trim().slice(0, 200),
+    attributed: ['yes', 'no'].includes(query.attributed) ? query.attributed : '',
+    validPhone: ['yes', 'no'].includes(query.validPhone) ? query.validPhone : '',
+    unattended: query.unattended === 'yes' ? 'yes' : '',
+    dateFrom: dateFrom.raw,
+    dateTo: dateTo.raw,
+    createdAfter: dateFrom.date || operationStartAt(),
+    createdBefore: dateTo.date,
+    sort: ['recent', 'oldest', 'stage', 'unattended', 'updated', 'conversation'].includes(query.sort)
+      ? query.sort
+      : 'recent',
+    page,
+    limit: 101,
+    offset: (page - 1) * 100,
+  };
+  if (!Object.hasOwn(STAGE_LABELS, filters.stage)) filters.stage = '';
+  if (!Object.hasOwn(LOST_REASON_LABELS, filters.lostReason)) filters.lostReason = '';
+  if (!z.string().uuid().safeParse(filters.instanceId).success) filters.instanceId = '';
+  if (!z.string().uuid().safeParse(filters.metaConnectionId).success) filters.metaConnectionId = '';
+  return filters;
+}
+
+app.get('/api/leads/changes', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const rawCursor = String(req.query.cursor || '');
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
+  let page;
+  try { page = await listLeadChangesSince(rawCursor || null, limit); } catch { return res.status(400).json({ error: 'INVALID_CURSOR' }); }
+  const filters = dashboardFiltersFromQuery(req.query);
+  const currentPage = await listLeads(filters);
+  const currentPageIds = new Set(currentPage.slice(0, 100).map((lead) => lead.id));
+  const csrfToken = issueCsrfToken(req, res);
+  const whatsappMessage = await getTenantWhatsAppMessage();
+  const returnQuery = new URLSearchParams();
+  for (const [key, value] of Object.entries(req.query)) {
+    if (key !== 'cursor' && key !== 'limit' && typeof value === 'string' && value) returnQuery.set(key, value);
+  }
+  const returnPath = returnQuery.toString() ? `/?${returnQuery.toString()}` : '/';
+  const { changes } = page;
+  const leads = [];
+  for (const change of changes) {
+    const lead = await getLeadById(change.leadId);
+    if (lead && currentPageIds.has(lead.id)) {
+      const renderOptions = { csrfToken, returnPath, whatsappMessage };
+      leads.push({
+        leadId: lead.id,
+        lead,
+        rowHtml: renderLeadRow(lead, renderOptions),
+        cardHtml: renderLeadCard(lead, renderOptions),
+        stage: lead.stage,
+        labels: lead.wa2_labels || [],
+        mqlStatus: lead.mql_status || null,
+        opportunityStatus: lead.opportunity_status || null,
+        updatedAt: change.changedAt,
+        removed: false,
+      });
+    } else if (!lead || !currentPageIds.has(change.leadId)) {
+      leads.push({ leadId: change.leadId, removed: true, updatedAt: change.changedAt });
+    }
+  }
+  res.json({ cursor: page.nextCursor, hasMore: page.hasMore, leads });
+});
 
 function singleLeadFile(req, res, next) {
   req.setTimeout(LEAD_FILE_TIMEOUT_MS);

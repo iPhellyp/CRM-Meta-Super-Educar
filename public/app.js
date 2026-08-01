@@ -5,8 +5,8 @@ function setContextMessage(region, message, { error = false } = {}) {
   region.setAttribute('role', error ? 'alert' : 'status');
 }
 
-function setupCopyPhoneActions() {
-  for (const button of document.querySelectorAll('[data-copy-phone]')) {
+function setupCopyPhoneActions(root = document) {
+  for (const button of root.querySelectorAll('[data-copy-phone]')) {
     button.addEventListener('click', async (event) => {
       const phone = event.currentTarget.dataset.copyPhone;
       const status = event.currentTarget.closest('.whatsapp-action')
@@ -31,8 +31,8 @@ function setupCopyPhoneActions() {
   }
 }
 
-function setupWhatsAppLogging() {
-  for (const link of document.querySelectorAll('[data-whatsapp-link]')) {
+function setupWhatsAppLogging(root = document) {
+  for (const link of root.querySelectorAll('[data-whatsapp-link]')) {
     link.addEventListener('click', () => {
       const url = link.dataset.whatsappLogUrl;
       const csrf = link.dataset.whatsappCsrf;
@@ -442,6 +442,74 @@ setupRequiredSelections();
 setupPwaShell();
 setupOfflineRetry();
 setupFormLoading();
+
+function setupLeadChangesPolling() {
+  if (!document.querySelector('[data-lead-id]')) return;
+  let cursor = document.querySelector('[data-lead-changes-start]')?.getAttribute('data-lead-changes-start') || '';
+  let running = false;
+  let timer = 0;
+  const poll = async () => {
+    if (running || document.hidden) return;
+    running = true;
+    try {
+      const query = new URLSearchParams(window.location.search);
+      query.delete('cursor');
+      query.delete('limit');
+      query.set('cursor', cursor);
+      const response = await fetch(`/api/leads/changes?${query.toString()}`, {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { accept: 'application/json' },
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (typeof data.cursor === 'string') cursor = data.cursor;
+      for (const item of Array.isArray(data.leads) ? data.leads : []) {
+        const lead = item?.lead;
+        if (!lead?.id) continue;
+        const selector = `[data-lead-id="${CSS.escape(String(lead.id))}"]`;
+        const nodes = [...document.querySelectorAll(selector)];
+        const checked = nodes.flatMap((node) => [...node.querySelectorAll('input.lead-select:checked')]).length > 0;
+        const row = document.querySelector(`tr${selector}`);
+        const card = document.querySelector(`article${selector}`);
+        if (item.removed) {
+          if (row || card) {
+            row?.remove(); card?.remove();
+            const notice = document.querySelector('[data-lead-update-notice]');
+            if (notice) notice.textContent = 'A lista foi atualizada com os filtros atuais.';
+          }
+          continue;
+        }
+        if (row && item.rowHtml) {
+          const replacement = document.createRange().createContextualFragment(item.rowHtml).firstElementChild;
+          if (replacement) {
+            row.replaceWith(replacement);
+            setupCopyPhoneActions(replacement);
+            setupWhatsAppLogging(replacement);
+            if (checked) replacement.querySelector('.lead-select')?.click();
+          }
+        }
+        if (card && item.cardHtml) {
+          const replacement = document.createRange().createContextualFragment(item.cardHtml).firstElementChild;
+          if (replacement) {
+            card.replaceWith(replacement);
+            setupCopyPhoneActions(replacement);
+            setupWhatsAppLogging(replacement);
+            if (checked) replacement.querySelector('.lead-select')?.click();
+          }
+        }
+      }
+      if (data.hasMore) { await poll(); return; }
+    } catch { /* reconecta no próximo ciclo */ }
+    finally { running = false; }
+  };
+  const schedule = () => { window.clearTimeout(timer); timer = window.setTimeout(async () => { await poll(); schedule(); }, 2000); };
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { void poll(); schedule(); } });
+  void poll();
+  schedule();
+}
+
+setupLeadChangesPolling();
 
 
 {

@@ -127,7 +127,8 @@ test('dashboard preserva ações agrupadas e cache bust v11', () => {
   const views = read('src/views.js');
   assert.match(views, /class="nav-group"/);
   assert.match(views, /Abrir no WhatsApp/);
-  assert.match(views, /Atualizar etapa/);
+  assert.match(views, /class="inline-stage-actions"/);
+  assert.doesNotMatch(views, /<summary>Atualizar etapa<\/summary>/);
   assert.match(views, /Mais ações/);
   assert.match(views, /app\.css\?v=12/);
   assert.match(views, /app\.js\?v=12/);

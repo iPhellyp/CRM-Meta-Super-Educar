@@ -182,7 +182,7 @@ test('interface abre WhatsApp sem confundir com Atendimento e registra históric
   assert.doesNotMatch(views, /data-whatsapp-form/);
   assert.match(views, /aria-live="polite"/);
   assert.match(views, /Abrir no WhatsApp/);
-  assert.match(views, /Atualizar etapa/);
+  assert.match(views, /class="inline-stage-actions"/);
   assert.match(views, /Mais ações/);
   assert.match(views, /Encerrar lead/);
   assert.match(server, /app\.post\('\/leads\/:id\/whatsapp'/);
@@ -242,7 +242,8 @@ test('dashboard renderiza WhatsApp protegido por CSRF, filtros e paginação', (
   assert.doesNotMatch(html, /data-whatsapp-form/);
   assert.match(html, /role="status" aria-live="polite" aria-atomic="true"/);
   assert.match(html, />Abrir no WhatsApp</);
-  assert.match(html, />Atualizar etapa</);
+  assert.match(html, /class="inline-stage-actions"/);
+  assert.doesNotMatch(html, /<summary>Atualizar etapa<\/summary>/);
   assert.match(html, />Mais ações</);
   assert.doesNotMatch(html, /[◉⚙✕]/);
   assert.equal((html.match(/data-lost-lead=/g) || []).length, 2);
@@ -257,7 +258,7 @@ test('dashboard renderiza WhatsApp protegido por CSRF, filtros e paginação', (
     html.indexOf('<td data-label="Ações"'),
     html.indexOf('</td>', html.indexOf('<td data-label="Ações"')),
   );
-  assert.doesNotMatch(actionCell, />\s*(Perder|Sem interesse|Telefone inválido|Duplicado)\s*</);
+  assert.match(actionCell, /data-lost-lead=/);
   assert.match(html, /Entrada desde/);
   assert.match(html, /Etiqueta WA2 \(ID ou nome\)/);
   assert.match(html, /Página 2/);

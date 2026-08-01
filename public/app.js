@@ -443,6 +443,55 @@ setupPwaShell();
 setupOfflineRetry();
 setupFormLoading();
 
+function setupLeadChangesPolling() {
+  if (!document.querySelector('[data-lead-id]')) return;
+  let cursor = new Date(0).toISOString();
+  let running = false;
+  let timer = 0;
+  const poll = async () => {
+    if (running || document.hidden) return;
+    running = true;
+    try {
+      const response = await fetch(`/api/leads/changes?cursor=${encodeURIComponent(cursor)}`, {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { accept: 'application/json' },
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (typeof data.cursor === 'string') cursor = data.cursor;
+      for (const item of Array.isArray(data.leads) ? data.leads : []) {
+        const lead = item?.lead;
+        if (!lead?.id) continue;
+        const selector = `[data-lead-id="${CSS.escape(String(lead.id))}"]`;
+        const nodes = [...document.querySelectorAll(selector)];
+        const checked = nodes.flatMap((node) => [...node.querySelectorAll('input.lead-select:checked')]).length > 0;
+        const row = document.querySelector(`tr${selector}`);
+        const card = document.querySelector(`article${selector}`);
+        if (item.removed) {
+          row?.remove(); card?.remove();
+          continue;
+        }
+        if (row && item.rowHtml) {
+          const replacement = document.createRange().createContextualFragment(item.rowHtml).firstElementChild;
+          if (replacement) { row.replaceWith(replacement); if (checked) replacement.querySelector('.lead-select')?.click(); }
+        }
+        if (card && item.cardHtml) {
+          const replacement = document.createRange().createContextualFragment(item.cardHtml).firstElementChild;
+          if (replacement) { card.replaceWith(replacement); if (checked) replacement.querySelector('.lead-select')?.click(); }
+        }
+      }
+    } catch { /* reconecta no próximo ciclo */ }
+    finally { running = false; }
+  };
+  const schedule = () => { window.clearTimeout(timer); timer = window.setTimeout(async () => { await poll(); schedule(); }, 2000); };
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { void poll(); schedule(); } });
+  void poll();
+  schedule();
+}
+
+setupLeadChangesPolling();
+
 
 {
   const autoRefreshElement = document.querySelector('[data-auto-refresh-ms]');

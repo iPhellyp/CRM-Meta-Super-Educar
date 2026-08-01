@@ -365,6 +365,27 @@ export async function getLeadById(id) {
   return result.rows[0] || null;
 }
 
+export async function listLeadChangesSince(cursorValue = '1970-01-01T00:00:00.000Z', limit = 50) {
+  const cursor = new Date(cursorValue);
+  const since = Number.isFinite(cursor.getTime()) ? cursor : new Date(0);
+  const result = await pool.query(
+    `WITH changes AS (
+       SELECT id AS lead_id, updated_at AS changed_at FROM leads WHERE tenant_id = $1 AND updated_at > $2
+       UNION ALL
+       SELECT lead_id, created_at FROM lead_stage_history WHERE tenant_id = $1 AND created_at > $2
+       UNION ALL
+       SELECT lead_id, created_at FROM wa2_label_event_receipts WHERE tenant_id = $1 AND created_at > $2
+       UNION ALL
+       SELECT lead_id, updated_at FROM meta_conversion_events WHERE tenant_id = $1 AND updated_at > $2
+     )
+     SELECT lead_id, MAX(changed_at) AS changed_at
+     FROM changes WHERE lead_id IS NOT NULL
+     GROUP BY lead_id ORDER BY changed_at ASC LIMIT $3`,
+    [tenantId(), since, Math.min(Math.max(Number(limit) || 50, 1), 100)],
+  );
+  return { changes: result.rows.map((row) => ({ leadId: row.lead_id, changedAt: new Date(row.changed_at).toISOString() })) };
+}
+
 export async function getTenantWhatsAppMessage() {
   const result = await pool.query(
     `SELECT whatsapp_initial_message FROM tenant_settings WHERE tenant_id = $1`,

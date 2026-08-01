@@ -724,6 +724,28 @@ function leadActions(lead, csrfToken, returnPath = '/', whatsappMessage = '') {
   </div>`;
 }
 
+export function renderLeadRow(lead, { csrfToken = '', returnPath = '/', whatsappMessage = '' } = {}) {
+  const arrival = formatArrival(lead.received_at || lead.created_at);
+  return `<tr data-lead-id="${esc(lead.id)}">
+    <td data-label="Selecionar"><input class="lead-select" form="bulk-leads" type="checkbox" name="leadIds" value="${esc(lead.id)}" aria-label="Selecionar ${esc(lead.name)}"></td>
+    <td data-label="Lead"><strong><a href="/leads/${esc(lead.id)}">${esc(lead.name)}</a></strong><small>${esc(lead.phone || 'Sem telefone')}${lead.email ? `<br>${esc(lead.email)}` : ''}</small></td>
+    <td data-label="Curso e cidade"><strong>${esc(lead.course || 'Curso não informado')}</strong><small>${esc(lead.city || 'Cidade não informada')}</small></td>
+    <td data-label="Origem e chegada"><strong>${esc(sourceLabel(lead.source))}</strong><small>${esc(arrival.date)}${arrival.time ? ` · ${esc(arrival.time)}` : ''}</small>${leadOriginDetails(lead)}</td>
+    <td data-label="Etapa"><span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span>${lead.lost_reason ? `<small>Motivo: ${esc(LOST_REASON_LABELS[lead.lost_reason] || lead.lost_reason)}</small>` : ''}</td>
+    <td data-label="Etiquetas"><div class="wa2-tags">${wa2Labels(lead, { compact: true })}</div>${metaStatusMarkup(lead)}</td>
+    <td data-label="Ações" class="actions-cell">${leadActions(lead, csrfToken, returnPath, whatsappMessage)}</td>
+  </tr>`;
+}
+
+export function renderLeadCard(lead, { csrfToken = '', returnPath = '/', whatsappMessage = '' } = {}) {
+  const arrival = formatArrival(lead.received_at || lead.created_at);
+  return `<article class="lead-card" data-lead-id="${esc(lead.id)}" aria-labelledby="lead-card-${esc(lead.id)}">
+    <div class="lead-card-heading"><div><input class="lead-select" form="bulk-leads" type="checkbox" name="leadIds" value="${esc(lead.id)}" aria-label="Selecionar ${esc(lead.name)}"><h3 id="lead-card-${esc(lead.id)}"><a href="/leads/${esc(lead.id)}">${esc(lead.name)}</a></h3></div><span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span></div>
+    <dl class="lead-card-summary"><div><dt>Curso</dt><dd>${esc(lead.course || 'Não informado')}</dd></div><div><dt>Cidade</dt><dd>${esc(lead.city || 'Não informada')}</dd></div><div><dt>Origem e chegada</dt><dd>${esc(sourceLabel(lead.source))} · ${esc(arrival.date)}${arrival.time ? ` às ${esc(arrival.time)}` : ''}</dd></div><div><dt>Telefone</dt><dd>${esc(lead.phone || 'Sem telefone')}</dd></div></dl>
+    <div class="wa2-tags">${wa2Labels(lead, { compact: true })}</div>${metaStatusMarkup(lead)}${leadOriginDetails(lead)}${leadActions(lead, csrfToken, returnPath, whatsappMessage)}
+  </article>`;
+}
+
 export function dashboardView({
   leads,
   counts,
@@ -739,49 +761,8 @@ export function dashboardView({
   csrfToken = '',
 }) {
   const returnPath = `/?${dashboardFilterQuery(filters)}`;
-  const rows = leads.map((lead) => {
-    const arrival = formatArrival(lead.received_at || lead.created_at);
-    return `
-      <tr>
-        <td data-label="Selecionar"><input class="lead-select" form="bulk-leads" type="checkbox" name="leadIds" value="${esc(lead.id)}" aria-label="Selecionar ${esc(lead.name)}"></td>
-        <td data-label="Lead">
-          <strong><a href="/leads/${esc(lead.id)}">${esc(lead.name)}</a></strong>
-          <small>${esc(lead.phone || 'Sem telefone')}${lead.email ? `<br>${esc(lead.email)}` : ''}</small>
-        </td>
-        <td data-label="Curso e cidade"><strong>${esc(lead.course || 'Curso não informado')}</strong><small>${esc(lead.city || 'Cidade não informada')}</small></td>
-        <td data-label="Origem e chegada">
-          <strong>${esc(sourceLabel(lead.source))}</strong>
-          <small>${esc(arrival.date)}${arrival.time ? ` · ${esc(arrival.time)}` : ''}</small>
-          ${leadOriginDetails(lead)}
-        </td>
-        <td data-label="Etapa"><span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span>${lead.lost_reason ? `<small>Motivo: ${esc(LOST_REASON_LABELS[lead.lost_reason] || lead.lost_reason)}</small>` : ''}</td>
-        <td data-label="Etiquetas"><div class="wa2-tags">${wa2Labels(lead, { compact: true })}</div>${metaStatusMarkup(lead)}</td>
-        <td data-label="Ações" class="actions-cell">
-          ${leadActions(lead, csrfToken, returnPath, whatsappMessage)}
-        </td>
-      </tr>`;
-  }).join('');
-  const cards = leads.map((lead) => {
-    const arrival = formatArrival(lead.received_at || lead.created_at);
-    return `<article class="lead-card" aria-labelledby="lead-card-${esc(lead.id)}">
-      <div class="lead-card-heading">
-        <div><input class="lead-select" form="bulk-leads" type="checkbox" name="leadIds"
-          value="${esc(lead.id)}" aria-label="Selecionar ${esc(lead.name)}">
-          <h3 id="lead-card-${esc(lead.id)}"><a href="/leads/${esc(lead.id)}">${esc(lead.name)}</a></h3></div>
-        <span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span>
-      </div>
-      <dl class="lead-card-summary">
-        <div><dt>Curso</dt><dd>${esc(lead.course || 'Não informado')}</dd></div>
-        <div><dt>Cidade</dt><dd>${esc(lead.city || 'Não informada')}</dd></div>
-        <div><dt>Origem e chegada</dt><dd>${esc(sourceLabel(lead.source))} · ${esc(arrival.date)}${arrival.time ? ` às ${esc(arrival.time)}` : ''}</dd></div>
-        <div><dt>Telefone</dt><dd>${esc(lead.phone || 'Sem telefone')}</dd></div>
-      </dl>
-      <div class="wa2-tags">${wa2Labels(lead, { compact: true })}</div>
-      ${metaStatusMarkup(lead)}
-      ${leadOriginDetails(lead)}
-      ${leadActions(lead, csrfToken, returnPath, whatsappMessage)}
-    </article>`;
-  }).join('');
+  const rows = leads.map((lead) => renderLeadRow(lead, { csrfToken, returnPath, whatsappMessage })).join('');
+  const cards = leads.map((lead) => renderLeadCard(lead, { csrfToken, returnPath, whatsappMessage })).join('');
   const appliedFilters = activeDashboardFilters(filters);
 
   return layout('Leads', `

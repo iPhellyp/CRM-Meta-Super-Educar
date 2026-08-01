@@ -59,7 +59,7 @@ test('budgets mantêm shell leve e HTML de 100 leads controlado', () => {
   });
   assert.ok(Buffer.byteLength(html) < 2_500_000, 'HTML com 100 leads deve ficar abaixo de 2,5 MiB');
   assert.equal((html.match(/class="lead-card"/g) || []).length, 100);
-  assert.equal((html.match(/<tr>/g) || []).length >= 101, true);
+  assert.equal((html.match(/<tr data-lead-id=/g) || []).length >= 100, true);
 });
 
 test('SheetJS permanece exclusivamente no servidor', () => {

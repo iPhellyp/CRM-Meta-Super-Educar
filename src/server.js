@@ -74,6 +74,7 @@ import {
   updateMetaConnectionName,
   updateMetaDatasetValidation,
   processWa2LabelEvent,
+  listLeadChangesSince,
 } from './db.js';
 import { runStartupMigrations } from './startup-migrations.js';
 import {
@@ -119,6 +120,8 @@ import {
   wa2LabelBindingsView,
   wa2LabelJobsView,
   wa2QrView,
+  renderLeadRow,
+  renderLeadCard,
 } from './views.js';
 import {
   Wa2Error,
@@ -397,6 +400,35 @@ app.post('/internal/wa2/label-events', async (req, res) => {
 });
 
 app.use(requireAuth);
+
+app.get('/api/leads/changes', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const rawCursor = String(req.query.cursor || '1970-01-01T00:00:00.000Z');
+  const parsed = new Date(rawCursor);
+  if (!Number.isFinite(parsed.getTime())) return res.status(400).json({ error: 'INVALID_CURSOR' });
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
+  const { changes } = await listLeadChangesSince(parsed.toISOString(), limit);
+  const leads = [];
+  for (const change of changes) {
+    const lead = await getLeadById(change.leadId);
+    if (lead) {
+      const renderOptions = { csrfToken: issueCsrfToken(req, res), returnPath: '/', whatsappMessage: '' };
+      leads.push({
+        leadId: lead.id,
+        lead,
+        rowHtml: renderLeadRow(lead, renderOptions),
+        cardHtml: renderLeadCard(lead, renderOptions),
+        stage: lead.stage,
+        labels: lead.wa2_labels || [],
+        mqlStatus: lead.mql_status || null,
+        opportunityStatus: lead.opportunity_status || null,
+        updatedAt: change.changedAt,
+        removed: false,
+      });
+    }
+  }
+  res.json({ cursor: new Date().toISOString(), leads });
+});
 
 function singleLeadFile(req, res, next) {
   req.setTimeout(LEAD_FILE_TIMEOUT_MS);

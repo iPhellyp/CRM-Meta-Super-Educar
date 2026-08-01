@@ -145,6 +145,7 @@ export async function listLeads({
   offset = 0,
 } = {}) {
   const values = [tenantId()];
+  const currentMetaMode = process.env.META_TEST_MODE === 'true' ? 'test' : 'live';
   const where = ['leads.tenant_id = $1'];
 
   if (stage) {
@@ -300,10 +301,15 @@ export async function listLeads({
        WHERE current.remote_label_id IS NOT NULL AND current.operation = 'APPLY'
      ) wa2_labels ON true
      LEFT JOIN LATERAL (
-       SELECT max(status) FILTER (WHERE event_name = 'Marketing Qualified Lead') AS mql_status,
-              max(status) FILTER (WHERE event_name = 'Sales Opportunity') AS opportunity_status
-       FROM meta_conversion_events
-       WHERE tenant_id = leads.tenant_id AND lead_id = leads.id
+       SELECT
+         (SELECT event.status FROM meta_conversion_events event
+          WHERE event.tenant_id = leads.tenant_id AND event.lead_id = leads.id
+            AND event.event_id = concat('crm:', leads.id, ':marketing_qualified_lead:', '${currentMetaMode}')
+          ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS mql_status,
+         (SELECT event.status FROM meta_conversion_events event
+          WHERE event.tenant_id = leads.tenant_id AND event.lead_id = leads.id
+            AND event.event_id = concat('crm:', leads.id, ':sales_opportunity:', '${currentMetaMode}')
+          ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS opportunity_status
      ) meta_status ON true
      ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
      ORDER BY ${orderBy} LIMIT $${limitIndex} OFFSET $${values.length}`,
@@ -313,6 +319,7 @@ export async function listLeads({
 }
 
 export async function getLeadById(id) {
+  const currentMetaMode = process.env.META_TEST_MODE === 'true' ? 'test' : 'live';
   const result = await pool.query(
     `SELECT leads.*,
        instance.name AS wa2_instance_name,
@@ -342,9 +349,15 @@ export async function getLeadById(id) {
        WHERE current.operation = 'APPLY'
      ) labels ON true
      LEFT JOIN LATERAL (
-       SELECT max(status) FILTER (WHERE event_name = 'Marketing Qualified Lead') AS mql_status,
-              max(status) FILTER (WHERE event_name = 'Sales Opportunity') AS opportunity_status
-       FROM meta_conversion_events WHERE tenant_id=leads.tenant_id AND lead_id=leads.id
+       SELECT
+         (SELECT event.status FROM meta_conversion_events event
+          WHERE event.tenant_id=leads.tenant_id AND event.lead_id=leads.id
+            AND event.event_id = concat('crm:', leads.id, ':marketing_qualified_lead:', '${currentMetaMode}')
+          ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS mql_status,
+         (SELECT event.status FROM meta_conversion_events event
+          WHERE event.tenant_id=leads.tenant_id AND event.lead_id=leads.id
+            AND event.event_id = concat('crm:', leads.id, ':sales_opportunity:', '${currentMetaMode}')
+          ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS opportunity_status
      ) meta_status ON true
      WHERE leads.id = $1 AND leads.tenant_id = $2`,
     [id, tenantId()],

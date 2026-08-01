@@ -198,6 +198,14 @@ test('interface abre WhatsApp sem confundir com Atendimento e registra históric
   assert.doesNotMatch(views, /encrypted_access_token|encrypted_app_secret/);
 });
 
+test('status visual Meta seleciona o event_id do modo atual sem max(status)', async () => {
+  const database = await read('src/db.js');
+  assert.doesNotMatch(database, /max\(status\).*mql_status|mql_status.*max\(status\)/s);
+  assert.match(database, /marketing_qualified_lead:/);
+  assert.match(database, /sales_opportunity:/);
+  assert.match(database, /ORDER BY event\.updated_at DESC, event\.created_at DESC LIMIT 1/);
+});
+
 test('agenda diária WA2 é persistente e inicia após 00h01', async () => {
   const database = await read('src/db.js');
   const worker = await read('src/worker.js');

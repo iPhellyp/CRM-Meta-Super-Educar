@@ -1389,6 +1389,7 @@ app.get('/', async (req, res) => {
     course: String(req.query.course || '').trim().slice(0, 200),
     city: String(req.query.city || '').trim().slice(0, 200),
     stage: String(req.query.stage || ''),
+    commercial: req.query.commercial === 'mql' ? 'mql' : '',
     lostReason: String(req.query.lostReason || ''),
     instanceId: String(req.query.instanceId || ''),
     labelId: String(req.query.labelId || '').trim().slice(0, 200),

@@ -25,6 +25,29 @@ function csrfField(csrfToken) {
   return `<input type="hidden" name="_csrf" value="${esc(csrfToken)}">`;
 }
 
+const HIDDEN_WA2_LABELS = new Set(['Favoritos', 'Não lidas', 'Grupos', 'GERAL', 'SALAS ALUGAR']);
+function wa2Labels(lead, { compact = false } = {}) {
+  const labels = Array.isArray(lead.wa2_labels) ? lead.wa2_labels : [];
+  const visible = labels.filter((label) => label?.name && (!compact || !HIDDEN_WA2_LABELS.has(label.name)));
+  const shown = compact ? visible.slice(0, 3) : visible;
+  const extra = visible.length - shown.length;
+  return `${shown.map((label) => `<span class="wa2-tag">${esc(label.name)}</span>`).join('')}${extra > 0 ? `<span class="wa2-tag wa2-tag-more">+${extra}</span>` : ''}` || '<span class="muted">Sem etiquetas externas</span>';
+}
+
+function metaEventBadge(label, status, attributable) {
+  if (!attributable) return `<span class="meta-status muted">${esc(label)} não atribuível</span>`;
+  const text = status === 'SENT' ? 'enviado' : status === 'FAILED' ? 'falhou' : status ? 'pendente' : 'não criado';
+  return `<span class="meta-status meta-${String(status || 'pending').toLowerCase()}">${esc(label)} ${text}</span>`;
+}
+
+function metaStatusMarkup(lead) {
+  const attributable = Boolean(lead.meta_lead_id);
+  const mql = metaEventBadge('MQL', lead.mql_status, attributable);
+  const opportunity = ['NEGOTIATING', 'OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT'].includes(lead.stage)
+    ? metaEventBadge('Sales Opportunity', lead.opportunity_status, attributable) : '';
+  return `<div class="meta-statuses">${mql}${opportunity}</div>`;
+}
+
 const ICON_PATHS = Object.freeze({
   whatsapp: '<path d="M21 11.5a8.38 8.38 0 0 1-9 8.5 9.5 9.5 0 0 1-4-.9L3 21l1.9-4.6A8.5 8.5 0 1 1 21 11.5Z"/><path d="M8.5 8.5c.5 3 2 4.5 5 5l1.5-1.5 2 1v2c0 1-1 2-2 2A10 10 0 0 1 7 9c0-1 1-2 2-2h2l1 2-1.5 1.5"/>',
   stage: '<path d="M4 7h10"/><path d="m11 4 3 3-3 3"/><path d="M20 17H10"/><path d="m13 14-3 3 3 3"/>',
@@ -593,7 +616,7 @@ function dashboardFilterQuery(filters, overrides = {}) {
   const source = { ...filters, ...overrides };
   const params = new URLSearchParams();
   for (const key of [
-    'search', 'course', 'city', 'stage', 'lostReason', 'instanceId', 'labelId',
+    'search', 'course', 'city', 'stage', 'commercial', 'lostReason', 'instanceId', 'labelId',
     'metaConnectionId', 'businessId', 'pageId', 'formId', 'campaignId',
     'adsetId', 'adId', 'attributed', 'validPhone', 'unattended',
     'dateFrom', 'dateTo', 'sort', 'page',
@@ -606,7 +629,7 @@ function dashboardFilterQuery(filters, overrides = {}) {
 }
 
 const ADVANCED_FILTER_KEYS = Object.freeze([
-  'course', 'city', 'stage', 'lostReason', 'instanceId', 'labelId',
+    'course', 'city', 'stage', 'commercial', 'lostReason', 'instanceId', 'labelId',
   'metaConnectionId', 'businessId', 'pageId', 'formId', 'campaignId',
   'adsetId', 'adId', 'attributed', 'validPhone', 'unattended',
   'dateFrom', 'dateTo', 'sort',
@@ -614,7 +637,7 @@ const ADVANCED_FILTER_KEYS = Object.freeze([
 
 function activeDashboardFilters(filters) {
   const labels = {
-    search: 'Busca', course: 'Curso', city: 'Cidade', stage: 'Etapa',
+    search: 'Busca', course: 'Curso', city: 'Cidade', stage: 'Etapa', commercial: 'Filtro comercial',
     lostReason: 'Motivo', instanceId: 'Instância WA2', labelId: 'Etiqueta WA2',
     metaConnectionId: 'Conexão Meta', businessId: 'BM', pageId: 'Página',
     formId: 'Formulário', campaignId: 'Campanha', adsetId: 'Conjunto',
@@ -740,6 +763,7 @@ export function dashboardView({
           ${leadOriginDetails(lead)}
         </td>
         <td data-label="Etapa"><span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span>${lead.lost_reason ? `<small>Motivo: ${esc(LOST_REASON_LABELS[lead.lost_reason] || lead.lost_reason)}</small>` : ''}</td>
+        <td data-label="Etiquetas"><div class="wa2-tags">${wa2Labels(lead, { compact: true })}</div>${metaStatusMarkup(lead)}</td>
         <td data-label="Ações" class="actions-cell">
           ${leadActions(lead, csrfToken, returnPath, whatsappMessage)}
         </td>
@@ -760,6 +784,8 @@ export function dashboardView({
         <div><dt>Origem e chegada</dt><dd>${esc(sourceLabel(lead.source))} · ${esc(arrival.date)}${arrival.time ? ` às ${esc(arrival.time)}` : ''}</dd></div>
         <div><dt>Telefone</dt><dd>${esc(lead.phone || 'Sem telefone')}</dd></div>
       </dl>
+      <div class="wa2-tags">${wa2Labels(lead, { compact: true })}</div>
+      ${metaStatusMarkup(lead)}
       ${leadOriginDetails(lead)}
       ${leadActions(lead, csrfToken, returnPath, whatsappMessage)}
     </article>`;
@@ -812,9 +838,10 @@ export function dashboardView({
         <label>Curso/interesse<input name="course" value="${esc(filters.course || '')}"></label>
         <label>Cidade<input name="city" value="${esc(filters.city || '')}"></label>
         <label>Etapa<select name="stage"><option value="">Todas</option>${Object.entries(STAGE_LABELS).map(([value, label]) => `<option value="${value}"${filters.stage === value ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
+        <label>Filtro comercial<select name="commercial"><option value="">Todos</option><option value="mql"${filters.commercial === 'mql' ? ' selected' : ''}>Qualificados — CRM 02 a CRM 04</option></select></label>
         <label>Motivo da perda<select name="lostReason"><option value="">Todos</option>${Object.entries(LOST_REASON_LABELS).map(([value, label]) => `<option value="${value}"${filters.lostReason === value ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
         <label>Instância WA2<select name="instanceId"><option value="">Todas</option>${wa2Instances.map((instance) => `<option value="${esc(instance.id)}"${filters.instanceId === instance.id ? ' selected' : ''}>${detailValue(instance.name || instance.remote_instance_id)}</option>`).join('')}</select></label>
-        <label>Etiqueta WA2 (ID)<input name="labelId" value="${esc(filters.labelId || '')}"></label>
+        <label>Etiqueta WA2 (ID ou nome)<input name="labelId" value="${esc(filters.labelId || '')}"></label>
         <label>Conexão Meta<select name="metaConnectionId"><option value="">Todas</option>${metaConnections.map((connection) => `<option value="${esc(connection.id)}"${filters.metaConnectionId === connection.id ? ' selected' : ''}>${esc(connection.name)}</option>`).join('')}</select></label>
         <label>BM<input name="businessId" value="${esc(filters.businessId || '')}" inputmode="numeric"></label>
         <label>Página<input name="pageId" value="${esc(filters.pageId || '')}"></label>
@@ -954,7 +981,10 @@ export function leadDetailView({
       <div><strong>Dataset</strong><span>${detailValue(lead.dataset_id)}</span></div>
       <div><strong>Motivo da perda</strong><span>${detailValue(LOST_REASON_LABELS[lead.lost_reason] || lead.lost_reason)}</span></div>
       <div><strong>Observação da perda</strong><span>${detailValue(lead.lost_notes)}</span></div>
+      <div><strong>Instância WhatsApp</strong><span>${detailValue(lead.wa2_instance_name)}</span></div>
+      <div><strong>Última sincronização WA2</strong><span>${detailValue(lead.wa2_labels_synced_at ? formatDateTime(lead.wa2_labels_synced_at) : null)}</span></div>
     </section>
+    <section class="panel"><div class="panel-title"><h2>Etiquetas WhatsApp</h2><div class="wa2-tags">${wa2Labels(lead)}</div></div>${metaStatusMarkup(lead)}</section>
     <section class="panel">
       <div class="panel-title"><h2>Linha do tempo</h2><span>${history.length} evento(s)</span></div>
       <ol class="timeline">${timeline || '<li>Nenhuma atividade registrada.</li>'}</ol>
@@ -1314,6 +1344,8 @@ export function wa2LabelBindingsView({
   const incomplete = selectedInstance
     ? WA2_LABEL_STAGES.filter((stage) => !bindingByStage.get(stage)?.enabled).length
     : 0;
+  const bindingWarnings = ['NEGOTIATING', 'OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT']
+    .filter((stage) => bindingByStage.get(stage)?.remote_label_name === 'CRM 02 - Qualificado');
   const stageRows = selectedInstance
     ? WA2_LABEL_STAGES.map((stage) => {
       const expectedName = getWa2StageLabelName(stage);
@@ -1380,6 +1412,7 @@ export function wa2LabelBindingsView({
       <div><h1>Etapas CRM → etiquetas WA2</h1><p>Os IDs remotos são confirmados no servidor antes de serem salvos.</p></div>
       ${selectedInstance ? `<div class="meta-box ${incomplete ? 'pending' : 'ready'}"><strong>${incomplete} binding(s) incompleto(s)</strong><span>${detailValue(selectedInstance.name || selectedInstance.remote_instance_id)}</span></div>` : ''}
     </section>
+    ${bindingWarnings.length ? `<div class="alert warning">Configuração de binding a revisar: ${bindingWarnings.map((stage) => `${esc(stage)} deve apontar para ${stage === 'NEGOTIATING' ? 'CRM 03' : 'CRM 04'}`).join('; ')}. Nenhuma alteração foi aplicada.</div>` : ''}
     <section class="panel">
       <form method="get" action="/wa2/labels" class="stack compact-form">
         <label>Instância local

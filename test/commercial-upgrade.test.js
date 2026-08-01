@@ -251,7 +251,7 @@ test('dashboard renderiza WhatsApp protegido por CSRF, filtros e paginação', (
   );
   assert.doesNotMatch(actionCell, />\s*(Perder|Sem interesse|Telefone inválido|Duplicado)\s*</);
   assert.match(html, /Entrada desde/);
-  assert.match(html, /Etiqueta WA2 \(ID\)/);
+  assert.match(html, /Etiqueta WA2 \(ID ou nome\)/);
   assert.match(html, /Página 2/);
   assert.match(html, /Próxima →/);
 });

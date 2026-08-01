@@ -121,6 +121,7 @@ export async function healthcheck() {
 
 export async function listLeads({
   stage,
+  commercial,
   search,
   course,
   city,
@@ -149,6 +150,9 @@ export async function listLeads({
   if (stage) {
     values.push(stage);
     where.push(`leads.stage = $${values.length}`);
+  }
+  if (commercial === 'mql') {
+    where.push(`leads.stage IN ('QUALIFIED', 'NEGOTIATING', 'OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT')`);
   }
 
   if (search) {
@@ -192,11 +196,18 @@ export async function listLeads({
   if (labelId) {
     values.push(labelId);
     where.push(`EXISTS (
-      SELECT 1 FROM wa2_label_bindings binding
-      WHERE binding.tenant_id = leads.tenant_id
-        AND binding.stage = leads.stage
-        AND binding.remote_label_id = $${values.length}
-        AND binding.enabled = true
+      SELECT 1 FROM wa2_contact_links link
+      JOIN wa2_label_event_receipts receipt
+        ON receipt.tenant_id = link.tenant_id
+       AND receipt.remote_instance_id = (SELECT remote_instance_id FROM wa2_instances WHERE id = link.wa2_instance_id)
+       AND receipt.remote_chat_id = link.remote_chat_id
+      WHERE link.tenant_id = leads.tenant_id AND link.lead_id = leads.id
+        AND link.unlinked_at IS NULL AND receipt.remote_label_id = $${values.length}
+        AND receipt.operation = 'APPLY'
+        AND NOT EXISTS (SELECT 1 FROM wa2_label_event_receipts removed
+          WHERE removed.tenant_id = receipt.tenant_id AND removed.remote_chat_id = receipt.remote_chat_id
+            AND removed.remote_label_id = receipt.remote_label_id
+            AND removed.operation = 'REMOVE' AND removed.observed_at > receipt.observed_at)
     )`);
   }
   if (attributed === 'yes') where.push('leads.meta_lead_id IS NOT NULL');
@@ -253,6 +264,9 @@ export async function listLeads({
          ORDER BY instance.is_default DESC, instance.created_at
          LIMIT 1
        ) AS wa2_instance_name
+       , wa2_labels.labels AS wa2_labels
+       , wa2_labels.last_sync_at AS wa2_labels_synced_at
+       , meta_status.mql_status, meta_status.opportunity_status
      FROM leads
      LEFT JOIN meta_connections connection
        ON connection.tenant_id = leads.tenant_id
@@ -263,6 +277,34 @@ export async function listLeads({
      LEFT JOIN meta_forms form_record
        ON form_record.tenant_id = leads.tenant_id
       AND form_record.form_id = leads.meta_form_id
+     LEFT JOIN LATERAL (
+       SELECT jsonb_agg(jsonb_build_object('id', current.remote_label_id, 'name', current.remote_label_name)
+                        ORDER BY current.remote_label_name) AS labels,
+              max(current.received_at) AS last_sync_at
+       FROM (
+         SELECT DISTINCT ON (receipt.remote_label_id)
+                receipt.remote_label_id, receipt.received_at, receipt.operation,
+                COALESCE(binding.remote_label_name, receipt.remote_label_id) AS remote_label_name
+         FROM wa2_contact_links link
+         JOIN wa2_instances instance ON instance.tenant_id = link.tenant_id AND instance.id = link.wa2_instance_id
+         JOIN wa2_label_event_receipts receipt
+           ON receipt.tenant_id = link.tenant_id
+          AND receipt.remote_instance_id = instance.remote_instance_id
+          AND receipt.remote_chat_id = link.remote_chat_id
+         LEFT JOIN wa2_label_bindings binding
+           ON binding.tenant_id = link.tenant_id AND binding.wa2_instance_id = link.wa2_instance_id
+          AND binding.remote_label_id = receipt.remote_label_id
+         WHERE link.tenant_id = leads.tenant_id AND link.lead_id = leads.id AND link.unlinked_at IS NULL
+         ORDER BY receipt.remote_label_id, receipt.observed_at DESC, receipt.received_at DESC
+       ) current
+       WHERE current.remote_label_id IS NOT NULL AND current.operation = 'APPLY'
+     ) wa2_labels ON true
+     LEFT JOIN LATERAL (
+       SELECT max(status) FILTER (WHERE event_name = 'Marketing Qualified Lead') AS mql_status,
+              max(status) FILTER (WHERE event_name = 'Sales Opportunity') AS opportunity_status
+       FROM meta_conversion_events
+       WHERE tenant_id = leads.tenant_id AND lead_id = leads.id
+     ) meta_status ON true
      ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
      ORDER BY ${orderBy} LIMIT $${limitIndex} OFFSET $${values.length}`,
     values,
@@ -272,7 +314,39 @@ export async function listLeads({
 
 export async function getLeadById(id) {
   const result = await pool.query(
-    'SELECT * FROM leads WHERE id = $1 AND tenant_id = $2',
+    `SELECT leads.*,
+       instance.name AS wa2_instance_name,
+       labels.labels AS wa2_labels, labels.last_sync_at AS wa2_labels_synced_at,
+       meta_status.mql_status, meta_status.opportunity_status
+     FROM leads
+     LEFT JOIN LATERAL (
+       SELECT instance.name FROM wa2_contact_links link JOIN wa2_instances instance
+         ON instance.tenant_id = link.tenant_id AND instance.id = link.wa2_instance_id
+        WHERE link.tenant_id = leads.tenant_id AND link.lead_id = leads.id AND link.unlinked_at IS NULL
+        ORDER BY instance.is_default DESC, instance.created_at LIMIT 1
+     ) instance ON true
+     LEFT JOIN LATERAL (
+       SELECT jsonb_agg(jsonb_build_object('id', current.remote_label_id, 'name', current.remote_label_name)
+                        ORDER BY current.remote_label_name) AS labels, max(current.received_at) AS last_sync_at
+       FROM (
+         SELECT DISTINCT ON (receipt.remote_label_id) receipt.remote_label_id, receipt.received_at, receipt.operation,
+                COALESCE(binding.remote_label_name, receipt.remote_label_id) AS remote_label_name
+         FROM wa2_contact_links link JOIN wa2_instances wi ON wi.tenant_id=link.tenant_id AND wi.id=link.wa2_instance_id
+         JOIN wa2_label_event_receipts receipt ON receipt.tenant_id=link.tenant_id
+          AND receipt.remote_instance_id=wi.remote_instance_id AND receipt.remote_chat_id=link.remote_chat_id
+         LEFT JOIN wa2_label_bindings binding ON binding.tenant_id=link.tenant_id
+          AND binding.wa2_instance_id=link.wa2_instance_id AND binding.remote_label_id=receipt.remote_label_id
+         WHERE link.tenant_id=leads.tenant_id AND link.lead_id=leads.id AND link.unlinked_at IS NULL
+         ORDER BY receipt.remote_label_id, receipt.observed_at DESC, receipt.received_at DESC
+       ) current
+       WHERE current.operation = 'APPLY'
+     ) labels ON true
+     LEFT JOIN LATERAL (
+       SELECT max(status) FILTER (WHERE event_name = 'Marketing Qualified Lead') AS mql_status,
+              max(status) FILTER (WHERE event_name = 'Sales Opportunity') AS opportunity_status
+       FROM meta_conversion_events WHERE tenant_id=leads.tenant_id AND lead_id=leads.id
+     ) meta_status ON true
+     WHERE leads.id = $1 AND leads.tenant_id = $2`,
     [id, tenantId()],
   );
   return result.rows[0] || null;

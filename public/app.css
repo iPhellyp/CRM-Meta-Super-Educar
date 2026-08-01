@@ -274,7 +274,14 @@
   .badge.opportunity, .badge.negotiating { background: var(--color-warning-bg); color: var(--stage-opportunity); }
   .badge.awaiting-enrollment, .badge.awaiting-payment, .badge.enrolled { background: var(--color-success-bg); color: var(--stage-enrollment); }
   .badge.paid { background: #ccebd8; color: var(--stage-paid); }
-  .badge.lost { background: var(--color-error-bg); color: var(--stage-closed); }
+.badge.lost { background: var(--color-error-bg); color: var(--stage-closed); }
+.wa2-tags, .meta-statuses { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.wa2-tag, .meta-status { display: inline-flex; max-width: 180px; overflow: hidden; border-radius: 999px; padding: 2px 7px; background: #eef1f5; color: #45505c; font-size: .7rem; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.wa2-tag-more { background: #dce4ed; font-weight: 700; }
+.meta-status { background: #e8eef8; color: #315987; }
+.meta-sent { background: #dcf4e5; color: #176b3a; }
+.meta-failed { background: #fde3e5; color: #9d2430; }
+.meta-pending { background: #fff1cf; color: #805b00; }
   .badge.update { background: var(--color-info-bg); color: var(--color-info); }
   .badge.possible-duplicate { background: var(--color-warning-bg); color: var(--color-warning); }
   .badge.invalid { background: var(--color-error-bg); color: var(--color-error); }

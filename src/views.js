@@ -85,8 +85,8 @@ function layout(title, body, { logged = true, csrfToken = '' } = {}) {
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icons/app-icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/icons/app-icon-192.png">
-  <link rel="stylesheet" href="/app.css?v=7">
-  <script src="/app.js?v=7" defer></script>
+  <link rel="stylesheet" href="/app.css?v=8">
+  <script src="/app.js?v=8" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Ir para o conteúdo principal</a>

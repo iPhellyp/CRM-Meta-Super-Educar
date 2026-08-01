@@ -926,7 +926,7 @@ export function createWa2Client({
       { parse: sanitizeLabeledIdentities },
     ),
     rebuildIdentities: (instanceId, phones) => {
-      if (!Array.isArray(phones) || phones.length > 2_000 || phones.some(
+      if (!Array.isArray(phones) || phones.length > 50_000 || phones.some(
         (phone) => !/^55[1-9]\d{9,10}$/.test(String(phone)),
       )) {
         throw new Wa2Error('Telefones candidatos inválidos', { code: 'WA2_PHONE_INVALID' });

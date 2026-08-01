@@ -35,8 +35,8 @@ test('manifest é instalável, pt-BR e não contém dados privados', () => {
 test('service worker guarda somente assets públicos permitidos', () => {
   assert.match(worker, /const PUBLIC_ASSETS = \[/);
   for (const asset of [
-    '/app.css?v=7',
-    '/app.js?v=7',
+    '/app.css?v=8',
+    '/app.js?v=8',
     '/manifest.webmanifest',
     '/offline.html',
     '/icons/app-icon-192.png',

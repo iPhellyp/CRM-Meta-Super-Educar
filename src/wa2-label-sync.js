@@ -59,9 +59,12 @@ export function planWa2LabelMutations({
   };
 }
 
-export function wa2LabelIdempotencyKey(jobId, operation, labelId) {
+export function wa2LabelIdempotencyKey(jobId, operation, labelId, attempt = 0) {
+  const safeAttempt = Number.isSafeInteger(Number(attempt))
+    ? Math.max(0, Number(attempt))
+    : 0;
   const digest = crypto.createHash('sha256')
-    .update(`${jobId}:${operation}:${labelId}`)
+    .update(`${jobId}:${operation}:${labelId}:${safeAttempt}`)
     .digest('hex');
   return `crm-label:${digest}`;
 }
@@ -119,7 +122,7 @@ export async function synchronizeWa2LabelJob(job, client) {
       job.remote_instance_id,
       job.remote_chat_id,
       labelId,
-      { idempotencyKey: wa2LabelIdempotencyKey(job.id, 'apply', labelId) },
+      { idempotencyKey: wa2LabelIdempotencyKey(job.id, 'apply', labelId, job.attempts) },
     ));
   }
   for (const labelId of plan.remove) {
@@ -127,7 +130,7 @@ export async function synchronizeWa2LabelJob(job, client) {
       job.remote_instance_id,
       job.remote_chat_id,
       labelId,
-      { idempotencyKey: wa2LabelIdempotencyKey(job.id, 'remove', labelId) },
+      { idempotencyKey: wa2LabelIdempotencyKey(job.id, 'remove', labelId, job.attempts) },
     ));
   }
   const verifiedLabels = await client.listWa2ChatLabels(

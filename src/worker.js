@@ -85,6 +85,8 @@ let stopping = false;
 let lastHeartbeatAt = 0;
 let lastDailyScheduleCheckAt = 0;
 const labeledIdentityCache = new Map();
+const identityRefreshByInstance = new Map();
+const IDENTITY_REFRESH_COOLDOWN_MS = 5 * 60_000;
 
 async function getLabeledIdentityIndex(instanceId) {
   const cached = labeledIdentityCache.get(instanceId);
@@ -191,15 +193,85 @@ async function processWa2LabelJob(job) {
   return decision;
 }
 
+async function refreshIdentitiesForWa2LabelJob(job) {
+  const context = await getWa2LabelJobContext(job.id);
+  const remoteInstanceId = context?.remote_instance_id;
+
+  if (!remoteInstanceId) return false;
+
+  const lastRefreshAt = identityRefreshByInstance.get(remoteInstanceId) || 0;
+  if (Date.now() - lastRefreshAt < IDENTITY_REFRESH_COOLDOWN_MS) {
+    return true;
+  }
+
+  identityRefreshByInstance.set(remoteInstanceId, Date.now());
+
+  const phones = await listWa2ReconciliationCandidatePhones();
+  const rebuild = await rebuildWa2Identities(remoteInstanceId, phones);
+
+  console.log(JSON.stringify({
+    level: 'info',
+    msg: 'Rebuild de identidades solicitado após LID_UNRESOLVED',
+    remoteInstanceId,
+    phones: phones.length,
+    deduped: rebuild.deduped === true,
+  }));
+
+  const deadline = Date.now() + 180_000;
+
+  while (Date.now() < deadline) {
+    const status = await getWa2IdentityRebuildStatus(remoteInstanceId);
+
+    if (!['active', 'waiting', 'delayed', 'prioritized', 'waiting-children'].includes(status.status)) {
+      labeledIdentityCache.delete(remoteInstanceId);
+      return status.status === 'complete' || status.status === 'completed';
+    }
+
+    await delay(2_000);
+  }
+
+  return false;
+}
+
 async function handleWa2LabelFailure(job, error) {
-  const willRetry =
-    isTemporaryWa2LabelError(error) &&
-    job.attempts < job.max_attempts;
-  const retryAt = willRetry
-    ? new Date(Date.now() + wa2LabelRetryDelayMs(job.attempts))
-    : null;
   const safeError = sanitizeWa2LabelJobError(error);
+  const lidUnresolved = safeError.code === 'LID_UNRESOLVED';
+  let refreshed = false;
+
+  if (lidUnresolved && job.attempts < job.max_attempts) {
+    try {
+      refreshed = await refreshIdentitiesForWa2LabelJob(job);
+    } catch (refreshError) {
+      console.error(JSON.stringify({
+        level: 'error',
+        msg: 'Falha ao reconstruir identidades para job WA2',
+        jobId: job.id,
+        error: String(refreshError),
+      }));
+    }
+  }
+
+  const willRetry =
+    job.attempts < job.max_attempts &&
+    (
+      refreshed ||
+      lidUnresolved ||
+      isTemporaryWa2LabelError(error)
+    );
+
+  const retryAt = willRetry
+    ? new Date(
+      Date.now() +
+      (
+        lidUnresolved
+          ? 30_000
+          : wa2LabelRetryDelayMs(job.attempts)
+      )
+    )
+    : null;
+
   await failWa2LabelJob(job.id, safeError, { retryAt });
+
   console.error(JSON.stringify({
     level: 'error',
     msg: willRetry ? 'Job WA2 reagendado' : 'Job WA2 marcado como FAILED',
@@ -208,6 +280,7 @@ async function handleWa2LabelFailure(job, error) {
     attempts: job.attempts,
     nextAttemptAt: retryAt,
     errorCode: safeError.code,
+    identityRefresh: refreshed,
   }));
 }
 

@@ -73,6 +73,7 @@ import {
   updateMetaConnectionValidation,
   updateMetaConnectionName,
   updateMetaDatasetValidation,
+  processWa2LabelEvent,
 } from './db.js';
 import { runStartupMigrations } from './startup-migrations.js';
 import {
@@ -366,6 +367,31 @@ app.post('/webhooks/meta/leadgen', async (req, res) => {
       error: error?.name || 'Error',
     }));
     return res.status(503).json({ received: false });
+  }
+});
+
+app.post('/internal/wa2/label-events', async (req, res) => {
+  const expected = String(process.env.CRM_INTERNAL_API_SECRET || '').trim();
+  const supplied = String(req.get('authorization') || '').replace(/^Bearer\s+/i, '').trim();
+  if (!expected || supplied.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) {
+    return res.status(401).json({ error: 'UNAUTHORIZED' });
+  }
+  const schema = z.object({
+    eventId: z.string().uuid(), instanceId: z.string().min(1).max(200),
+    chatId: z.string().min(1).max(200), jid: z.string().min(1).max(200),
+    phoneNormalized: z.string().nullable().optional(), waLabelId: z.string().min(1).max(200),
+    operation: z.enum(['APPLY', 'REMOVE']), source: z.literal('WHATSAPP'),
+    observedAt: z.string().datetime(), eligibleForCrm: z.boolean(),
+    ineligibleReason: z.string().nullable().optional(), correlationKey: z.string().nullable().optional(),
+    currentRemoteLabelIds: z.array(z.string().min(1).max(200)).max(100).optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'INVALID_PAYLOAD' });
+  try {
+    const result = await processWa2LabelEvent(parsed.data, parsed.data.currentRemoteLabelIds || []);
+    return res.status(result.duplicate ? 200 : 202).json({ ok: true, ...result });
+  } catch {
+    return res.status(503).json({ error: 'PROCESSING_UNAVAILABLE' });
   }
 });
 

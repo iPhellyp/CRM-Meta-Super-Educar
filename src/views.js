@@ -53,18 +53,27 @@ function appNavigation(csrfToken) {
         <button type="button" class="nav-close" data-nav-close aria-label="Fechar menu">${icon('x')}</button>
       </div>
       <div class="nav-groups">
-        <section aria-labelledby="nav-operation"><h2 id="nav-operation">Operação</h2>
-          <a href="/">Leads</a><a href="/operations">Importações</a>
-          <a href="/operations#reconciliacoes">Reconciliações</a></section>
-        <section aria-labelledby="nav-integrations"><h2 id="nav-integrations">Integrações</h2>
-          <a href="/meta/connections">Meta</a><a href="/wa2">WhatsApp</a>
-          <a href="/wa2/labels">Etiquetas</a></section>
-        <section aria-labelledby="nav-monitoring"><h2 id="nav-monitoring">Monitoramento</h2>
-          <a href="/events">Eventos Meta</a><a href="/wa2/label-jobs">Jobs WA2</a>
-          <a href="/events?status=FAILED">Falhas</a></section>
-        <section aria-labelledby="nav-settings"><h2 id="nav-settings">Configurações</h2>
-          <a href="/#whatsapp-settings">Mensagens</a>
-          <a href="/meta/connections">Conexões</a><a href="/#lead-tools">Preferências</a></section>
+        <a class="nav-direct" href="/">Leads</a>
+        <details class="nav-group">
+          <summary>Operação</summary>
+          <div class="nav-group-links"><a href="/operations">Importações</a>
+            <a href="/operations#reconciliacoes">Reconciliações</a></div>
+        </details>
+        <details class="nav-group">
+          <summary>Integrações</summary>
+          <div class="nav-group-links"><a href="/meta/connections">Meta</a><a href="/wa2">WhatsApp</a>
+            <a href="/wa2/labels">Etiquetas</a></div>
+        </details>
+        <details class="nav-group">
+          <summary>Monitoramento</summary>
+          <div class="nav-group-links"><a href="/events">Eventos Meta</a><a href="/wa2/label-jobs">Jobs WA2</a>
+            <a href="/events?status=FAILED">Falhas</a></div>
+        </details>
+        <details class="nav-group">
+          <summary>Configurações</summary>
+          <div class="nav-group-links"><a href="/#whatsapp-settings">Mensagens</a>
+            <a href="/meta/connections">Conexões</a><a href="/#lead-tools">Preferências</a></div>
+        </details>
       </div>
       <form method="post" action="/logout" class="nav-logout" data-pwa-logout>
         ${csrfField(csrfToken)}<button class="link">Sair</button>
@@ -85,8 +94,8 @@ function layout(title, body, { logged = true, csrfToken = '' } = {}) {
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icons/app-icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/icons/app-icon-192.png">
-  <link rel="stylesheet" href="/app.css?v=9">
-  <script src="/app.js?v=9" defer></script>
+  <link rel="stylesheet" href="/app.css?v=10">
+  <script src="/app.js?v=10" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Ir para o conteúdo principal</a>

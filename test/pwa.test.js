@@ -36,8 +36,8 @@ test('manifest é instalável, pt-BR e não contém dados privados', () => {
 test('service worker guarda somente assets públicos permitidos', () => {
   assert.match(worker, /const PUBLIC_ASSETS = \[/);
   for (const asset of [
-    '/app.css?v=9',
-    '/app.js?v=9',
+    '/app.css?v=10',
+    '/app.js?v=10',
     '/manifest.webmanifest',
     '/offline.html',
     '/icons/app-icon-192.png',
@@ -114,13 +114,11 @@ test('cliente não força atualização e limpa somente caches próprios', () =>
   assert.match(app, /CLEAR_APP_CACHES/);
 });
 
-test('topbar desktop reseta completamente o layout antigo de sidebar', () => {
-  const marker = css.indexOf('/* premium-topbar-desktop-reset-v9 */');
-  assert.notEqual(marker, -1);
-  const reset = css.slice(marker);
-  assert.ok(reset.includes('.app-header {'));
-  assert.ok(reset.includes('flex-direction: row !important;'));
-  assert.ok(reset.includes('justify-content: flex-start !important;'));
-  assert.ok(reset.includes('.app-navigation {'));
-  assert.ok(reset.includes('.nav-groups {'));
+test('topbar desktop é horizontal e usa dropdowns sem manter o reset antigo', () => {
+  const desktopStart = css.lastIndexOf('@media (min-width: 1100px)', css.indexOf('.nav-group > summary'));
+  const desktopEnd = css.indexOf('\n  @media', desktopStart + 10);
+  const desktop = css.slice(desktopStart, desktopEnd);
+  assert.doesNotMatch(desktop, /flex-direction:\s*column/);
+  assert.match(read('src/views.js'), /class="nav-group"/);
+  assert.doesNotMatch(css, /premium-topbar-desktop-reset-v9/);
 });

@@ -2993,16 +2993,12 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
           `Evento WA2 ${event.eventId}`,
         ],
       );
-      const eventName = getStageEventName(decision.targetStage);
-      if (eventName && lead.meta_lead_id) {
-        const metaEvent = await createOrGetMetaEvent(client, {
-          lead: updated.rows[0],
-          eventName,
-          eventTime: new Date(event.observedAt),
-          mode: process.env.META_TEST_MODE === 'true' ? 'test' : 'live',
-        });
-        await enqueueConversionJob(client, metaEvent);
-      }
+      await ensureMetaEventForStage(client, {
+        lead: updated.rows[0],
+        stage: decision.targetStage,
+        eventTime: new Date(event.observedAt),
+        mode: process.env.META_TEST_MODE === 'true' ? 'test' : 'live',
+      });
       void history;
     }
     await client.query('COMMIT');

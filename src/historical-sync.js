@@ -30,6 +30,16 @@ export function canonicalInboundStage(stages) {
   return unique.length === 1 ? unique[0] : null;
 }
 
+export function canAdvanceByOfficialCrmLabel(currentStage, desiredStage) {
+  const allowed = {
+    IN_SERVICE: ['NEW', 'CONTACT_STARTED', 'NO_RESPONSE'],
+    QUALIFIED: ['NEW', 'CONTACT_STARTED', 'NO_RESPONSE', 'IN_SERVICE'],
+    NEGOTIATING: ['NEW', 'CONTACT_STARTED', 'NO_RESPONSE', 'IN_SERVICE', 'QUALIFIED'],
+    OPPORTUNITY: ['NEW', 'CONTACT_STARTED', 'NO_RESPONSE', 'IN_SERVICE', 'QUALIFIED', 'NEGOTIATING'],
+  };
+  return Boolean(allowed[desiredStage]?.includes(currentStage));
+}
+
 export function decideInboundLabelAction({
   event,
   currentStage,
@@ -78,14 +88,16 @@ export function decideInboundLabelAction({
   if (currentStage === desiredStage) {
     return { action: 'NOOP', code: 'STAGE_ALREADY_CORRECT', targetStage: desiredStage };
   }
+  const directOfficialAdvance = canAdvanceByOfficialCrmLabel(currentStage, desiredStage);
   if (
     !['LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED'].includes(desiredStage) &&
     STAGE_ORDER[currentStage] != null &&
-    STAGE_ORDER[desiredStage] <= STAGE_ORDER[currentStage]
+    STAGE_ORDER[desiredStage] <= STAGE_ORDER[currentStage] &&
+    !directOfficialAdvance
   ) {
     return { action: 'NOOP', code: 'NO_STAGE_REGRESSION', targetStage: desiredStage };
   }
-  if (!canTransition(currentStage, desiredStage)) {
+  if (!directOfficialAdvance && !canTransition(currentStage, desiredStage)) {
     return {
       action: 'CONFLICT',
       code: 'OFFICIAL_TRANSITION_NOT_ALLOWED',

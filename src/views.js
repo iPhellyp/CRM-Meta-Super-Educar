@@ -669,20 +669,15 @@ function stageActions(lead, csrfToken, returnPath = '/') {
       ${icon('stage')}<span>Sem transição disponível</span>
     </button>`;
   }
-  return `<details class="action-disclosure" data-action-disclosure>
-    <summary class="action-button action-secondary">
-      ${icon('stage')}<span>Atualizar etapa</span>${icon('chevron')}
-    </summary>
-    <div class="action-menu">
+  return `<div class="inline-stage-actions" aria-label="Ações de etapa">
       ${actions.map(({ stage, label }) => `
       <form method="post" action="/leads/${esc(lead.id)}/stage">
       ${csrfField(csrfToken)}
       <input type="hidden" name="returnTo" value="${esc(returnPath)}">
       <input type="hidden" name="stage" value="${stage}">
-      <button class="action-menu-item">${icon('stage')}<span>${esc(label)}</span></button>
+      <button class="action-button action-secondary">${esc(label)}</button>
       </form>`).join('')}
-    </div>
-  </details>`;
+    </div>`;
 }
 
 function moreLeadActions(lead) {
@@ -697,10 +692,6 @@ function moreLeadActions(lead) {
       <a class="action-menu-item" href="/leads/${esc(lead.id)}/wa2">
         ${icon('wa2')}<span>WA2 e etiquetas</span>
       </a>
-      <hr>
-      <button type="button" class="action-menu-item action-menu-danger" data-lost-lead="${esc(lead.id)}">
-        ${icon('close')}<span>Encerrar lead</span>
-      </button>
     </div>
   </details>`;
 }
@@ -727,6 +718,7 @@ function leadActions(lead, csrfToken, returnPath = '/', whatsappMessage = '') {
     <div class="whatsapp-action">${whatsappAction(lead, csrfToken, whatsappMessage)}</div>
     <div class="lead-secondary-actions">
       ${stageActions(lead, csrfToken, returnPath)}
+      <button type="button" class="action-button action-danger" data-lost-lead="${esc(lead.id)}">Perder</button>
       ${moreLeadActions(lead)}
     </div>
   </div>`;
@@ -910,8 +902,8 @@ export function dashboardView({
       </div>
       <div class="table-wrap desktop-leads"><table class="leads-table">
         <thead><tr><th><span class="sr-only">Selecionar</span></th><th>Lead</th>
-          <th>Curso e cidade</th><th>Origem e chegada</th><th>Etapa</th><th>Ações</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="6" class="empty">Nenhum lead encontrado.</td></tr>'}</tbody>
+          <th>Curso e cidade</th><th>Origem e chegada</th><th>Etapa</th><th>Etiquetas / Meta</th><th>Ações</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="7" class="empty">Nenhum lead encontrado.</td></tr>'}</tbody>
       </table></div>
       <nav class="pagination" aria-label="Paginação de leads">
         ${pagination.page > 1 ? `<a class="button-link secondary" href="/?${esc(dashboardFilterQuery(filters, { page: pagination.page - 1 }))}">← Anterior</a>` : ''}

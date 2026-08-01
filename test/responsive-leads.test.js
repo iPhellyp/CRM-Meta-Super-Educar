@@ -90,7 +90,8 @@ test('mobile e tablet usam cards com os mesmos links diretos do WhatsApp', () =>
   assert.doesNotMatch(html, /data-whatsapp-form/);
   assert.match(html, /Sem telefone/);
   assert.match(html, /Abrir no WhatsApp/);
-  assert.match(html, /Atualizar etapa/);
+  assert.match(html, /class="inline-stage-actions"/);
+  assert.doesNotMatch(html, /<summary>Atualizar etapa<\/summary>/);
   assert.match(html, /Mais ações/);
   assert.match(html, /aria-labelledby="lead-card-11111111-1111-4111-8111-111111111111"/);
 });

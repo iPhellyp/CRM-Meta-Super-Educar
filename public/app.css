@@ -282,6 +282,11 @@
 .meta-sent { background: #dcf4e5; color: #176b3a; }
 .meta-failed { background: #fde3e5; color: #9d2430; }
 .meta-pending { background: #fff1cf; color: #805b00; }
+.lead-actions { width: 100%; gap: 4px; }
+.lead-secondary-actions, .inline-stage-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.inline-stage-actions form { display: contents; }
+.inline-stage-actions .action-button, .lead-secondary-actions > .action-button { min-height: 30px; padding: 5px 8px; font-size: .72rem; }
+.action-danger { background: var(--color-error); color: #fff; }
   .badge.update { background: var(--color-info-bg); color: var(--color-info); }
   .badge.possible-duplicate { background: var(--color-warning-bg); color: var(--color-warning); }
   .badge.invalid { background: var(--color-error-bg); color: var(--color-error); }

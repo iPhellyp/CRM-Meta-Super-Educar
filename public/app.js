@@ -5,8 +5,8 @@ function setContextMessage(region, message, { error = false } = {}) {
   region.setAttribute('role', error ? 'alert' : 'status');
 }
 
-function setupCopyPhoneActions() {
-  for (const button of document.querySelectorAll('[data-copy-phone]')) {
+function setupCopyPhoneActions(root = document) {
+  for (const button of root.querySelectorAll('[data-copy-phone]')) {
     button.addEventListener('click', async (event) => {
       const phone = event.currentTarget.dataset.copyPhone;
       const status = event.currentTarget.closest('.whatsapp-action')
@@ -31,8 +31,8 @@ function setupCopyPhoneActions() {
   }
 }
 
-function setupWhatsAppLogging() {
-  for (const link of document.querySelectorAll('[data-whatsapp-link]')) {
+function setupWhatsAppLogging(root = document) {
+  for (const link of root.querySelectorAll('[data-whatsapp-link]')) {
     link.addEventListener('click', () => {
       const url = link.dataset.whatsappLogUrl;
       const csrf = link.dataset.whatsappCsrf;
@@ -452,7 +452,11 @@ function setupLeadChangesPolling() {
     if (running || document.hidden) return;
     running = true;
     try {
-      const response = await fetch(`/api/leads/changes?cursor=${encodeURIComponent(cursor)}`, {
+      const query = new URLSearchParams(window.location.search);
+      query.delete('cursor');
+      query.delete('limit');
+      query.set('cursor', cursor);
+      const response = await fetch(`/api/leads/changes?${query.toString()}`, {
         credentials: 'same-origin',
         cache: 'no-store',
         headers: { accept: 'application/json' },
@@ -469,16 +473,30 @@ function setupLeadChangesPolling() {
         const row = document.querySelector(`tr${selector}`);
         const card = document.querySelector(`article${selector}`);
         if (item.removed) {
-          row?.remove(); card?.remove();
+          if (row || card) {
+            row?.remove(); card?.remove();
+            const notice = document.querySelector('[data-lead-update-notice]');
+            if (notice) notice.textContent = 'A lista foi atualizada com os filtros atuais.';
+          }
           continue;
         }
         if (row && item.rowHtml) {
           const replacement = document.createRange().createContextualFragment(item.rowHtml).firstElementChild;
-          if (replacement) { row.replaceWith(replacement); if (checked) replacement.querySelector('.lead-select')?.click(); }
+          if (replacement) {
+            row.replaceWith(replacement);
+            setupCopyPhoneActions(replacement);
+            setupWhatsAppLogging(replacement);
+            if (checked) replacement.querySelector('.lead-select')?.click();
+          }
         }
         if (card && item.cardHtml) {
           const replacement = document.createRange().createContextualFragment(item.cardHtml).firstElementChild;
-          if (replacement) { card.replaceWith(replacement); if (checked) replacement.querySelector('.lead-select')?.click(); }
+          if (replacement) {
+            card.replaceWith(replacement);
+            setupCopyPhoneActions(replacement);
+            setupWhatsAppLogging(replacement);
+            if (checked) replacement.querySelector('.lead-select')?.click();
+          }
         }
       }
       if (data.hasMore) { await poll(); return; }

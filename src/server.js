@@ -401,18 +401,69 @@ app.post('/internal/wa2/label-events', async (req, res) => {
 
 app.use(requireAuth);
 
+function dashboardFiltersFromQuery(query = {}) {
+  const page = Math.min(Math.max(Number.parseInt(query.page, 10) || 1, 1), 10_000);
+  const dateFrom = parseCalendarDate(query.dateFrom);
+  const dateTo = parseCalendarDate(query.dateTo, { endOfDay: true });
+  const filters = {
+    search: String(query.search || '').trim().slice(0, 200),
+    course: String(query.course || '').trim().slice(0, 200),
+    city: String(query.city || '').trim().slice(0, 200),
+    stage: String(query.stage || ''),
+    commercial: query.commercial === 'mql' ? 'mql' : '',
+    lostReason: String(query.lostReason || ''),
+    instanceId: String(query.instanceId || ''),
+    labelId: String(query.labelId || '').trim().slice(0, 200),
+    metaConnectionId: String(query.metaConnectionId || ''),
+    businessId: String(query.businessId || '').trim().slice(0, 100),
+    pageId: String(query.pageId || '').trim().slice(0, 100),
+    formId: String(query.formId || '').trim().slice(0, 100),
+    campaignId: String(query.campaignId || '').trim().slice(0, 200),
+    adsetId: String(query.adsetId || '').trim().slice(0, 200),
+    adId: String(query.adId || '').trim().slice(0, 200),
+    attributed: ['yes', 'no'].includes(query.attributed) ? query.attributed : '',
+    validPhone: ['yes', 'no'].includes(query.validPhone) ? query.validPhone : '',
+    unattended: query.unattended === 'yes' ? 'yes' : '',
+    dateFrom: dateFrom.raw,
+    dateTo: dateTo.raw,
+    createdAfter: dateFrom.date || operationStartAt(),
+    createdBefore: dateTo.date,
+    sort: ['recent', 'oldest', 'stage', 'unattended', 'updated', 'conversation'].includes(query.sort)
+      ? query.sort
+      : 'recent',
+    page,
+    limit: 101,
+    offset: (page - 1) * 100,
+  };
+  if (!Object.hasOwn(STAGE_LABELS, filters.stage)) filters.stage = '';
+  if (!Object.hasOwn(LOST_REASON_LABELS, filters.lostReason)) filters.lostReason = '';
+  if (!z.string().uuid().safeParse(filters.instanceId).success) filters.instanceId = '';
+  if (!z.string().uuid().safeParse(filters.metaConnectionId).success) filters.metaConnectionId = '';
+  return filters;
+}
+
 app.get('/api/leads/changes', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   const rawCursor = String(req.query.cursor || '');
   const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
   let page;
   try { page = await listLeadChangesSince(rawCursor || null, limit); } catch { return res.status(400).json({ error: 'INVALID_CURSOR' }); }
+  const filters = dashboardFiltersFromQuery(req.query);
+  const currentPage = await listLeads(filters);
+  const currentPageIds = new Set(currentPage.slice(0, 100).map((lead) => lead.id));
+  const csrfToken = issueCsrfToken(req, res);
+  const whatsappMessage = await getTenantWhatsAppMessage();
+  const returnQuery = new URLSearchParams();
+  for (const [key, value] of Object.entries(req.query)) {
+    if (key !== 'cursor' && key !== 'limit' && typeof value === 'string' && value) returnQuery.set(key, value);
+  }
+  const returnPath = returnQuery.toString() ? `/?${returnQuery.toString()}` : '/';
   const { changes } = page;
   const leads = [];
   for (const change of changes) {
     const lead = await getLeadById(change.leadId);
-    if (lead) {
-      const renderOptions = { csrfToken: issueCsrfToken(req, res), returnPath: '/', whatsappMessage: '' };
+    if (lead && currentPageIds.has(lead.id)) {
+      const renderOptions = { csrfToken, returnPath, whatsappMessage };
       leads.push({
         leadId: lead.id,
         lead,
@@ -425,6 +476,8 @@ app.get('/api/leads/changes', async (req, res) => {
         updatedAt: change.changedAt,
         removed: false,
       });
+    } else if (!lead || !currentPageIds.has(change.leadId)) {
+      leads.push({ leadId: change.leadId, removed: true, updatedAt: change.changedAt });
     }
   }
   res.json({ cursor: page.nextCursor, hasMore: page.hasMore, leads });

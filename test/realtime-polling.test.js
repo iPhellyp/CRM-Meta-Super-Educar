@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
 
 process.env.DATABASE_URL ||= 'postgresql://test:test@localhost:5432/test';
@@ -29,4 +30,25 @@ test('renderização compartilhada preserva fragmentos completos e identificador
   assert.match(row, /value="csrf"/);
   assert.match(row, /returnTo/);
   assert.doesNotMatch(row, /<img src=x>/);
+});
+
+test('endpoint de mudanças é autenticado, sem cache e preserva filtros da página', () => {
+  const source = fs.readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
+  const route = source.slice(source.indexOf("app.get('/api/leads/changes'"), source.indexOf('\nfunction singleLeadFile'));
+  assert.ok(source.indexOf('app.use(requireAuth)') < source.indexOf("app.get('/api/leads/changes'"));
+  assert.match(route, /Cache-Control.*no-store/);
+  assert.match(route, /dashboardFiltersFromQuery\(req\.query\)/);
+  assert.match(route, /rowHtml: renderLeadRow/);
+  assert.match(route, /cardHtml: renderLeadCard/);
+  assert.match(route, /removed: true/);
+  assert.doesNotMatch(route, /max\s*\(status\)/i);
+});
+
+test('polling envia os filtros atuais e não recarrega a página', () => {
+  const source = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const polling = source.slice(source.indexOf('function setupLeadChangesPolling'), source.indexOf('\nsetupLeadChangesPolling();'));
+  assert.match(polling, /new URLSearchParams\(window\.location\.search\)/);
+  assert.match(polling, /query\.set\('cursor'/);
+  assert.match(polling, /cache: 'no-store'/);
+  assert.doesNotMatch(polling, /window\.location\.reload/);
 });

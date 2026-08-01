@@ -881,6 +881,7 @@ export function dashboardView({
       <div class="lead-cards" aria-label="Leads em cards">
         ${cards || '<div class="empty">Nenhum lead encontrado.</div>'}
       </div>
+      <div class="sr-only" data-lead-update-notice role="status" aria-live="polite"></div>
       <div class="table-wrap desktop-leads" data-lead-changes-start="${esc(new Date().toISOString())}"><table class="leads-table">
         <thead><tr><th><span class="sr-only">Selecionar</span></th><th>Lead</th>
           <th>Curso e cidade</th><th>Origem e chegada</th><th>Etapa</th><th>Etiquetas / Meta</th><th>Ações</th></tr></thead>

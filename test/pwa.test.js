@@ -36,8 +36,8 @@ test('manifest é instalável, pt-BR e não contém dados privados', () => {
 test('service worker guarda somente assets públicos permitidos', () => {
   assert.match(worker, /const PUBLIC_ASSETS = \[/);
   for (const asset of [
-    '/app.css?v=10',
-    '/app.js?v=10',
+    '/app.css?v=11',
+    '/app.js?v=11',
     '/manifest.webmanifest',
     '/offline.html',
     '/icons/app-icon-192.png',
@@ -121,4 +121,17 @@ test('topbar desktop é horizontal e usa dropdowns sem manter o reset antigo', (
   assert.doesNotMatch(desktop, /flex-direction:\s*column/);
   assert.match(read('src/views.js'), /class="nav-group"/);
   assert.doesNotMatch(css, /premium-topbar-desktop-reset-v9/);
+});
+
+test('dashboard preserva ações agrupadas e cache bust v11', () => {
+  const views = read('src/views.js');
+  assert.match(views, /class="nav-group"/);
+  assert.match(views, /Abrir no WhatsApp/);
+  assert.match(views, /Atualizar etapa/);
+  assert.match(views, /Mais ações/);
+  assert.match(views, /app\.css\?v=11/);
+  assert.match(views, /app\.js\?v=11/);
+  assert.match(worker, /CACHE_NAME = .+v11/);
+  assert.match(worker, /\/app\.css\?v=11/);
+  assert.match(worker, /\/app\.js\?v=11/);
 });

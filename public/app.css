@@ -676,20 +676,39 @@ tbody td {
 
 .leads-table td,
 .leads-table th {
-  padding: 14px 12px !important;
+  padding: 9px 10px !important;
+  vertical-align: middle !important;
 }
 
-.lead-actions {
-  display: flex !important;
-  align-items: flex-start !important;
-  gap: 8px !important;
-  flex-wrap: wrap !important;
+.desktop-leads .lead-actions {
+  display: grid !important;
+  grid-template-columns: minmax(118px, 1.15fr) minmax(0, 1fr) minmax(0, 1fr) !important;
+  align-items: center !important;
+  width: 100% !important;
+  max-width: none !important;
+  gap: 5px !important;
 }
 
-.lead-secondary-actions {
-  display: flex !important;
-  gap: 8px !important;
-  flex-wrap: wrap !important;
+.desktop-leads .lead-actions .whatsapp-action,
+.desktop-leads .lead-actions .whatsapp-action > div {
+  min-width: 0 !important;
+}
+
+.desktop-leads .lead-actions .whatsapp-action .primary-action {
+  min-height: 36px !important;
+  padding: 7px 9px !important;
+  border-radius: 999px !important;
+  font-size: .72rem !important;
+  white-space: nowrap !important;
+}
+
+.desktop-leads .lead-actions .whatsapp-action .copy-phone,
+.desktop-leads .lead-actions .whatsapp-action .action-status {
+  display: none !important;
+}
+
+.desktop-leads .lead-secondary-actions {
+  display: contents !important;
 }
 
 .action-button,
@@ -697,6 +716,47 @@ tbody td {
 button {
   border-radius: 10px !important;
   font-weight: 750 !important;
+}
+
+.desktop-leads .lead-actions .action-disclosure > summary {
+  min-height: 36px !important;
+  justify-content: center !important;
+  gap: 4px !important;
+  padding: 7px 8px !important;
+  border-radius: 999px !important;
+  font-size: .72rem !important;
+  white-space: nowrap !important;
+}
+
+.desktop-leads .lead-actions .action-disclosure > summary .icon {
+  display: none !important;
+}
+
+.desktop-leads .lead-actions .action-disclosure[open] {
+  grid-column: auto !important;
+}
+
+.desktop-leads .lead-actions .action-disclosure[open] .action-menu {
+  position: absolute !important;
+  top: calc(100% + 4px) !important;
+  right: 0 !important;
+  z-index: 5 !important;
+  min-width: 190px !important;
+}
+
+.leads-table td small {
+  margin-top: 2px !important;
+  font-size: .72rem !important;
+  line-height: 1.25 !important;
+}
+
+.leads-table .origin-details {
+  margin-top: 3px !important;
+}
+
+.leads-table .badge {
+  padding: 4px 8px !important;
+  font-size: .7rem !important;
 }
 
 .action-button.whatsapp,

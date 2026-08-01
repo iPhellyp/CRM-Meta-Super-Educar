@@ -159,6 +159,9 @@ test('CSS cobre viewports pedidos sem tabela larga no mobile', async () => {
   assert.doesNotMatch(css, /\.leads-table\s*\{[^}]*min-width:\s*1680px/);
   assert.match(css, /overflow-wrap: anywhere/);
   assert.match(css, /--control-height-mobile:\s*48px/);
+  assert.match(css, /\.desktop-leads \.lead-actions[\s\S]*grid-template-columns/);
+  assert.match(css, /\.desktop-leads \.lead-actions \.whatsapp-action \.primary-action[\s\S]*min-height: 36px/);
+  assert.match(css, /\.desktop-leads \.lead-actions \.action-disclosure > summary[\s\S]*white-space: nowrap/);
 });
 
 test('JavaScript implementa Escape, focus trap, inert e retorno de foco', async () => {

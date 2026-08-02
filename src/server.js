@@ -120,6 +120,7 @@ import {
   wa2LabelBindingsView,
   wa2LabelJobsView,
   wa2QrView,
+  chatView,
   renderLeadRow,
   renderLeadCard,
 } from './views.js';
@@ -134,8 +135,13 @@ import {
   getWa2InstanceQr,
   getWa2InstanceStatus,
   getWa2IdentityRebuildStatus,
+  listWa2Chats,
+  listWa2ChatMessages,
   listWa2Instances,
   listWa2Labels,
+  sendWa2ChatMessage,
+  applyWa2ChatLabel,
+  removeWa2ChatLabel,
   rebuildWa2Identities,
   syncWa2Instance,
   validateWa2InstanceId,
@@ -811,6 +817,73 @@ app.get('/wa2', async (req, res) => {
     error: req.query.error || '',
     csrfToken: issueCsrfToken(req, res),
   }));
+});
+
+app.get('/chat', async (req, res) => {
+  let instances = [];
+  let chats = [];
+  let selectedChat = null;
+  let messages = [];
+  let labels = [];
+  let selectedInstanceId = String(req.query.instanceId || '').trim();
+  const search = String(req.query.search || '').slice(0, 120);
+  let error = '';
+  try {
+    instances = await listWa2Instances();
+    selectedInstanceId = selectedInstanceId && instances.some((item) => item.id === selectedInstanceId)
+      ? selectedInstanceId
+      : instances.find((item) => item.isDefault)?.id || instances[0]?.id || '';
+    if (selectedInstanceId) {
+      const page = await listWa2Chats(selectedInstanceId, { search, limit: 50 });
+      chats = page.chats;
+      labels = await listWa2Labels(selectedInstanceId);
+      const selectedChatId = String(req.query.chatId || '').trim();
+      selectedChat = chats.find((chat) => chat.id === selectedChatId) || chats[0] || null;
+      if (selectedChat) {
+        messages = (await listWa2ChatMessages(selectedInstanceId, selectedChat.id, { limit: 100 })).messages;
+      }
+    }
+  } catch (remoteError) {
+    error = wa2UnavailableMessage(remoteError);
+  }
+  return res.send(chatView({
+    instances,
+    selectedInstanceId,
+    chats,
+    selectedChat,
+    messages,
+    labels,
+    search,
+    error,
+    message: req.query.message || '',
+    csrfToken: issueCsrfToken(req, res),
+  }));
+});
+
+app.post('/chat/send', async (req, res) => {
+  try {
+    const instanceId = validateWa2InstanceId(req.body.instanceId);
+    const chatId = validateWa2InstanceId(req.body.chatId);
+    const text = z.string().trim().min(1).max(4000).parse(req.body.text);
+    await sendWa2ChatMessage(instanceId, chatId, text);
+    return redirectWith(res, `/chat?instanceId=${encodeURIComponent(instanceId)}&chatId=${encodeURIComponent(chatId)}`, 'message', 'Mensagem enfileirada.');
+  } catch (error) {
+    return redirectWith(res, '/chat', 'error', wa2UnavailableMessage(error));
+  }
+});
+
+app.post('/chat/label', async (req, res) => {
+  try {
+    const instanceId = validateWa2InstanceId(req.body.instanceId);
+    const chatId = validateWa2InstanceId(req.body.chatId);
+    const labelId = validateWa2InstanceId(req.body.labelId);
+    const operation = z.enum(['apply', 'remove']).parse(req.body.operation);
+    if (operation === 'apply') await applyWa2ChatLabel(instanceId, chatId, labelId);
+    else await removeWa2ChatLabel(instanceId, chatId, labelId);
+    return redirectWith(res, `/chat?instanceId=${encodeURIComponent(instanceId)}&chatId=${encodeURIComponent(chatId)}`, 'message', 'Etiqueta enfileirada para sincronização.');
+  } catch (error) {
+    return redirectWith(res, '/chat', 'error', wa2UnavailableMessage(error));
+  }
 });
 
 app.post('/wa2/instances/create', async (req, res) => {

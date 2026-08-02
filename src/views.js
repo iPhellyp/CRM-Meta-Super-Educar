@@ -77,6 +77,7 @@ function appNavigation(csrfToken) {
       </div>
       <div class="nav-groups">
         <a class="nav-direct" href="/">Leads</a>
+        <a class="nav-direct" href="/chat">Chat</a>
         <details class="nav-group">
           <summary>Operação</summary>
           <div class="nav-group-links"><a href="/operations">Importações</a>
@@ -1700,5 +1701,58 @@ export function wa2LinkConfirmView({
       </form>
       <a class="small button-link" href="/leads/${esc(lead.id)}/wa2">Cancelar</a>
     </div>
+  `, { csrfToken });
+}
+
+export function chatView({
+  instances = [],
+  selectedInstanceId = '',
+  chats = [],
+  selectedChat = null,
+  messages = [],
+  labels = [],
+  search = '',
+  error = '',
+  message = '',
+  csrfToken = '',
+}) {
+  const instanceOptions = instances.map((instance) =>
+    `<option value="${esc(instance.id)}"${instance.id === selectedInstanceId ? ' selected' : ''}>${esc(instance.name || instance.id)}</option>`
+  ).join('');
+  const chatItems = chats.map((chat) => `
+    <a class="chat-list-item${selectedChat?.id === chat.id ? ' is-active' : ''}" href="/chat?instanceId=${encodeURIComponent(selectedInstanceId)}&chatId=${encodeURIComponent(chat.id)}">
+      <strong>${esc(chat.name || chat.jid)}</strong>
+      <small>${esc(chat.lastMessageText || 'Sem mensagem salva')}</small>
+      <span class="muted">${chat.messageCount} mensagem(ns) · ${chat.labels.map((label) => esc(label.name)).join(', ') || 'sem etiqueta'}</span>
+    </a>`).join('');
+  const messageItems = messages.map((item) => `
+    <article class="chat-message ${item.fromMe ? 'from-me' : 'from-contact'}">
+      <div>${esc(item.text || item.messageType || 'Mensagem sem texto')}</div>
+      <small>${item.fromMe ? 'Você' : 'Contato'} · ${formatDateTime(item.timestamp || item.createdAt)}</small>
+    </article>`).join('');
+  const labelOptions = labels.map((label) => `<option value="${esc(label.id)}">${esc(label.name)}</option>`).join('');
+  return layout('Chat', `
+    ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+    ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
+    <section class="hero"><div><h1>Chat</h1><p>Conversas carregadas do histórico persistido pelo Baileys.</p></div></section>
+    <section class="panel">
+      <form method="get" action="/chat" class="filters-grid">
+        <label>Instância<select name="instanceId" required>${instanceOptions}</select></label>
+        <label>Buscar<input name="search" value="${esc(search)}" maxlength="120" placeholder="Nome, telefone ou mensagem"></label>
+        <button type="submit">Atualizar</button>
+      </form>
+    </section>
+    <section class="chat-layout">
+      <div class="panel chat-list"><div class="panel-title"><h2>Conversas</h2><span>${chats.length}</span></div>${chatItems || '<p class="empty">Nenhuma conversa encontrada.</p>'}</div>
+      <div class="panel chat-thread">
+        ${selectedChat ? `
+          <div class="panel-title"><div><h2>${esc(selectedChat.name || selectedChat.jid)}</h2><small>${esc(selectedChat.jid)}</small></div><span>${selectedChat.messageCount} salva(s)</span></div>
+          <div class="chat-labels"><strong>Etiquetas</strong>${selectedChat.labels.map((label) => `<span class="wa2-tag">${esc(label.name)}</span>`).join('') || '<span class="muted">Nenhuma</span>'}</div>
+          <div class="chat-messages">${messageItems || '<p class="empty">Nenhuma mensagem persistida.</p>'}</div>
+          <form method="post" action="/chat/send" class="chat-composer">${csrfField(csrfToken)}<input type="hidden" name="instanceId" value="${esc(selectedInstanceId)}"><input type="hidden" name="chatId" value="${esc(selectedChat.id)}"><textarea name="text" maxlength="4000" required placeholder="Digite uma mensagem"></textarea><button type="submit">Enviar</button></form>
+          <form method="post" action="/chat/label" class="chat-label-form">${csrfField(csrfToken)}<input type="hidden" name="instanceId" value="${esc(selectedInstanceId)}"><input type="hidden" name="chatId" value="${esc(selectedChat.id)}"><select name="labelId" required>${labelOptions}</select><select name="operation"><option value="apply">Aplicar</option><option value="remove">Remover</option></select><button type="submit" class="secondary">Alterar etiqueta</button></form>
+        ` : '<p class="empty">Selecione uma conversa.</p>'}
+      </div>
+    </section>
   `, { csrfToken });
 }

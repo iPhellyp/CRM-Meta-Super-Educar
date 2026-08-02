@@ -255,6 +255,75 @@ function sanitizeLabels(payload) {
   return value.labels.map(sanitizeLabel);
 }
 
+function sanitizeChat(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Wa2Error('Chat WA2 incompatível', { code: 'WA2_CHAT_INVALID' });
+  }
+  const id = validateWa2ResourceId(value.id, 'chat');
+  const jid = requiredRemoteText(value.jid, 255, 'WA2_CHAT_INVALID');
+  return {
+    id,
+    jid,
+    name: optionalRemoteText(value.name, 200, 'WA2_CHAT_INVALID'),
+    isGroup: value.isGroup === true,
+    unreadCount: Number.isSafeInteger(value.unreadCount) ? value.unreadCount : 0,
+    lastMessageAt: value.lastMessageAt == null ? null : parseIsoDate(value.lastMessageAt)?.toISOString() || null,
+    lastMessageText: optionalRemoteText(value.lastMessageText, 4000, 'WA2_CHAT_INVALID'),
+    lastInboundAt: value.lastInboundAt == null ? null : parseIsoDate(value.lastInboundAt)?.toISOString() || null,
+    lastOutboundAt: value.lastOutboundAt == null ? null : parseIsoDate(value.lastOutboundAt)?.toISOString() || null,
+    updatedAt: requiredRemoteText(value.updatedAt, 50, 'WA2_CHAT_INVALID'),
+    messageCount: Number.isSafeInteger(value._count?.messages) ? value._count.messages : 0,
+    labels: Array.isArray(value.labels) ? value.labels.map(sanitizeLabel) : [],
+  };
+}
+
+function sanitizeChats(payload) {
+  const value = objectPayload(payload);
+  if (!Array.isArray(value.chats) || typeof value.hasMore !== 'boolean') {
+    throw new Wa2Error('Lista de chats WA2 incompatível', { code: 'WA2_CHATS_INVALID' });
+  }
+  return {
+    chats: value.chats.map(sanitizeChat),
+    nextCursor: value.nextCursor == null ? null : validateWa2ResourceId(value.nextCursor, 'cursor'),
+    hasMore: value.hasMore,
+  };
+}
+
+function sanitizeMessage(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Wa2Error('Mensagem WA2 incompatível', { code: 'WA2_MESSAGE_INVALID' });
+  }
+  return {
+    id: validateWa2ResourceId(value.id, 'mensagem'),
+    waMessageId: requiredRemoteText(value.waMessageId, 255, 'WA2_MESSAGE_INVALID'),
+    fromMe: value.fromMe === true,
+    timestamp: value.timestamp == null ? null : parseIsoDate(value.timestamp)?.toISOString() || null,
+    messageType: optionalRemoteText(value.messageType, 120, 'WA2_MESSAGE_INVALID'),
+    text: optionalRemoteText(value.text, 4000, 'WA2_MESSAGE_INVALID'),
+    createdAt: requiredRemoteText(value.createdAt, 50, 'WA2_MESSAGE_INVALID'),
+  };
+}
+
+function sanitizeMessages(payload) {
+  const value = objectPayload(payload);
+  if (!Array.isArray(value.messages) || typeof value.hasMore !== 'boolean') {
+    throw new Wa2Error('Mensagens WA2 incompatíveis', { code: 'WA2_MESSAGES_INVALID' });
+  }
+  return {
+    messages: value.messages.map(sanitizeMessage),
+    nextBefore: value.nextBefore == null ? null : requiredRemoteText(value.nextBefore, 50, 'WA2_MESSAGES_INVALID'),
+    hasMore: value.hasMore,
+  };
+}
+
+function sanitizeChatMessageMutation(payload) {
+  const value = objectPayload(payload);
+  if (value.queued !== true || !Object.hasOwn(value, 'jobId')) {
+    throw new Wa2Error('Envio de mensagem WA2 incompatível', { code: 'WA2_MESSAGE_SEND_INVALID' });
+  }
+  return { queued: true, jobId: sanitizeJobId(value.jobId) };
+}
+
 function sanitizeLabelEvent(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Wa2Error('Evento de etiqueta WA2 incompatível', {
@@ -957,6 +1026,39 @@ export function createWa2Client({
     listLabels: (instanceId) => request(instancePath(instanceId, '/labels'), {
       parse: sanitizeLabels,
     }),
+    listChats: (instanceId, { search = '', cursor = null, limit = 50 } = {}) => {
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+        throw new Wa2Error('Paginação de chats inválida', { code: 'WA2_CHATS_PAGE_INVALID' });
+      }
+      const query = new URLSearchParams({ limit: String(limit) });
+      if (search) query.set('search', String(search).slice(0, 120));
+      if (cursor) query.set('cursor', validateWa2ResourceId(cursor, 'cursor'));
+      return request(instancePath(instanceId, `/chats?${query}`), { parse: sanitizeChats });
+    },
+    listChatMessages: (instanceId, chatId, { before = null, limit = 50 } = {}) => {
+      const chat = validateWa2ResourceId(chatId, 'chat');
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+        throw new Wa2Error('Paginação de mensagens inválida', { code: 'WA2_MESSAGES_PAGE_INVALID' });
+      }
+      const query = new URLSearchParams({ limit: String(limit) });
+      if (before) query.set('before', String(before));
+      return request(instancePath(instanceId, `/chats/${encodeURIComponent(chat)}/messages?${query}`), {
+        parse: sanitizeMessages,
+      });
+    },
+    sendChatMessage: (instanceId, chatId, text, { idempotencyKey } = {}) => {
+      const chat = validateWa2ResourceId(chatId, 'chat');
+      const message = String(text || '').trim();
+      if (!message || message.length > 4000) {
+        throw new Wa2Error('Mensagem inválida', { code: 'WA2_MESSAGE_INVALID' });
+      }
+      return request(instancePath(instanceId, `/chats/${encodeURIComponent(chat)}/messages`), {
+        method: 'POST',
+        body: { text: message },
+        idempotencyKey,
+        parse: sanitizeChatMessageMutation,
+      });
+    },
     listChatLabels: (instanceId, chatId) => {
       const chat = validateWa2ResourceId(chatId, 'chat');
       return request(instancePath(
@@ -1046,6 +1148,14 @@ export const getWa2IdentityRebuildStatus = (instanceId, options) =>
   defaultClient(options).getIdentityRebuildStatus(instanceId);
 export const listWa2Labels = (instanceId, options) =>
   defaultClient(options).listLabels(instanceId);
+export const listWa2Chats = (instanceId, page = {}, options) =>
+  defaultClient(options).listChats(instanceId, page);
+export const listWa2ChatMessages = (instanceId, chatId, page = {}, options) =>
+  defaultClient(options).listChatMessages(instanceId, chatId, page);
+export const sendWa2ChatMessage = (instanceId, chatId, text, options = {}) => {
+  const { idempotencyKey, ...clientOptions } = options;
+  return defaultClient(clientOptions).sendChatMessage(instanceId, chatId, text, { idempotencyKey });
+};
 export const listWa2ChatLabels = (instanceId, chatId, options) =>
   defaultClient(options).listChatLabels(instanceId, chatId);
 export const applyWa2ChatLabel = (instanceId, chatId, labelId, options = {}) => {

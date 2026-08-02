@@ -32,6 +32,12 @@ test('stack isola as réplicas de postgres, app e worker', async () => {
   assert.doesNotMatch(worker, /APP_REPLICAS/);
 });
 
+test('worker reinicia após encerramento gracioso quando a réplica continua desejada', async () => {
+  const stack = await read('docker-stack.yml');
+  const worker = stack.match(/\n  worker:[\s\S]*?(?=\nvolumes:)/)?.[0] || '';
+  assert.match(worker, /restart_policy:[\s\S]*condition: any/);
+});
+
 test('deploy migra uma vez antes de app e worker e não importa leads', async () => {
   const deploy = await read('deploy-vps.sh');
   const stack = await read('docker-stack.yml');

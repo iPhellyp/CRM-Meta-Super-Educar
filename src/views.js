@@ -1743,10 +1743,10 @@ export function chatView({
       </form>
     </section>
     <section class="chat-layout" data-chat-root data-instance-id="${esc(selectedInstanceId)}" data-chat-id="${esc(selectedChat?.id || '')}" data-search="${esc(search)}">
-      <div class="panel chat-list"><div class="panel-title"><h2>Conversas</h2><span data-chat-count>${chats.length}</span></div><div data-chat-items>${chatItems || '<p class="empty">Nenhuma conversa encontrada.</p>'}</div></div>
+      <div class="panel chat-list"><div class="panel-title"><div><h2>Conversas</h2><small class="muted">Selecione uma conversa para abrir o histórico</small></div><span class="chat-count" data-chat-count>${chats.length}</span></div><div class="chat-list-scroll" data-chat-items>${chatItems || '<p class="empty">Nenhuma conversa encontrada.</p>'}</div></div>
       <div class="panel chat-thread">
         ${selectedChat ? `
-          <div class="panel-title"><div><h2>${esc(selectedChat.name || selectedChat.jid)}</h2><small>${esc(selectedChat.jid)}</small></div><span>${selectedChat.messageCount} salva(s)</span></div>
+          <div class="panel-title chat-thread-title"><div><h2>${esc(selectedChat.name || selectedChat.jid)}</h2><small>${esc(selectedChat.jid)}</small></div><span class="muted">${selectedChat.messageCount} mensagem(ns)</span></div>
           <div class="chat-labels"><strong>Etiquetas</strong>${selectedChat.labels.map((label) => `<span class="wa2-tag">${esc(label.name)}</span>`).join('') || '<span class="muted">Nenhuma</span>'}</div>
           <div class="chat-messages" data-chat-messages>${messageItems || '<p class="empty">Nenhuma mensagem persistida.</p>'}</div>
           <form method="post" action="/chat/send" class="chat-composer">${csrfField(csrfToken)}<input type="hidden" name="instanceId" value="${esc(selectedInstanceId)}"><input type="hidden" name="chatId" value="${esc(selectedChat.id)}"><textarea name="text" maxlength="4000" required placeholder="Digite uma mensagem"></textarea><button type="submit">Enviar</button></form>

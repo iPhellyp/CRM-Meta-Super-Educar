@@ -278,22 +278,37 @@
 .wa2-tags, .meta-statuses { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .wa2-tag, .meta-status { display: inline-flex; max-width: 180px; overflow: hidden; border-radius: 999px; padding: 2px 7px; background: #eef1f5; color: #45505c; font-size: .7rem; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
 .wa2-tag-more { background: #dce4ed; font-weight: 700; }
-.chat-layout { display: grid; grid-template-columns: minmax(260px, .8fr) minmax(0, 1.7fr); gap: 16px; align-items: start; }
-.chat-list { display: grid; gap: 8px; }
-.chat-list-item { display: grid; gap: 3px; padding: 10px 12px; border: 1px solid var(--border, #e1e5eb); border-radius: 12px; color: inherit; text-decoration: none; }
-.chat-list-item:hover, .chat-list-item.is-active { border-color: var(--color-wa2, #6740a3); background: #f6f1ff; }
-.chat-list-item small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chat-thread { min-height: 520px; }
-.chat-messages { display: grid; gap: 8px; max-height: 520px; overflow: auto; padding: 12px 0; }
-.chat-message { max-width: 78%; padding: 9px 12px; border-radius: 14px; background: #f0f2f5; }
+.chat-layout { display: grid; grid-template-columns: minmax(300px, .85fr) minmax(0, 1.65fr); gap: 16px; align-items: start; }
+.chat-list, .chat-thread { min-width: 0; }
+.chat-list { display: grid; gap: 12px; }
+.chat-list-scroll { display: grid; gap: 6px; max-height: 600px; overflow-y: auto; padding-right: 4px; }
+.chat-count { display: inline-grid; min-width: 32px; min-height: 28px; place-items: center; border-radius: 999px; background: #f0ebfb; color: #57328f; font-size: .78rem; font-weight: 700; }
+.chat-list-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 10px; padding: 11px 12px; border: 1px solid var(--color-border, #e1e5eb); border-radius: 10px; color: inherit; text-decoration: none; background: var(--color-surface, #fff); }
+.chat-list-item strong, .chat-list-item small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-list-item small { grid-column: 1 / -1; color: var(--color-text-secondary, #66717c); }
+.chat-list-item .muted { grid-column: 1 / -1; font-size: .72rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-list-item:hover, .chat-list-item.is-active { border-color: var(--color-brand, #6740a3); background: #f6f1ff; box-shadow: 0 0 0 2px rgba(103,64,163,.1); }
+.chat-thread { min-height: 600px; }
+.chat-thread-title { align-items: start; }
+.chat-messages { display: grid; gap: 10px; min-height: 320px; max-height: 560px; overflow: auto; padding: 16px 4px; background: #faf9fc; border-radius: 12px; }
+.chat-message { max-width: min(78%, 620px); padding: 10px 13px; border-radius: 14px; background: #f0f2f5; overflow-wrap: anywhere; box-shadow: 0 1px 1px rgba(24,18,34,.05); }
 .chat-message.from-me { justify-self: end; background: #e5f8e8; }
 .chat-message small { display: block; margin-top: 4px; color: #66717c; font-size: .72rem; }
 .chat-labels, .chat-label-form, .chat-composer { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .chat-labels { padding: 10px 0; border-bottom: 1px solid var(--border, #e1e5eb); }
-.chat-composer { align-items: end; }
+.chat-composer { align-items: end; margin-top: 12px; }
 .chat-composer textarea { flex: 1 1 300px; min-height: 64px; resize: vertical; }
 .chat-label-form { margin-top: 12px; }
-@media (max-width: 760px) { .chat-layout { grid-template-columns: 1fr; } .chat-thread { min-height: 0; } .chat-messages { max-height: 60vh; } }
+@media (max-width: 760px) {
+  .chat-layout { grid-template-columns: 1fr; gap: 12px; }
+  .chat-list-scroll { max-height: 285px; }
+  .chat-thread { min-height: 0; }
+  .chat-messages { min-height: 260px; max-height: 52vh; }
+  .chat-message { max-width: 90%; }
+  .chat-label-form, .chat-composer { display: grid; grid-template-columns: 1fr; align-items: stretch; }
+  .chat-label-form select, .chat-label-form button, .chat-composer textarea, .chat-composer button { width: 100%; }
+  .chat-thread-title h2 { max-width: 62vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
 .meta-status { background: #e8eef8; color: #315987; }
 .meta-sent { background: #dcf4e5; color: #176b3a; }
 .meta-failed { background: #fde3e5; color: #9d2430; }

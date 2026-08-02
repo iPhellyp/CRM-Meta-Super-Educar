@@ -1408,27 +1408,49 @@ export async function listWa2LabelBindings(instanceId = null) {
               WHERE lead.tenant_id = binding.tenant_id
                 AND lead.stage = binding.stage
             ) AS lead_count,
-            (
-              SELECT max(job.finished_at)
-              FROM wa2_label_jobs job
-              WHERE job.tenant_id = binding.tenant_id
-                AND job.wa2_instance_id = binding.wa2_instance_id
-                AND job.target_remote_label_id = binding.remote_label_id
-                AND job.status = 'DONE'
-            ) AS last_sync_at,
-            (
-              SELECT job.last_error_message
-              FROM wa2_label_jobs job
-              WHERE job.tenant_id = binding.tenant_id
-                AND job.wa2_instance_id = binding.wa2_instance_id
-                AND job.target_remote_label_id = binding.remote_label_id
-                AND job.status = 'FAILED'
-              ORDER BY job.updated_at DESC LIMIT 1
-            ) AS last_error
+            last_attempt.status AS last_attempt_status,
+            last_attempt.updated_at AS last_attempt_at,
+            last_attempt.last_error_code AS last_attempt_error_code,
+            last_attempt.last_error_message AS last_attempt_error,
+            last_success.finished_at AS last_sync_at,
+            last_success.finished_at AS last_success_at,
+            last_error.updated_at AS last_error_at,
+            last_error.last_error_code AS last_error_code,
+            last_error.last_error_message AS last_error
      FROM wa2_label_bindings binding
      JOIN wa2_instances instance
        ON instance.id = binding.wa2_instance_id
       AND instance.tenant_id = binding.tenant_id
+     LEFT JOIN LATERAL (
+       SELECT job.status, job.updated_at, job.last_error_code,
+              job.last_error_message
+       FROM wa2_label_jobs job
+       WHERE job.tenant_id = binding.tenant_id
+         AND job.wa2_instance_id = binding.wa2_instance_id
+         AND job.target_remote_label_id = binding.remote_label_id
+       ORDER BY job.updated_at DESC, job.created_at DESC
+       LIMIT 1
+     ) last_attempt ON true
+     LEFT JOIN LATERAL (
+       SELECT job.finished_at
+       FROM wa2_label_jobs job
+       WHERE job.tenant_id = binding.tenant_id
+         AND job.wa2_instance_id = binding.wa2_instance_id
+         AND job.target_remote_label_id = binding.remote_label_id
+         AND job.status = 'DONE'
+       ORDER BY job.finished_at DESC NULLS LAST, job.updated_at DESC
+       LIMIT 1
+     ) last_success ON true
+     LEFT JOIN LATERAL (
+       SELECT job.updated_at, job.last_error_code, job.last_error_message
+       FROM wa2_label_jobs job
+       WHERE job.tenant_id = binding.tenant_id
+         AND job.wa2_instance_id = binding.wa2_instance_id
+         AND job.target_remote_label_id = binding.remote_label_id
+         AND job.status = 'FAILED'
+       ORDER BY job.updated_at DESC, job.created_at DESC
+       LIMIT 1
+     ) last_error ON true
      WHERE binding.tenant_id = $1 ${instanceFilter}
      ORDER BY instance.is_default DESC, instance.name NULLS LAST, binding.stage`,
     values,

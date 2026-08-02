@@ -1346,8 +1346,11 @@ export function wa2LabelBindingsView({
               ? `<span class="badge ${binding.enabled ? 'enrolled' : 'new'}">${binding.enabled ? 'ATIVO' : 'DESABILITADO'}</span>
                  <small>${esc(binding.lead_count || 0)} lead(s)</small>
                  <small>Verificado: ${formatDateTime(binding.last_verified_at)}</small>
-                 <small>Última sincronização: ${formatDateTime(binding.last_sync_at)}</small>
-                 ${binding.last_error ? `<small class="error-text">${esc(binding.last_error)}</small>` : ''}`
+                 <small>Última tentativa: ${detailValue(binding.last_attempt_status)} · ${formatDateTime(binding.last_attempt_at)}</small>
+                 <small>Último sucesso: ${formatDateTime(binding.last_success_at || binding.last_sync_at)}</small>
+                 ${binding.last_error
+                   ? `<small class="error-text">Última falha: ${esc(binding.last_error_code || 'FAILED')} · ${esc(binding.last_error)} · ${formatDateTime(binding.last_error_at)}</small>`
+                   : ''}`
               : suggestion
                 ? '<span class="ok">Correspondência equivalente sugerida; confirme antes de salvar</span>'
                 : '<span class="error-text">Sem sugestão automática</span>'}

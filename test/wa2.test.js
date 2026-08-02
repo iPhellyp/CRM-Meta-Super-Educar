@@ -960,6 +960,12 @@ test('painel de bindings escapa dados e envia instância/binding por IDs locais'
       remote_label_name: '<CRM 01 Em atendimento>',
       enabled: true,
       last_verified_at: '2026-07-27T12:00:00.000Z',
+      last_attempt_status: 'FAILED',
+      last_attempt_at: '2026-08-01T22:03:00.000Z',
+      last_success_at: '2026-07-31T22:00:00.000Z',
+      last_error_code: 'WA2_LABEL_SYNC_NOT_CONFIRMED',
+      last_error: 'Erro de confirmação',
+      last_error_at: '2026-08-01T22:03:00.000Z',
     }],
     csrfToken: 'csrf-placeholder',
   });
@@ -967,6 +973,9 @@ test('painel de bindings escapa dados e envia instância/binding por IDs locais'
   assert.equal(html.includes('&lt;Instância&gt;'), true);
   assert.equal(html.includes('name="instanceId" value="11111111-1111-4111-8111-111111111111"'), true);
   assert.equal(html.includes('/wa2/label-bindings/22222222-2222-4222-8222-222222222222/verify'), true);
+  assert.equal(html.includes('Última tentativa: FAILED'), true);
+  assert.equal(html.includes('Último sucesso:'), true);
+  assert.equal(html.includes('Última falha: WA2_LABEL_SYNC_NOT_CONFIRMED'), true);
   assert.equal(html.includes(PLACEHOLDER_SECRET), false);
   assert.equal(html.includes('rawPayload'), false);
 });

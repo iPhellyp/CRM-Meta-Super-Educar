@@ -846,6 +846,10 @@ app.get('/chat', async (req, res) => {
   } catch (remoteError) {
     error = wa2UnavailableMessage(remoteError);
   }
+  if (req.query.format === 'json') {
+    noStore(res);
+    return res.json({ instances, selectedInstanceId, chats, selectedChat, messages, labels, error });
+  }
   return res.send(chatView({
     instances,
     selectedInstanceId,

@@ -5,6 +5,54 @@ function setContextMessage(region, message, { error = false } = {}) {
   region.setAttribute('role', error ? 'alert' : 'status');
 }
 
+(() => {
+  const chatRoot = document.querySelector('[data-chat-root]');
+  if (!chatRoot) return;
+  let polling = false;
+  const renderMessages = (items) => {
+    const target = chatRoot.querySelector('[data-chat-messages]');
+    if (!target) return;
+    target.replaceChildren();
+    if (!items.length) {
+      const empty = document.createElement('p');
+      empty.className = 'empty';
+      empty.textContent = 'Nenhuma mensagem persistida.';
+      target.append(empty);
+      return;
+    }
+    for (const item of items) {
+      const article = document.createElement('article');
+      article.className = `chat-message ${item.fromMe ? 'from-me' : 'from-contact'}`;
+      const body = document.createElement('div');
+      body.textContent = item.text || item.messageType || 'Mensagem sem texto';
+      const meta = document.createElement('small');
+      meta.textContent = `${item.fromMe ? 'Você' : 'Contato'} · ${item.timestamp || item.createdAt || ''}`;
+      article.append(body, meta);
+      target.append(article);
+    }
+  };
+  const poll = async () => {
+    if (polling || document.hidden) return;
+    polling = true;
+    try {
+      const params = new URLSearchParams({ format: 'json', instanceId: chatRoot.dataset.instanceId || '', search: chatRoot.dataset.search || '' });
+      if (chatRoot.dataset.chatId) params.set('chatId', chatRoot.dataset.chatId);
+      const response = await fetch(`/chat?${params}`, { cache: 'no-store', credentials: 'same-origin' });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (data.selectedChat?.id === chatRoot.dataset.chatId) renderMessages(data.messages || []);
+      const count = chatRoot.querySelector('[data-chat-count]');
+      if (count) count.textContent = String((data.chats || []).length);
+    } catch {
+      // Falha transitória: a próxima consulta tenta novamente.
+    } finally {
+      polling = false;
+    }
+  };
+  window.setInterval(poll, 2000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) void poll(); });
+})();
+
 function setupCopyPhoneActions(root = document) {
   for (const button of root.querySelectorAll('[data-copy-phone]')) {
     button.addEventListener('click', async (event) => {

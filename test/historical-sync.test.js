@@ -3,11 +3,27 @@ import test from 'node:test';
 import {
   canonicalInboundStage,
   canAdvanceByOfficialCrmLabel,
+  classifyWa2LinkResolution,
   decideInboundLabelAction,
   historicalRetryDelayMs,
   reconciliationFailureResult,
   sanitizeHistoricalError,
 } from '../src/historical-sync.js';
+
+test('classifica a causa do vínculo WA2 sem criar vínculo implícito', () => {
+  const cases = [
+    [{ instanceConfigured: false }, 'INSTANCE_MISMATCH'],
+    [{ instanceConfigured: true, linkCount: 2 }, 'CHAT_LINK_MULTIPLE'],
+    [{ instanceConfigured: true, jid: '123@lid' }, 'LID_UNRESOLVED'],
+    [{ instanceConfigured: true, phoneNormalized: null, jid: 'x@s.whatsapp.net' }, 'LEAD_PHONE_NOT_FOUND'],
+    [{ instanceConfigured: true, phoneNormalized: '5511999999999', leadCount: 0 }, 'LEAD_PHONE_NOT_FOUND'],
+    [{ instanceConfigured: true, phoneNormalized: '5511999999999', leadCount: 2 }, 'LEAD_PHONE_MULTIPLE'],
+    [{ instanceConfigured: true, phoneNormalized: '5511999999999', leadCount: 1, otherChatLinkCount: 1 }, 'REMOTE_CHAT_MULTIPLE'],
+    [{ instanceConfigured: true, phoneNormalized: '5511999999999', leadCount: 1 }, 'CHAT_LINK_NOT_FOUND'],
+  ];
+  for (const [input, expected] of cases) assert.equal(classifyWa2LinkResolution(input), expected);
+  assert.equal(classifyWa2LinkResolution({ instanceConfigured: true, linkCount: 1 }), null);
+});
 
 const baseEvent = {
   source: 'WHATSAPP',

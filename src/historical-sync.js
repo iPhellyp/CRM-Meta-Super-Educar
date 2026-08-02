@@ -40,6 +40,25 @@ export function canAdvanceByOfficialCrmLabel(currentStage, desiredStage) {
   return Boolean(allowed[desiredStage]?.includes(currentStage));
 }
 
+export function classifyWa2LinkResolution({
+  instanceConfigured,
+  linkCount = 0,
+  phoneNormalized = null,
+  jid = '',
+  leadCount = 0,
+  otherChatLinkCount = 0,
+}) {
+  if (!instanceConfigured) return 'INSTANCE_MISMATCH';
+  if (linkCount > 1) return 'CHAT_LINK_MULTIPLE';
+  if (linkCount === 1) return null;
+  if (!phoneNormalized && /@lid$/i.test(String(jid || ''))) return 'LID_UNRESOLVED';
+  if (!phoneNormalized) return 'LEAD_PHONE_NOT_FOUND';
+  if (leadCount === 0) return 'LEAD_PHONE_NOT_FOUND';
+  if (leadCount > 1) return 'LEAD_PHONE_MULTIPLE';
+  if (otherChatLinkCount > 0) return 'REMOTE_CHAT_MULTIPLE';
+  return 'CHAT_LINK_NOT_FOUND';
+}
+
 export function decideInboundLabelAction({
   event,
   currentStage,

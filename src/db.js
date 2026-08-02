@@ -22,7 +22,10 @@ import {
   isWa2LabelStage,
   stagesSharingWa2Label,
 } from './wa2-label-sync.js';
-import { decideInboundLabelAction } from './historical-sync.js';
+import {
+  classifyWa2LinkResolution,
+  decideInboundLabelAction,
+} from './historical-sync.js';
 
 const { Pool } = pg;
 const DEFAULT_TENANT_ID = 'super-educar';
@@ -2956,7 +2959,32 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
       if (!instance) {
         decision = { action: 'CONFLICT', code: 'INSTANCE_NOT_CONFIGURED' };
       } else if (!lead) {
-        decision = { action: 'CONFLICT', code: 'CHAT_NOT_LINKED_EXACTLY_ONCE' };
+        const linkResolution = await client.query(
+          `SELECT COUNT(DISTINCT candidate.id)::int AS lead_count,
+                  COUNT(DISTINCT other_link.id)::int AS other_chat_link_count
+           FROM leads candidate
+           LEFT JOIN wa2_contact_links other_link
+             ON other_link.tenant_id = candidate.tenant_id
+            AND other_link.wa2_instance_id = $2
+            AND other_link.lead_id = candidate.id
+            AND other_link.unlinked_at IS NULL
+            AND other_link.remote_chat_id <> $3
+           WHERE candidate.tenant_id = $1
+             AND candidate.phone_normalized = $4`,
+          [tenantId(), instance.id, event.chatId, event.phoneNormalized],
+        );
+        const resolution = linkResolution.rows[0] || {};
+        decision = {
+          action: 'CONFLICT',
+          code: classifyWa2LinkResolution({
+            instanceConfigured: true,
+            linkCount: links.rowCount,
+            phoneNormalized: event.phoneNormalized,
+            jid: event.jid,
+            leadCount: Number(resolution.lead_count || 0),
+            otherChatLinkCount: Number(resolution.other_chat_link_count || 0),
+          }),
+        };
       } else {
         const bindings = await client.query(
           `SELECT remote_label_id, array_agg(stage ORDER BY stage) AS stages

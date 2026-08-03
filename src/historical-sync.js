@@ -14,6 +14,18 @@ const STAGE_ORDER = Object.freeze({
   PAID: 9,
 });
 
+const META_LABEL_REQUIRED_STAGES = new Set([
+  'QUALIFIED',
+  'NEGOTIATING',
+  'OPPORTUNITY',
+  'AWAITING_ENROLLMENT',
+  'AWAITING_PAYMENT',
+]);
+
+export function canCreateMetaForStage(stage, officialLabelEvidence = false) {
+  return !META_LABEL_REQUIRED_STAGES.has(stage) || officialLabelEvidence === true;
+}
+
 export function canonicalInboundStage(stages) {
   const unique = [...new Set(stages)];
   const groups = [

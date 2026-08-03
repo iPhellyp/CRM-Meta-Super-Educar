@@ -85,6 +85,23 @@ test('importação Meta usa paginação Graph por formulário e cursor retomáve
   assert.match(worker, /completeMetaHistoricalPage\(run\.id, page\)/);
 });
 
+test('backfill de MQL exige vínculo, binding e receipt APPLY vigente', () => {
+  const start = db.indexOf('export async function backfillMetaQualifiedEvents');
+  const end = db.indexOf('export async function getDashboardCounts', start);
+  const source = db.slice(start, end);
+  assert.match(source, /wa2_contact_links/);
+  assert.match(source, /wa2_label_bindings/);
+  assert.match(source, /wa2_label_event_receipts/);
+  assert.match(source, /receipt\.operation = 'APPLY'/);
+  assert.match(source, /removed\.operation = 'REMOVE'/);
+  assert.match(source, /officialLabelEvidence: true/);
+});
+
+test('interface informa MQL não criado sem evidência WA2 e não acessa status nulo', () => {
+  assert.match(server, /if \(!result\.event\)/);
+  assert.match(server, /etiqueta oficial do WhatsApp não confirmada/);
+});
+
 test('reconciliação não une por telefone e protege vínculos ativos', () => {
   const start = db.indexOf('export async function completeWa2ReconciliationItem');
   const end = db.indexOf('async function finishReconciliationItem');

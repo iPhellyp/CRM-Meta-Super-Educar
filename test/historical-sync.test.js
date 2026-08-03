@@ -3,12 +3,21 @@ import test from 'node:test';
 import {
   canonicalInboundStage,
   canAdvanceByOfficialCrmLabel,
+  canCreateMetaForStage,
   classifyWa2LinkResolution,
   decideInboundLabelAction,
   historicalRetryDelayMs,
   reconciliationFailureResult,
   sanitizeHistoricalError,
 } from '../src/historical-sync.js';
+
+test('MQL e oportunidade exigem evidência da etiqueta oficial WA2', () => {
+  for (const stage of ['QUALIFIED', 'NEGOTIATING', 'OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT']) {
+    assert.equal(canCreateMetaForStage(stage, false), false, stage);
+    assert.equal(canCreateMetaForStage(stage, true), true, stage);
+  }
+  assert.equal(canCreateMetaForStage('IN_SERVICE', false), true);
+});
 
 test('classifica a causa do vínculo WA2 sem criar vínculo implícito', () => {
   const cases = [

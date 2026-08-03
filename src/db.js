@@ -23,6 +23,7 @@ import {
   stagesSharingWa2Label,
 } from './wa2-label-sync.js';
 import {
+  canCreateMetaForStage,
   classifyWa2LinkResolution,
   decideInboundLabelAction,
 } from './historical-sync.js';
@@ -1962,8 +1963,18 @@ async function enqueueConversionJob(client, event) {
   return true;
 }
 
-async function ensureMetaEventForStage(client, { lead, stage, eventTime, mode }) {
+async function ensureMetaEventForStage(
+  client,
+  { lead, stage, eventTime, mode, officialLabelEvidence = false },
+) {
   if (!lead.meta_lead_id) return { event: null, jobCreated: false };
+  if (!canCreateMetaForStage(stage, officialLabelEvidence)) {
+    return {
+      event: null,
+      jobCreated: false,
+      reason: 'OFFICIAL_WA2_LABEL_REQUIRED',
+    };
+  }
   const eventNames = [getStageEventName(stage)];
   if (['NEGOTIATING', 'OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT'].includes(stage)) {
     eventNames.unshift('Marketing Qualified Lead');
@@ -2176,10 +2187,18 @@ export async function moveLeadStage(id, stage, {
          SET meta_event_id = $3,
              metadata = metadata || jsonb_build_object(
                'metaEventName', $4::text,
-               'metaJobCreated', $5::boolean
+               'metaJobCreated', $5::boolean,
+               'metaEvidence', $6::text
              )
          WHERE tenant_id = $1 AND id = $2`,
-        [lead.tenant_id, historyResult.rows[0].id, event.id, eventName, jobCreated],
+        [
+          lead.tenant_id,
+          historyResult.rows[0].id,
+          event?.id || null,
+          eventName,
+          jobCreated,
+          event ? 'WA2_OFFICIAL_LABEL_CONFIRMED' : 'OFFICIAL_WA2_LABEL_REQUIRED',
+        ],
       );
     }
 
@@ -2316,6 +2335,93 @@ export async function backfillMetaQualifiedEvents({ batchSize = 50, execute = fa
            AND event.lead_id = lead.id
            AND event.event_name = 'Marketing Qualified Lead'
        )
+       AND (
+         SELECT count(*)
+         FROM wa2_contact_links link
+         JOIN wa2_instances instance
+           ON instance.tenant_id = link.tenant_id
+          AND instance.id = link.wa2_instance_id
+          AND instance.enabled = true
+         WHERE link.tenant_id = lead.tenant_id
+           AND link.lead_id = lead.id
+           AND link.unlinked_at IS NULL
+       ) = 1
+       AND EXISTS (
+         SELECT 1
+         FROM wa2_contact_links link
+         JOIN wa2_instances instance
+           ON instance.tenant_id = link.tenant_id
+          AND instance.id = link.wa2_instance_id
+          AND instance.enabled = true
+         JOIN wa2_label_bindings binding
+           ON binding.tenant_id = link.tenant_id
+          AND binding.wa2_instance_id = link.wa2_instance_id
+          AND binding.stage = lead.stage
+          AND binding.enabled = true
+         JOIN wa2_label_event_receipts receipt
+           ON receipt.tenant_id = link.tenant_id
+          AND receipt.remote_instance_id = instance.remote_instance_id
+          AND receipt.remote_chat_id = link.remote_chat_id
+          AND receipt.remote_label_id = binding.remote_label_id
+          AND receipt.operation = 'APPLY'
+         WHERE link.tenant_id = lead.tenant_id
+           AND link.lead_id = lead.id
+           AND link.unlinked_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM wa2_label_event_receipts removed
+             WHERE removed.tenant_id = receipt.tenant_id
+               AND removed.remote_instance_id = receipt.remote_instance_id
+               AND removed.remote_chat_id = receipt.remote_chat_id
+               AND removed.remote_label_id = receipt.remote_label_id
+               AND removed.operation = 'REMOVE'
+               AND removed.observed_at >= receipt.observed_at
+           )
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM wa2_contact_links other_link
+         JOIN wa2_instances other_instance
+           ON other_instance.tenant_id = other_link.tenant_id
+          AND other_instance.id = other_link.wa2_instance_id
+          AND other_instance.enabled = true
+         JOIN wa2_label_bindings other_binding
+           ON other_binding.tenant_id = other_link.tenant_id
+          AND other_binding.wa2_instance_id = other_link.wa2_instance_id
+          AND other_binding.enabled = true
+         JOIN wa2_label_event_receipts other_receipt
+           ON other_receipt.tenant_id = other_link.tenant_id
+          AND other_receipt.remote_instance_id = other_instance.remote_instance_id
+          AND other_receipt.remote_chat_id = other_link.remote_chat_id
+          AND other_receipt.remote_label_id = other_binding.remote_label_id
+          AND other_receipt.operation = 'APPLY'
+         WHERE other_link.tenant_id = lead.tenant_id
+           AND other_link.lead_id = lead.id
+           AND other_link.unlinked_at IS NULL
+           AND other_binding.remote_label_id <> (
+             SELECT binding.remote_label_id
+             FROM wa2_contact_links target_link
+             JOIN wa2_label_bindings binding
+               ON binding.tenant_id = target_link.tenant_id
+              AND binding.wa2_instance_id = target_link.wa2_instance_id
+              AND binding.stage = lead.stage
+              AND binding.enabled = true
+             WHERE target_link.tenant_id = lead.tenant_id
+               AND target_link.lead_id = lead.id
+               AND target_link.unlinked_at IS NULL
+             LIMIT 1
+           )
+           AND NOT EXISTS (
+             SELECT 1
+             FROM wa2_label_event_receipts other_removed
+             WHERE other_removed.tenant_id = other_receipt.tenant_id
+               AND other_removed.remote_instance_id = other_receipt.remote_instance_id
+               AND other_removed.remote_chat_id = other_receipt.remote_chat_id
+               AND other_removed.remote_label_id = other_receipt.remote_label_id
+               AND other_removed.operation = 'REMOVE'
+               AND other_removed.observed_at >= other_receipt.observed_at
+           )
+       )
      ORDER BY lead.updated_at, lead.id
      LIMIT $2`,
     [tenantId(), limit],
@@ -2334,6 +2440,7 @@ export async function backfillMetaQualifiedEvents({ batchSize = 50, execute = fa
         stage: lead.stage,
         eventTime: lead.qualified_at || lead.updated_at,
         mode: process.env.META_TEST_MODE === 'true' ? 'test' : 'live',
+        officialLabelEvidence: true,
       });
       if (result.event) created += 1;
       if (result.jobCreated) queued += 1;
@@ -3101,6 +3208,10 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
         stage: decision.targetStage,
         eventTime: new Date(event.observedAt),
         mode: process.env.META_TEST_MODE === 'true' ? 'test' : 'live',
+        officialLabelEvidence: Boolean(
+          currentRemoteLabelIds.includes(event.waLabelId) &&
+          currentCrmLabelStages.length <= 1,
+        ),
       });
       void history;
     }
@@ -3678,6 +3789,7 @@ export async function completeWa2ReconciliationItem(
           stage: decision.targetStage,
           eventTime: new Date(row.created_at || Date.now()),
           mode: process.env.META_TEST_MODE === 'true' ? 'test' : 'live',
+          officialLabelEvidence: labeledCrm && distinctLabels.length === 1,
         });
       } else if (['CONFLICT', 'PENDING_CONFIRMATION'].includes(decision.action)) {
         await finishReconciliationItem(client, row, 'CONFLICT');

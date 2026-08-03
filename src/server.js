@@ -1666,6 +1666,9 @@ app.post('/leads', async (req, res) => {
 function metaResultSuffix(eventName, result) {
   if (!eventName) return '';
   if (!result.attributed) return ' Lead sem atribuição Meta; nenhum evento foi criado.';
+  if (!result.event) {
+    return ' Evento Meta não criado: etiqueta oficial do WhatsApp não confirmada.';
+  }
   if (result.event.status === 'SENT') return ' O evento Meta já havia sido enviado.';
   return result.jobCreated ? ' Evento Meta enfileirado.' : ' Evento Meta já está na fila.';
 }

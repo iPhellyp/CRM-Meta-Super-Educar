@@ -1,8 +1,8 @@
 const CACHE_PREFIX = 'crm-meta-public-';
-const CACHE_NAME = `${CACHE_PREFIX}v12`;
+const CACHE_NAME = `${CACHE_PREFIX}__ASSET_VERSION__`;
 const PUBLIC_ASSETS = [
-  '/app.css?v=12',
-  '/app.js?v=12',
+  '/app.css?v=__ASSET_VERSION__',
+  '/app.js?v=__ASSET_VERSION__',
   '/manifest.webmanifest',
   '/offline.html',
   '/icons/app-icon-192.png',

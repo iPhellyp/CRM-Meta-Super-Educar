@@ -57,3 +57,18 @@ test('polling envia os filtros atuais e não recarrega a página', () => {
   assert.match(polling, /cache: 'no-store'/);
   assert.doesNotMatch(polling, /window\.location\.reload/);
 });
+
+test('filtro WhatsApp separa oficiais, externas, ausência e REMOVE vigente', () => {
+  const dbSource = fs.readFileSync(new URL('../src/db.js', import.meta.url), 'utf8');
+  assert.match(dbSource, /WA2_EXTERNAL_LABEL_FILTER = '__external__'/);
+  assert.match(dbSource, /WA2_NO_EXTERNAL_LABEL_FILTER = '__none__'/);
+  assert.match(dbSource, /binding\.id IS NULL/);
+  assert.match(dbSource, /NOT \$\{exists\}/);
+  assert.match(dbSource, /removed\.operation = 'REMOVE'/);
+  const views = fs.readFileSync(new URL('../src/views.js', import.meta.url), 'utf8');
+  assert.match(views, /<label>Etiqueta WhatsApp<select name="labelId">/);
+  assert.match(views, /Com qualquer etiqueta externa/);
+  assert.match(views, /Sem etiquetas externas/);
+  assert.match(views, /Etapas CRM/);
+  assert.match(views, /Etiquetas complementares/);
+});

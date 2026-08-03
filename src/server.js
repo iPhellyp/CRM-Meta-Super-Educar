@@ -35,6 +35,7 @@ import {
   healthcheck,
   confirmLeadFileImport,
   listLeads,
+  listWa2LabelCatalog,
   listLeadHistory,
   listMetaConnections,
   listMetaImportForms,
@@ -1609,13 +1610,29 @@ app.get('/', async (req, res) => {
   if (!z.string().uuid().safeParse(filters.metaConnectionId).success) {
     filters.metaConnectionId = '';
   }
-  const [leadRows, counts, wa2Instances, metaConnections, whatsappMessage] = await Promise.all([
+  const [leadRows, counts, wa2Instances, metaConnections, whatsappMessage, wa2LabelCatalog] = await Promise.all([
     listLeads(filters),
     getDashboardCounts(),
     listWa2InstancesLocal({ enabledOnly: true }),
     listMetaConnections(),
     getTenantWhatsAppMessage(),
+    listWa2LabelCatalog(),
   ]);
+  const remoteLabelResults = await Promise.allSettled(
+    wa2Instances.map((instance) => listWa2Labels(instance.remote_instance_id)),
+  );
+  const catalogById = new Map(wa2LabelCatalog.map((label) => [label.id, { ...label }]));
+  for (const result of remoteLabelResults) {
+    if (result.status !== 'fulfilled' || !Array.isArray(result.value)) continue;
+    for (const label of result.value) {
+      if (!label?.id) continue;
+      const existing = catalogById.get(String(label.id)) || { id: String(label.id), official: false };
+      catalogById.set(String(label.id), {
+        ...existing,
+        name: String(label.name || existing.name || label.id),
+      });
+    }
+  }
   const leads = leadRows.slice(0, 100);
   const baseMetaStatus = metaConfigStatus();
   const hasValidMetaConnection = metaConnections.some(
@@ -1636,6 +1653,7 @@ app.get('/', async (req, res) => {
       hasNext: leadRows.length > 100,
     },
     wa2Instances,
+    wa2LabelCatalog: [...catalogById.values()],
     metaConnections,
     whatsappMessage,
     csrfToken: issueCsrfToken(req, res),

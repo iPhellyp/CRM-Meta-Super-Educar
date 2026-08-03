@@ -6,6 +6,8 @@ RUN npm ci --omit=dev
 COPY --chown=node:node src ./src
 COPY --chown=node:node sql ./sql
 COPY --chown=node:node public ./public
+ARG RELEASE_VERSION=dev
+RUN sed -i "s/__ASSET_VERSION__/${RELEASE_VERSION}/g" public/service-worker.js public/offline.html
 COPY --chown=node:node scripts/backfill-meta-phones.js ./scripts/backfill-meta-phones.js
 COPY --chown=node:node scripts/backfill-meta-qualified.js ./scripts/backfill-meta-qualified.js
 USER node

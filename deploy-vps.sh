@@ -303,7 +303,7 @@ wait_for_one_healthy_instance "${stack_name}_postgres"
 echo "PostgreSQL confirmado com uma replica, uma task Running e health healthy"
 
 BACKUP_ROOT="$BACKUP_ROOT" bash ./scripts/backup.sh
-docker build -t "crm-meta-super-educar:${IMAGE_TAG}" .
+docker build --build-arg "RELEASE_VERSION=${IMAGE_TAG}" -t "crm-meta-super-educar:${IMAGE_TAG}" .
 echo "Imagem publicada localmente: crm-meta-super-educar:${IMAGE_TAG}"
 
 previous_app_image="$(

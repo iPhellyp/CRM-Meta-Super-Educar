@@ -12,6 +12,9 @@ import {
   normalizeWa2LabelName,
 } from './wa2-label-sync.js';
 
+const ASSET_VERSION = String(process.env.RELEASE_VERSION || 'dev')
+  .replace(/[^A-Za-z0-9._-]/g, '-');
+
 function esc(value) {
   return String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -118,8 +121,8 @@ function layout(title, body, { logged = true, csrfToken = '' } = {}) {
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icons/app-icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/icons/app-icon-192.png">
-  <link rel="stylesheet" href="/app.css?v=12">
-  <script src="/app.js?v=12" defer></script>
+  <link rel="stylesheet" href="/app.css?v=${esc(ASSET_VERSION)}">
+  <script src="/app.js?v=${esc(ASSET_VERSION)}" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Ir para o conteúdo principal</a>
@@ -756,6 +759,7 @@ export function dashboardView({
   filters = {},
   pagination = { page: 1, hasNext: false },
   wa2Instances = [],
+  wa2LabelCatalog = [],
   metaConnections = [],
   whatsappMessage = '',
   csrfToken = '',
@@ -817,7 +821,7 @@ export function dashboardView({
         <label>Filtro comercial<select name="commercial"><option value="">Todos</option><option value="mql"${filters.commercial === 'mql' ? ' selected' : ''}>Qualificados — CRM 02 a CRM 04</option></select></label>
         <label>Motivo da perda<select name="lostReason"><option value="">Todos</option>${Object.entries(LOST_REASON_LABELS).map(([value, label]) => `<option value="${value}"${filters.lostReason === value ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
         <label>Instância WA2<select name="instanceId"><option value="">Todas</option>${wa2Instances.map((instance) => `<option value="${esc(instance.id)}"${filters.instanceId === instance.id ? ' selected' : ''}>${detailValue(instance.name || instance.remote_instance_id)}</option>`).join('')}</select></label>
-        <label>Etiqueta WA2 (ID ou nome)<input name="labelId" value="${esc(filters.labelId || '')}"></label>
+        <label>Etiqueta WhatsApp<select name="labelId">${labelFilterOptions(wa2LabelCatalog, filters.labelId || '')}</select></label>
         <label>Conexão Meta<select name="metaConnectionId"><option value="">Todas</option>${metaConnections.map((connection) => `<option value="${esc(connection.id)}"${filters.metaConnectionId === connection.id ? ' selected' : ''}>${esc(connection.name)}</option>`).join('')}</select></label>
         <label>BM<input name="businessId" value="${esc(filters.businessId || '')}" inputmode="numeric"></label>
         <label>Página<input name="pageId" value="${esc(filters.pageId || '')}"></label>
@@ -1688,6 +1692,18 @@ export function wa2LinkConfirmView({
       <a class="small button-link" href="/leads/${esc(lead.id)}/wa2">Cancelar</a>
     </div>
   `, { csrfToken });
+}
+
+function labelFilterOptions(catalog, selected) {
+  const labels = Array.isArray(catalog) ? catalog : [];
+  const official = labels.filter((label) => label.official || /^CRM 0[1-5] |^CRM 99 /.test(label.name));
+  const external = labels.filter((label) => !official.includes(label));
+  const option = (label) => `<option value="${esc(label.id)}"${selected === label.id ? ' selected' : ''}>${esc(label.name)}</option>`;
+  return `<option value="">Todas</option>
+    <option value="__external__"${selected === '__external__' ? ' selected' : ''}>Com qualquer etiqueta externa</option>
+    <option value="__none__"${selected === '__none__' ? ' selected' : ''}>Sem etiquetas externas</option>
+    <optgroup label="Etapas CRM">${official.map(option).join('')}</optgroup>
+    <optgroup label="Etiquetas complementares">${external.map(option).join('')}</optgroup>`;
 }
 
 export function chatView({

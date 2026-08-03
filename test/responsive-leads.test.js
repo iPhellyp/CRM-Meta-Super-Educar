@@ -58,6 +58,10 @@ function render(overrides = {}) {
     filters: { search: 'Ana & Bia', city: 'Montes Claros', stage: 'NEW', sort: 'recent' },
     pagination: { page: 2, hasNext: true },
     wa2Instances: [],
+    wa2LabelCatalog: [
+      { id: '57', name: 'CRM 01 - Em atendimento', official: true },
+      { id: '36', name: 'FEZ PROVA', official: false },
+    ],
     metaConnections: [],
     whatsappMessage: 'Olá, {{nome}}!',
     csrfToken: '<csrf>',
@@ -105,6 +109,11 @@ test('filtros mantêm busca rápida, drawer, resumo, limpeza e paginação', () 
   assert.match(html, /role="search"/);
   assert.match(html, /id="lead-search"/);
   assert.match(html, /data-filter-open aria-haspopup="dialog"/);
+  assert.match(html, /<label>Etiqueta WhatsApp<select name="labelId">/);
+  assert.match(html, /CRM 01 - Em atendimento/);
+  assert.match(html, /FEZ PROVA/);
+  assert.match(html, /Com qualquer etiqueta externa/);
+  assert.match(html, /Sem etiquetas externas/);
   assert.match(html, /<dialog id="advanced-filters"/);
   assert.match(html, /Filtros aplicados:/);
   assert.match(html, /Busca: Ana &amp; Bia/);
@@ -113,6 +122,15 @@ test('filtros mantêm busca rápida, drawer, resumo, limpeza e paginação', () 
   assert.match(html, /href="\/"/);
   assert.match(html, /search=Ana\+%26\+Bia&amp;city=Montes\+Claros&amp;stage=NEW/);
   assert.match(html, /Página 2/);
+});
+
+test('filtro de etiqueta selecionado permanece no CSV e na paginação', () => {
+  const html = render({
+    filters: { search: '', labelId: '57', sort: 'recent' },
+  });
+  assert.match(html, /<option value="57" selected>CRM 01 - Em atendimento<\/option>/);
+  assert.match(html, /href="\/leads\/export\.csv\?labelId=57/);
+  assert.match(html, /href="\/[?]labelId=57&amp;sort=recent&amp;page=1/);
 });
 
 test('navegação agrupada tem drawer, saída separada e nomes acessíveis', () => {

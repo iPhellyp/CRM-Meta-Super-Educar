@@ -36,8 +36,8 @@ test('manifest é instalável, pt-BR e não contém dados privados', () => {
 test('service worker guarda somente assets públicos permitidos', () => {
   assert.match(worker, /const PUBLIC_ASSETS = \[/);
   for (const asset of [
-    '/app.css?v=12',
-    '/app.js?v=12',
+    '/app.css?v=__ASSET_VERSION__',
+    '/app.js?v=__ASSET_VERSION__',
     '/manifest.webmanifest',
     '/offline.html',
     '/icons/app-icon-192.png',
@@ -56,14 +56,14 @@ test('service worker guarda somente assets públicos permitidos', () => {
 
 test('HTML e service worker usam a mesma versão de CSS e JavaScript', () => {
   const views = read('src/views.js');
-  const cssVersion = views.match(/app\.css\?v=(\d+)/)?.[1];
-  const jsVersion = views.match(/app\.js\?v=(\d+)/)?.[1];
-  assert.equal(cssVersion, jsVersion);
-  assert.match(worker, new RegExp(`CACHE_NAME = .+v${cssVersion}`));
-  assert.match(worker, new RegExp(`/app\\.css\\?v=${cssVersion}`));
-  assert.match(worker, new RegExp(`/app\\.js\\?v=${jsVersion}`));
-  assert.doesNotMatch(views, /\?v=4/);
-  assert.doesNotMatch(worker, /\?v=4|public-v4/);
+  assert.match(views, /const ASSET_VERSION = String\(process\.env\.RELEASE_VERSION \|\| 'dev'\)/);
+  assert.match(views, /app\.css\?v=\$\{esc\(ASSET_VERSION\)\}/);
+  assert.match(views, /app\.js\?v=\$\{esc\(ASSET_VERSION\)\}/);
+  assert.match(worker, /CACHE_NAME = `\$\{CACHE_PREFIX\}__ASSET_VERSION__`/);
+  assert.match(worker, /\/app\.css\?v=__ASSET_VERSION__/);
+  assert.match(worker, /\/app\.js\?v=__ASSET_VERSION__/);
+  assert.doesNotMatch(views, /\?v=12|\?v=4/);
+  assert.doesNotMatch(worker, /\?v=12|\?v=4|public-v4/);
 });
 
 test('offline é genérico e não contém conteúdo administrativo', () => {
@@ -123,16 +123,18 @@ test('topbar desktop é horizontal e usa dropdowns sem manter o reset antigo', (
   assert.doesNotMatch(css, /premium-topbar-desktop-reset-v9/);
 });
 
-test('dashboard preserva ações agrupadas e cache bust v11', () => {
+test('dashboard preserva ações agrupadas e cache versionado pela release', () => {
   const views = read('src/views.js');
   assert.match(views, /class="nav-group"/);
   assert.match(views, /Abrir no WhatsApp/);
   assert.match(views, /class="inline-stage-actions"/);
   assert.doesNotMatch(views, /<summary>Atualizar etapa<\/summary>/);
   assert.match(views, /Mais ações/);
-  assert.match(views, /app\.css\?v=12/);
-  assert.match(views, /app\.js\?v=12/);
-  assert.match(worker, /CACHE_NAME = .+v12/);
-  assert.match(worker, /\/app\.css\?v=12/);
-  assert.match(worker, /\/app\.js\?v=12/);
+  assert.match(views, /app\.css\?v=\$\{esc\(ASSET_VERSION\)\}/);
+  assert.match(views, /app\.js\?v=\$\{esc\(ASSET_VERSION\)\}/);
+  assert.match(worker, /CACHE_NAME = `\$\{CACHE_PREFIX\}__ASSET_VERSION__`/);
+  assert.match(worker, /\/app\.css\?v=__ASSET_VERSION__/);
+  assert.match(worker, /\/app\.js\?v=__ASSET_VERSION__/);
+  assert.match(read('Dockerfile'), /RELEASE_VERSION/);
+  assert.match(read('docker-stack.yml'), /RELEASE_VERSION: \$\{IMAGE_TAG\}/);
 });

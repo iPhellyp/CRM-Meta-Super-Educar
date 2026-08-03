@@ -31,6 +31,8 @@ import {
 const { Pool } = pg;
 const DEFAULT_TENANT_ID = 'super-educar';
 const WORKER_NAME = 'meta-worker';
+export const WA2_EXTERNAL_LABEL_FILTER = '__external__';
+export const WA2_NO_EXTERNAL_LABEL_FILTER = '__none__';
 
 export { Wa2LinkRuleError as Wa2DataError } from './wa2-link-rules.js';
 
@@ -199,8 +201,31 @@ export async function listLeads({
     )`);
   }
   if (labelId) {
-    values.push(labelId);
-    where.push(`EXISTS (
+    if ([WA2_EXTERNAL_LABEL_FILTER, WA2_NO_EXTERNAL_LABEL_FILTER].includes(labelId)) {
+      const exists = `EXISTS (
+        SELECT 1 FROM wa2_contact_links link
+        JOIN wa2_instances instance ON instance.tenant_id = link.tenant_id AND instance.id = link.wa2_instance_id
+        JOIN wa2_label_event_receipts receipt
+          ON receipt.tenant_id = link.tenant_id
+         AND receipt.remote_instance_id = instance.remote_instance_id
+         AND receipt.remote_chat_id = link.remote_chat_id
+        LEFT JOIN wa2_label_bindings binding
+          ON binding.tenant_id = link.tenant_id
+         AND binding.wa2_instance_id = link.wa2_instance_id
+         AND binding.remote_label_id = receipt.remote_label_id
+        WHERE link.tenant_id = leads.tenant_id AND link.lead_id = leads.id
+          AND link.unlinked_at IS NULL AND receipt.operation = 'APPLY'
+          AND binding.id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM wa2_label_event_receipts removed
+            WHERE removed.tenant_id = receipt.tenant_id AND removed.remote_instance_id = receipt.remote_instance_id
+              AND removed.remote_chat_id = receipt.remote_chat_id
+              AND removed.remote_label_id = receipt.remote_label_id
+              AND removed.operation = 'REMOVE' AND removed.observed_at > receipt.observed_at)
+      )`;
+      where.push(labelId === WA2_EXTERNAL_LABEL_FILTER ? exists : `NOT ${exists}`);
+    } else {
+      values.push(labelId);
+      where.push(`EXISTS (
       SELECT 1 FROM wa2_contact_links link
       JOIN wa2_label_event_receipts receipt
         ON receipt.tenant_id = link.tenant_id
@@ -214,6 +239,7 @@ export async function listLeads({
             AND removed.remote_label_id = receipt.remote_label_id
             AND removed.operation = 'REMOVE' AND removed.observed_at > receipt.observed_at)
     )`);
+    }
   }
   if (attributed === 'yes') where.push('leads.meta_lead_id IS NOT NULL');
   if (attributed === 'no') where.push('leads.meta_lead_id IS NULL');
@@ -1248,6 +1274,27 @@ export async function getDefaultWa2Instance() {
     [tenantId()],
   );
   return result.rows[0] || null;
+}
+
+export async function listWa2LabelCatalog() {
+  const result = await pool.query(
+    `SELECT catalog.remote_label_id AS id,
+            COALESCE(MAX(catalog.remote_label_name), catalog.remote_label_id) AS name,
+            bool_or(catalog.official) AS official
+     FROM (
+       SELECT remote_label_id, remote_label_name, true AS official
+       FROM wa2_label_bindings
+       WHERE tenant_id = $1
+       UNION ALL
+       SELECT receipt.remote_label_id, NULL, false AS official
+       FROM wa2_label_event_receipts receipt
+       WHERE receipt.tenant_id = $1
+     ) catalog
+     GROUP BY catalog.remote_label_id
+     ORDER BY bool_or(catalog.official) DESC, name, id`,
+    [tenantId()],
+  );
+  return result.rows;
 }
 
 function optionalActor(actor) {

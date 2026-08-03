@@ -69,8 +69,8 @@ test('layout premium mantém ação WhatsApp', async () => {
   ]);
 
   assert.match(view, /Abrir no WhatsApp/);
-  assert.match(view, /\/app\.css\?v=12/);
+  assert.match(view, /\/app\.css\?v=\$\{esc\(ASSET_VERSION\)\}/);
   assert.match(view, /class="nav-group"/);
   assert.match(css, /--wa-green/);
-  assert.match(serviceWorker, /\$\{CACHE_PREFIX\}v12/);
+  assert.match(serviceWorker, /\$\{CACHE_PREFIX\}__ASSET_VERSION__/);
 });

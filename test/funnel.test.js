@@ -74,7 +74,7 @@ test('mapeia somente eventos Meta positivos autorizados', () => {
     assert.equal(getStageEventName(stage), 'Sales Opportunity');
   }
   assert.equal(getStageEventName(STAGES.ENROLLED), null);
-  assert.equal(getStageEventName(STAGES.PAID), 'Converted');
+  assert.equal(getStageEventName(STAGES.PAID), null);
   assert.equal(getStageEventName(STAGES.LOST), null);
 });
 

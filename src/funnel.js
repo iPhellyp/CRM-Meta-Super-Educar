@@ -108,7 +108,6 @@ const STAGE_EVENTS = Object.freeze({
   [STAGES.NEGOTIATING]: 'Sales Opportunity',
   [STAGES.AWAITING_ENROLLMENT]: 'Sales Opportunity',
   [STAGES.AWAITING_PAYMENT]: 'Sales Opportunity',
-  [STAGES.PAID]: 'Converted',
 });
 
 export const HISTORY_ORIGINS = Object.freeze([

@@ -2095,10 +2095,10 @@ export async function replaceWa2ContactLink({
 }
 
 async function createOrGetMetaEvent(client, { lead, eventName, eventTime, mode }) {
-  const eventId = `crm:${lead.id}:${eventName.replaceAll(' ', '_').toLowerCase()}:${mode}`;
   const destination = lead.meta_connection_id
     ? await client.query(
-      `SELECT connection.id AS meta_connection_id, dataset.id AS meta_dataset_id
+      `SELECT connection.id AS meta_connection_id, dataset.id AS meta_dataset_id,
+              dataset.dataset_id AS meta_dataset_value
        FROM meta_connections connection
        JOIN meta_datasets dataset
          ON dataset.tenant_id = connection.tenant_id
@@ -2115,6 +2115,9 @@ async function createOrGetMetaEvent(client, { lead, eventName, eventTime, mode }
     )
     : { rows: [] };
   const target = destination.rows[0] || null;
+  if (!target) return null;
+  const datasetKey = target?.meta_dataset_value || process.env.META_DATASET_ID || 'unset';
+  const eventId = `crm:${lead.id}:${eventName.replaceAll(' ', '_').toLowerCase()}:${datasetKey}:${mode}`;
   const inserted = await client.query(
     `INSERT INTO meta_conversion_events (
        tenant_id, lead_id, event_name, event_id, event_time,
@@ -2170,32 +2173,39 @@ async function ensureMetaEventForStage(
   client,
   { lead, stage, eventTime, mode, officialLabelEvidence = false },
 ) {
-  if (!lead.meta_lead_id) return { event: null, jobCreated: false };
+  const sequenceSkipped = ['NEGOTIATING', 'OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT'].includes(stage);
+  if (process.env.META_CAPI_OUTBOUND_ENABLED !== 'true') {
+    return { event: null, jobCreated: false, reason: 'META_OUTBOUND_DISABLED', sequenceSkipped };
+  }
+  if (!lead.meta_lead_id) return { event: null, jobCreated: false, reason: 'META_LEAD_ID_MISSING', sequenceSkipped };
   if (!canCreateMetaForStage(stage, officialLabelEvidence)) {
     return {
       event: null,
       jobCreated: false,
       reason: 'OFFICIAL_WA2_LABEL_REQUIRED',
+      sequenceSkipped,
     };
   }
-  const eventNames = [getStageEventName(stage)];
-  if (['NEGOTIATING', 'OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT'].includes(stage)) {
-    eventNames.unshift('Marketing Qualified Lead');
-  }
-  const uniqueNames = [...new Set(eventNames.filter(Boolean))];
+  const eventNames = [getStageEventName(stage)].filter(Boolean);
   let primaryEvent = null;
   let jobCreated = false;
-  for (const eventName of uniqueNames) {
+  for (const eventName of eventNames) {
     const event = await createOrGetMetaEvent(client, {
       lead,
       eventName,
       eventTime: eventTime || new Date(),
       mode,
     });
+    if (!event) continue;
     primaryEvent ||= event;
     jobCreated = (await enqueueConversionJob(client, event)) || jobCreated;
   }
-  return { event: primaryEvent, jobCreated };
+  return {
+    event: primaryEvent,
+    jobCreated,
+    reason: primaryEvent ? null : 'META_DATASET_NOT_CONFIGURED',
+    sequenceSkipped,
+  };
 }
 
 async function enqueueWa2LabelJobs(
@@ -2378,8 +2388,10 @@ export async function moveLeadStage(id, stage, {
 
     let event = null;
     let jobCreated = false;
+    let metaReason = null;
+    let sequenceSkipped = false;
     if (eventName && lead.meta_lead_id) {
-      ({ event, jobCreated } = await ensureMetaEventForStage(client, {
+      ({ event, jobCreated, reason: metaReason, sequenceSkipped } = await ensureMetaEventForStage(client, {
         lead,
         stage,
         eventTime: timestampColumn ? lead[timestampColumn] : new Date(),
@@ -2391,7 +2403,8 @@ export async function moveLeadStage(id, stage, {
              metadata = metadata || jsonb_build_object(
                'metaEventName', $4::text,
                'metaJobCreated', $5::boolean,
-               'metaEvidence', $6::text
+               'metaEvidence', $6::text,
+               'metaSequenceSkipped', $7::boolean
              )
          WHERE tenant_id = $1 AND id = $2`,
         [
@@ -2400,7 +2413,8 @@ export async function moveLeadStage(id, stage, {
           event?.id || null,
           eventName,
           jobCreated,
-          event ? 'WA2_OFFICIAL_LABEL_CONFIRMED' : 'OFFICIAL_WA2_LABEL_REQUIRED',
+          event ? 'WA2_OFFICIAL_LABEL_CONFIRMED' : metaReason,
+          sequenceSkipped,
         ],
       );
     }
@@ -2706,7 +2720,7 @@ export async function claimNextJob() {
     WITH candidate AS (
       SELECT id
       FROM meta_jobs
-      WHERE tenant_id = $1 AND ((
+      WHERE tenant_id = $1 AND (job_type <> 'CONVERSION' OR $2 = 'true') AND ((
         status IN ('PENDING', 'RETRY')
         AND next_attempt_at <= now()
       ) OR (
@@ -2725,7 +2739,7 @@ export async function claimNextJob() {
     FROM candidate
     WHERE job.id = candidate.id
     RETURNING job.*
-  `, [tenantId()]);
+  `, [tenantId(), process.env.META_CAPI_OUTBOUND_ENABLED || 'false']);
   return result.rows[0] ?? null;
 }
 

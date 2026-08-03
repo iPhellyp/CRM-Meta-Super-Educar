@@ -16,7 +16,9 @@ test('MQL e oportunidade exigem evidência da etiqueta oficial WA2', () => {
     assert.equal(canCreateMetaForStage(stage, false), false, stage);
     assert.equal(canCreateMetaForStage(stage, true), true, stage);
   }
-  assert.equal(canCreateMetaForStage('IN_SERVICE', false), true);
+  for (const stage of ['NEW', 'CONTACT_STARTED', 'NO_RESPONSE', 'IN_SERVICE', 'ENROLLED', 'PAID', 'LOST', 'DUPLICATED']) {
+    assert.equal(canCreateMetaForStage(stage, true), false, stage);
+  }
 });
 
 test('classifica a causa do vínculo WA2 sem criar vínculo implícito', () => {

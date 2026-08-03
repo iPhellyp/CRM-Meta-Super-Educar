@@ -14,7 +14,7 @@ const STAGE_ORDER = Object.freeze({
   PAID: 9,
 });
 
-const META_LABEL_REQUIRED_STAGES = new Set([
+const META_EVENT_STAGES = new Set([
   'QUALIFIED',
   'NEGOTIATING',
   'OPPORTUNITY',
@@ -23,7 +23,7 @@ const META_LABEL_REQUIRED_STAGES = new Set([
 ]);
 
 export function canCreateMetaForStage(stage, officialLabelEvidence = false) {
-  return !META_LABEL_REQUIRED_STAGES.has(stage) || officialLabelEvidence === true;
+  return META_EVENT_STAGES.has(stage) && officialLabelEvidence === true;
 }
 
 export function canonicalInboundStage(stages) {

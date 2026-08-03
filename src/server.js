@@ -36,6 +36,7 @@ import {
   confirmLeadFileImport,
   listLeads,
   listWa2LabelCatalog,
+  upsertWa2LabelCatalog,
   parseWa2LabelKey,
   WA2_ANY_LABEL_FILTER,
   WA2_NO_LABEL_FILTER,
@@ -1026,6 +1027,7 @@ app.get('/wa2/labels', async (req, res) => {
     if (selectedInstance) {
       try {
         labels = await listWa2Labels(selectedInstance.remote_instance_id);
+        await upsertWa2LabelCatalog(selectedInstance.id, labels);
       } catch (error) {
         remoteError = wa2UnavailableMessage(error);
       }

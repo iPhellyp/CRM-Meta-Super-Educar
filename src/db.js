@@ -1320,6 +1320,16 @@ export async function listWa2LabelCatalog() {
        WHERE binding.tenant_id = $1
          AND instance.enabled = true
        UNION ALL
+       SELECT catalog.wa2_instance_id, instance.name AS instance_name,
+              catalog.remote_label_id, catalog.remote_label_name,
+              catalog.official, catalog.enabled
+       FROM wa2_label_catalog catalog
+       JOIN wa2_instances instance
+         ON instance.tenant_id = catalog.tenant_id AND instance.id = catalog.wa2_instance_id
+       WHERE catalog.tenant_id = $1
+         AND instance.enabled = true
+         AND catalog.enabled = true
+       UNION ALL
        SELECT link.wa2_instance_id, instance.name AS instance_name,
               receipt.remote_label_id, receipt.remote_label_name,
               false AS official, instance.enabled
@@ -1344,6 +1354,30 @@ export async function listWa2LabelCatalog() {
     id: row.remote_label_id,
     name: row.remote_label_name,
   }));
+}
+
+export async function upsertWa2LabelCatalog(instanceId, labels = []) {
+  const safeLabels = Array.isArray(labels)
+    ? labels.filter((label) => label?.id && label?.name).slice(0, 500)
+    : [];
+  for (const label of safeLabels) {
+    await pool.query(
+      `INSERT INTO wa2_label_catalog (
+         tenant_id, wa2_instance_id, remote_label_id, remote_label_name, official, updated_at
+       ) VALUES ($1,$2,$3,$4,EXISTS (
+         SELECT 1 FROM wa2_label_bindings binding
+         WHERE binding.tenant_id=$1 AND binding.wa2_instance_id=$2
+           AND binding.remote_label_id=$3 AND binding.enabled=true
+       ),now())
+       ON CONFLICT (tenant_id, wa2_instance_id, remote_label_id) DO UPDATE SET
+         remote_label_name = EXCLUDED.remote_label_name,
+         official = EXCLUDED.official,
+         enabled = true,
+         updated_at = now()`,
+      [tenantId(), instanceId, String(label.id), String(label.name).trim().slice(0, 200)],
+    );
+  }
+  return safeLabels.length;
 }
 
 export async function getWa2LabelFilterCounts({ createdAfter = operationStartAt() } = {}) {

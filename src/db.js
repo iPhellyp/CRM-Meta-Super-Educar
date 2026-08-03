@@ -75,6 +75,7 @@ function currentWa2LabelsCte() {
      AND binding.wa2_instance_id = link.wa2_instance_id
      AND binding.remote_label_id = receipt.remote_label_id
     WHERE link.tenant_id = $1 AND link.unlinked_at IS NULL
+      AND instance.enabled = true
     ORDER BY
       receipt.tenant_id, link.wa2_instance_id, receipt.remote_chat_id,
       receipt.remote_label_id, receipt.observed_at DESC, receipt.received_at DESC,
@@ -1317,6 +1318,7 @@ export async function listWa2LabelCatalog() {
        JOIN wa2_instances instance
          ON instance.tenant_id = binding.tenant_id AND instance.id = binding.wa2_instance_id
        WHERE binding.tenant_id = $1
+         AND instance.enabled = true
        UNION ALL
        SELECT link.wa2_instance_id, instance.name AS instance_name,
               receipt.remote_label_id, receipt.remote_label_name,
@@ -1331,6 +1333,7 @@ export async function listWa2LabelCatalog() {
         AND link.remote_chat_id = receipt.remote_chat_id
         AND link.unlinked_at IS NULL
        WHERE receipt.tenant_id = $1
+         AND instance.enabled = true
      ) catalog
      GROUP BY catalog.wa2_instance_id, catalog.instance_name, catalog.remote_label_id
      ORDER BY catalog.instance_name, bool_or(catalog.official) DESC, remote_label_name, catalog.remote_label_id`,

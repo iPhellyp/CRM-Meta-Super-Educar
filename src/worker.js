@@ -193,10 +193,7 @@ async function processWa2LabelJob(job) {
   return decision;
 }
 
-async function refreshIdentitiesForWa2LabelJob(job) {
-  const context = await getWa2LabelJobContext(job.id);
-  const remoteInstanceId = context?.remote_instance_id;
-
+async function refreshWa2Identities(remoteInstanceId) {
   if (!remoteInstanceId) return false;
 
   const lastRefreshAt = identityRefreshByInstance.get(remoteInstanceId) || 0;
@@ -231,6 +228,11 @@ async function refreshIdentitiesForWa2LabelJob(job) {
   }
 
   return false;
+}
+
+async function refreshIdentitiesForWa2LabelJob(job) {
+  const context = await getWa2LabelJobContext(job.id);
+  return refreshWa2Identities(context?.remote_instance_id);
 }
 
 async function handleWa2LabelFailure(job, error) {
@@ -442,7 +444,25 @@ async function processWa2Reconciliation() {
     });
     return true;
   } catch (error) {
-    const temporary = isTemporaryWa2LabelError(error) && item.attempts < 5;
+    const lidUnresolved = ['WA2_LID_UNRESOLVED', 'LID_UNRESOLVED'].includes(
+      error?.code || error?.remoteCode,
+    );
+    let refreshed = false;
+    if (lidUnresolved && item.attempts < 5) {
+      try {
+        refreshed = await refreshWa2Identities(item.remote_instance_id);
+      } catch (refreshError) {
+        console.error(JSON.stringify({
+          level: 'error',
+          msg: 'Falha ao reconstruir identidades para reconciliação WA2',
+          remoteInstanceId: item.remote_instance_id,
+          error: String(refreshError),
+        }));
+      }
+    }
+    const temporary = item.attempts < 5 && (
+      refreshed || lidUnresolved || isTemporaryWa2LabelError(error)
+    );
     const safe = sanitizeHistoricalError(error, 'WA2_RECONCILIATION_FAILED');
     await failWa2ReconciliationItem(
       item,
@@ -450,6 +470,15 @@ async function processWa2Reconciliation() {
       safe.code,
       temporary,
     );
+    if (lidUnresolved) {
+      console.error(JSON.stringify({
+        level: 'info',
+        msg: temporary ? 'Reconciliação WA2 reagendada após LID_UNRESOLVED' : 'Reconciliação WA2 sem resolução de LID',
+        itemId: item.id,
+        attempts: item.attempts,
+        identityRefresh: refreshed,
+      }));
+    }
     return true;
   }
 }

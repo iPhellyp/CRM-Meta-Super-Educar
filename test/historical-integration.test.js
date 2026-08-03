@@ -128,3 +128,9 @@ test('worker mantém chamadas externas fora das funções transacionais do banco
   assert.match(worker, /listMetaFormLeadsPage[\s\S]*recordMetaHistoricalLead/);
   assert.match(worker, /getWa2ContactByPhone[\s\S]*completeWa2ReconciliationItem/);
 });
+
+test('reconciliação tenta reconstruir identidades antes de desistir de LID recuperável', () => {
+  assert.match(worker, /refreshWa2Identities\(item\.remote_instance_id\)/);
+  assert.match(worker, /WA2_LID_UNRESOLVED.*LID_UNRESOLVED/);
+  assert.match(worker, /lidUnresolved \|\| isTemporaryWa2LabelError/);
+});

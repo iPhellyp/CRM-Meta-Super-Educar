@@ -36,6 +36,11 @@ import {
   confirmLeadFileImport,
   listLeads,
   listWa2LabelCatalog,
+  parseWa2LabelKey,
+  WA2_ANY_LABEL_FILTER,
+  WA2_NO_LABEL_FILTER,
+  WA2_ANY_COMPLEMENTARY_LABEL_FILTER,
+  WA2_NO_COMPLEMENTARY_LABEL_FILTER,
   listLeadHistory,
   listMetaConnections,
   listMetaImportForms,
@@ -445,6 +450,10 @@ function dashboardFiltersFromQuery(query = {}) {
   if (!Object.hasOwn(STAGE_LABELS, filters.stage)) filters.stage = '';
   if (!Object.hasOwn(LOST_REASON_LABELS, filters.lostReason)) filters.lostReason = '';
   if (!z.string().uuid().safeParse(filters.instanceId).success) filters.instanceId = '';
+  if (![WA2_ANY_LABEL_FILTER, WA2_NO_LABEL_FILTER, WA2_ANY_COMPLEMENTARY_LABEL_FILTER, WA2_NO_COMPLEMENTARY_LABEL_FILTER].includes(filters.labelId)) {
+    const labelKey = parseWa2LabelKey(filters.labelId);
+    if (!labelKey || (filters.instanceId && labelKey.instanceId !== filters.instanceId)) filters.labelId = '';
+  }
   if (!z.string().uuid().safeParse(filters.metaConnectionId).success) filters.metaConnectionId = '';
   return filters;
 }
@@ -1607,6 +1616,10 @@ app.get('/', async (req, res) => {
   if (!Object.hasOwn(STAGE_LABELS, filters.stage)) filters.stage = '';
   if (!Object.hasOwn(LOST_REASON_LABELS, filters.lostReason)) filters.lostReason = '';
   if (!z.string().uuid().safeParse(filters.instanceId).success) filters.instanceId = '';
+  if (![WA2_ANY_LABEL_FILTER, WA2_NO_LABEL_FILTER, WA2_ANY_COMPLEMENTARY_LABEL_FILTER, WA2_NO_COMPLEMENTARY_LABEL_FILTER].includes(filters.labelId)) {
+    const labelKey = parseWa2LabelKey(filters.labelId);
+    if (!labelKey || (filters.instanceId && labelKey.instanceId !== filters.instanceId)) filters.labelId = '';
+  }
   if (!z.string().uuid().safeParse(filters.metaConnectionId).success) {
     filters.metaConnectionId = '';
   }
@@ -1618,21 +1631,6 @@ app.get('/', async (req, res) => {
     getTenantWhatsAppMessage(),
     listWa2LabelCatalog(),
   ]);
-  const remoteLabelResults = await Promise.allSettled(
-    wa2Instances.map((instance) => listWa2Labels(instance.remote_instance_id)),
-  );
-  const catalogById = new Map(wa2LabelCatalog.map((label) => [label.id, { ...label }]));
-  for (const result of remoteLabelResults) {
-    if (result.status !== 'fulfilled' || !Array.isArray(result.value)) continue;
-    for (const label of result.value) {
-      if (!label?.id) continue;
-      const existing = catalogById.get(String(label.id)) || { id: String(label.id), official: false };
-      catalogById.set(String(label.id), {
-        ...existing,
-        name: String(label.name || existing.name || label.id),
-      });
-    }
-  }
   const leads = leadRows.slice(0, 100);
   const baseMetaStatus = metaConfigStatus();
   const hasValidMetaConnection = metaConnections.some(
@@ -1653,7 +1651,7 @@ app.get('/', async (req, res) => {
       hasNext: leadRows.length > 100,
     },
     wa2Instances,
-    wa2LabelCatalog: [...catalogById.values()],
+    wa2LabelCatalog,
     metaConnections,
     whatsappMessage,
     csrfToken: issueCsrfToken(req, res),

@@ -24,6 +24,7 @@ const counts = {
   metaRetry: 0,
   metaFailed: 1,
 };
+const instanceId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
 function render(overrides = {}) {
   return dashboardView({
@@ -59,8 +60,8 @@ function render(overrides = {}) {
     pagination: { page: 2, hasNext: true },
     wa2Instances: [],
     wa2LabelCatalog: [
-      { id: '57', name: 'CRM 01 - Em atendimento', official: true },
-      { id: '36', name: 'FEZ PROVA', official: false },
+      { instance_id: instanceId, instance_name: '2298 UNIVC', remote_label_id: '57', remote_label_name: 'CRM 01 - Em atendimento', official: true, enabled: true },
+      { instance_id: instanceId, instance_name: '2298 UNIVC', remote_label_id: '36', remote_label_name: 'FEZ PROVA', official: false, enabled: true },
     ],
     metaConnections: [],
     whatsappMessage: 'Olá, {{nome}}!',
@@ -112,8 +113,10 @@ test('filtros mantêm busca rápida, drawer, resumo, limpeza e paginação', () 
   assert.match(html, /<label>Etiqueta WhatsApp<select name="labelId">/);
   assert.match(html, /CRM 01 - Em atendimento/);
   assert.match(html, /FEZ PROVA/);
-  assert.match(html, /Com qualquer etiqueta externa/);
-  assert.match(html, /Sem etiquetas externas/);
+  assert.match(html, /Com qualquer etiqueta WhatsApp/);
+  assert.match(html, /Sem nenhuma etiqueta WhatsApp/);
+  assert.match(html, /Com qualquer etiqueta complementar/);
+  assert.match(html, /Sem etiquetas complementares/);
   assert.match(html, /<dialog id="advanced-filters"/);
   assert.match(html, /Filtros aplicados:/);
   assert.match(html, /Busca: Ana &amp; Bia/);
@@ -126,11 +129,11 @@ test('filtros mantêm busca rápida, drawer, resumo, limpeza e paginação', () 
 
 test('filtro de etiqueta selecionado permanece no CSV e na paginação', () => {
   const html = render({
-    filters: { search: '', labelId: '57', sort: 'recent' },
+    filters: { search: '', labelId: `${instanceId}:57`, sort: 'recent' },
   });
-  assert.match(html, /<option value="57" selected>CRM 01 - Em atendimento<\/option>/);
-  assert.match(html, /href="\/leads\/export\.csv\?labelId=57/);
-  assert.match(html, /href="\/[?]labelId=57&amp;sort=recent&amp;page=1/);
+  assert.match(html, new RegExp(`<option value="${instanceId}:57" selected>2298 UNIVC · CRM 01 - Em atendimento<\\/option>`));
+  assert.match(html, new RegExp(`href="\\/leads\\/export\\.csv\\?labelId=${instanceId}%3A57`));
+  assert.match(html, new RegExp(`href="\\/[?]labelId=${instanceId}%3A57&amp;sort=recent&amp;page=1`));
 });
 
 test('navegação agrupada tem drawer, saída separada e nomes acessíveis', () => {

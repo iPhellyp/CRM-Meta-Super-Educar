@@ -33,6 +33,63 @@ const DEFAULT_TENANT_ID = 'super-educar';
 const WORKER_NAME = 'meta-worker';
 export const WA2_EXTERNAL_LABEL_FILTER = '__external__';
 export const WA2_NO_EXTERNAL_LABEL_FILTER = '__none__';
+export const WA2_ANY_LABEL_FILTER = WA2_EXTERNAL_LABEL_FILTER;
+export const WA2_NO_LABEL_FILTER = WA2_NO_EXTERNAL_LABEL_FILTER;
+export const WA2_ANY_COMPLEMENTARY_LABEL_FILTER = '__complementary__';
+export const WA2_NO_COMPLEMENTARY_LABEL_FILTER = '__none_complementary__';
+
+const UUID_PATTERN = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}';
+
+export function parseWa2LabelKey(value) {
+  const raw = String(value || '').trim();
+  const match = raw.match(new RegExp(`^(${UUID_PATTERN}):([A-Za-z0-9_-]{1,128})$`));
+  return match ? { instanceId: match[1], remoteLabelId: match[2] } : null;
+}
+
+function currentWa2LabelsCte() {
+  return `WITH current_wa2_labels AS (
+    SELECT DISTINCT ON (
+      receipt.tenant_id, link.wa2_instance_id, receipt.remote_chat_id, receipt.remote_label_id
+    )
+      receipt.tenant_id,
+      link.lead_id,
+      link.wa2_instance_id,
+      instance.name AS instance_name,
+      instance.remote_instance_id,
+      receipt.remote_chat_id,
+      receipt.remote_label_id,
+      receipt.operation,
+      COALESCE(receipt.remote_label_name, binding.remote_label_name, receipt.remote_label_id) AS remote_label_name,
+      (binding.id IS NOT NULL AND binding.enabled = true) AS official,
+      receipt.observed_at,
+      receipt.received_at
+    FROM wa2_contact_links link
+    JOIN wa2_instances instance
+      ON instance.tenant_id = link.tenant_id AND instance.id = link.wa2_instance_id
+    JOIN wa2_label_event_receipts receipt
+      ON receipt.tenant_id = link.tenant_id
+     AND receipt.remote_instance_id = instance.remote_instance_id
+     AND receipt.remote_chat_id = link.remote_chat_id
+    LEFT JOIN wa2_label_bindings binding
+      ON binding.tenant_id = link.tenant_id
+     AND binding.wa2_instance_id = link.wa2_instance_id
+     AND binding.remote_label_id = receipt.remote_label_id
+    WHERE link.tenant_id = $1 AND link.unlinked_at IS NULL
+    ORDER BY
+      receipt.tenant_id, link.wa2_instance_id, receipt.remote_chat_id,
+      receipt.remote_label_id, receipt.observed_at DESC, receipt.received_at DESC,
+      receipt.id DESC
+  )`;
+}
+
+function currentWa2LabelExists({ alias = 'current_wa2_labels', leadColumn = 'leads.id', instanceId, remoteLabelId, complementary } = {}) {
+  const conditions = [`${alias}.tenant_id = leads.tenant_id`, `${alias}.lead_id = ${leadColumn}`, `${alias}.operation = 'APPLY'`];
+  if (instanceId) conditions.push(`${alias}.wa2_instance_id = $${instanceId}`);
+  if (remoteLabelId) conditions.push(`${alias}.remote_label_id = $${remoteLabelId}`);
+  if (complementary === true) conditions.push(`${alias}.official = false`);
+  if (complementary === false) conditions.push(`${alias}.official = true`);
+  return `EXISTS (SELECT 1 FROM ${alias} WHERE ${conditions.join(' AND ')})`;
+}
 
 export { Wa2LinkRuleError as Wa2DataError } from './wa2-link-rules.js';
 
@@ -201,44 +258,33 @@ export async function listLeads({
     )`);
   }
   if (labelId) {
-    if ([WA2_EXTERNAL_LABEL_FILTER, WA2_NO_EXTERNAL_LABEL_FILTER].includes(labelId)) {
-      const exists = `EXISTS (
-        SELECT 1 FROM wa2_contact_links link
-        JOIN wa2_instances instance ON instance.tenant_id = link.tenant_id AND instance.id = link.wa2_instance_id
-        JOIN wa2_label_event_receipts receipt
-          ON receipt.tenant_id = link.tenant_id
-         AND receipt.remote_instance_id = instance.remote_instance_id
-         AND receipt.remote_chat_id = link.remote_chat_id
-        LEFT JOIN wa2_label_bindings binding
-          ON binding.tenant_id = link.tenant_id
-         AND binding.wa2_instance_id = link.wa2_instance_id
-         AND binding.remote_label_id = receipt.remote_label_id
-        WHERE link.tenant_id = leads.tenant_id AND link.lead_id = leads.id
-          AND link.unlinked_at IS NULL AND receipt.operation = 'APPLY'
-          AND binding.id IS NULL
-          AND NOT EXISTS (SELECT 1 FROM wa2_label_event_receipts removed
-            WHERE removed.tenant_id = receipt.tenant_id AND removed.remote_instance_id = receipt.remote_instance_id
-              AND removed.remote_chat_id = receipt.remote_chat_id
-              AND removed.remote_label_id = receipt.remote_label_id
-              AND removed.operation = 'REMOVE' AND removed.observed_at > receipt.observed_at)
-      )`;
-      where.push(labelId === WA2_EXTERNAL_LABEL_FILTER ? exists : `NOT ${exists}`);
+    if ([
+      WA2_ANY_LABEL_FILTER,
+      WA2_NO_LABEL_FILTER,
+      WA2_ANY_COMPLEMENTARY_LABEL_FILTER,
+      WA2_NO_COMPLEMENTARY_LABEL_FILTER,
+    ].includes(labelId)) {
+      const complementary = [
+        WA2_ANY_COMPLEMENTARY_LABEL_FILTER,
+        WA2_NO_COMPLEMENTARY_LABEL_FILTER,
+      ].includes(labelId);
+      const exists = currentWa2LabelExists({ complementary: complementary ? true : undefined });
+      where.push(labelId === WA2_NO_LABEL_FILTER || labelId === WA2_NO_COMPLEMENTARY_LABEL_FILTER
+        ? `NOT ${exists}` : exists);
     } else {
-      values.push(labelId);
-      where.push(`EXISTS (
-      SELECT 1 FROM wa2_contact_links link
-      JOIN wa2_label_event_receipts receipt
-        ON receipt.tenant_id = link.tenant_id
-       AND receipt.remote_instance_id = (SELECT remote_instance_id FROM wa2_instances WHERE id = link.wa2_instance_id)
-       AND receipt.remote_chat_id = link.remote_chat_id
-      WHERE link.tenant_id = leads.tenant_id AND link.lead_id = leads.id
-        AND link.unlinked_at IS NULL AND receipt.remote_label_id = $${values.length}
-        AND receipt.operation = 'APPLY'
-        AND NOT EXISTS (SELECT 1 FROM wa2_label_event_receipts removed
-          WHERE removed.tenant_id = receipt.tenant_id AND removed.remote_chat_id = receipt.remote_chat_id
-            AND removed.remote_label_id = receipt.remote_label_id
-            AND removed.operation = 'REMOVE' AND removed.observed_at > receipt.observed_at)
-    )`);
+      const key = parseWa2LabelKey(labelId);
+      if (!key) {
+        where.push('1 = 0');
+      } else {
+        values.push(key.instanceId);
+        const instanceValue = values.length;
+        values.push(key.remoteLabelId);
+        const labelValue = values.length;
+        where.push(currentWa2LabelExists({
+          instanceId: instanceValue,
+          remoteLabelId: labelValue,
+        }));
+      }
     }
   }
   if (attributed === 'yes') where.push('leads.meta_lead_id IS NOT NULL');
@@ -278,7 +324,8 @@ export async function listLeads({
   const limitIndex = values.length;
   values.push(Math.max(Number(offset) || 0, 0));
   const result = await pool.query(
-    `SELECT leads.*,
+    `${currentWa2LabelsCte()}
+     SELECT leads.*,
        connection.name AS meta_connection_name,
        connection.business_id AS meta_business_id,
        page.name AS meta_page_name,
@@ -312,23 +359,9 @@ export async function listLeads({
        SELECT jsonb_agg(jsonb_build_object('id', current.remote_label_id, 'name', current.remote_label_name)
                         ORDER BY current.remote_label_name) AS labels,
               max(current.received_at) AS last_sync_at
-       FROM (
-         SELECT DISTINCT ON (receipt.remote_label_id)
-                receipt.remote_label_id, receipt.received_at, receipt.operation,
-                COALESCE(binding.remote_label_name, receipt.remote_label_id) AS remote_label_name
-         FROM wa2_contact_links link
-         JOIN wa2_instances instance ON instance.tenant_id = link.tenant_id AND instance.id = link.wa2_instance_id
-         JOIN wa2_label_event_receipts receipt
-           ON receipt.tenant_id = link.tenant_id
-          AND receipt.remote_instance_id = instance.remote_instance_id
-          AND receipt.remote_chat_id = link.remote_chat_id
-         LEFT JOIN wa2_label_bindings binding
-           ON binding.tenant_id = link.tenant_id AND binding.wa2_instance_id = link.wa2_instance_id
-          AND binding.remote_label_id = receipt.remote_label_id
-         WHERE link.tenant_id = leads.tenant_id AND link.lead_id = leads.id AND link.unlinked_at IS NULL
-         ORDER BY receipt.remote_label_id, receipt.observed_at DESC, receipt.received_at DESC
-       ) current
-       WHERE current.remote_label_id IS NOT NULL AND current.operation = 'APPLY'
+       FROM current_wa2_labels current
+       WHERE current.tenant_id = leads.tenant_id AND current.lead_id = leads.id
+         AND current.remote_label_id IS NOT NULL AND current.operation = 'APPLY'
      ) wa2_labels ON true
      LEFT JOIN LATERAL (
        SELECT
@@ -351,7 +384,8 @@ export async function listLeads({
 export async function getLeadById(id) {
   const currentMetaMode = process.env.META_TEST_MODE === 'true' ? 'test' : 'live';
   const result = await pool.query(
-    `SELECT leads.*,
+    `${currentWa2LabelsCte()}
+     SELECT leads.*,
        instance.name AS wa2_instance_name,
        labels.labels AS wa2_labels, labels.last_sync_at AS wa2_labels_synced_at,
        meta_status.mql_status, meta_status.opportunity_status
@@ -365,18 +399,9 @@ export async function getLeadById(id) {
      LEFT JOIN LATERAL (
        SELECT jsonb_agg(jsonb_build_object('id', current.remote_label_id, 'name', current.remote_label_name)
                         ORDER BY current.remote_label_name) AS labels, max(current.received_at) AS last_sync_at
-       FROM (
-         SELECT DISTINCT ON (receipt.remote_label_id) receipt.remote_label_id, receipt.received_at, receipt.operation,
-                COALESCE(binding.remote_label_name, receipt.remote_label_id) AS remote_label_name
-         FROM wa2_contact_links link JOIN wa2_instances wi ON wi.tenant_id=link.tenant_id AND wi.id=link.wa2_instance_id
-         JOIN wa2_label_event_receipts receipt ON receipt.tenant_id=link.tenant_id
-          AND receipt.remote_instance_id=wi.remote_instance_id AND receipt.remote_chat_id=link.remote_chat_id
-         LEFT JOIN wa2_label_bindings binding ON binding.tenant_id=link.tenant_id
-          AND binding.wa2_instance_id=link.wa2_instance_id AND binding.remote_label_id=receipt.remote_label_id
-         WHERE link.tenant_id=leads.tenant_id AND link.lead_id=leads.id AND link.unlinked_at IS NULL
-         ORDER BY receipt.remote_label_id, receipt.observed_at DESC, receipt.received_at DESC
-       ) current
-       WHERE current.operation = 'APPLY'
+       FROM current_wa2_labels current
+       WHERE current.tenant_id = leads.tenant_id AND current.lead_id = leads.id
+         AND current.operation = 'APPLY'
      ) labels ON true
      LEFT JOIN LATERAL (
        SELECT
@@ -1278,23 +1303,117 @@ export async function getDefaultWa2Instance() {
 
 export async function listWa2LabelCatalog() {
   const result = await pool.query(
-    `SELECT catalog.remote_label_id AS id,
-            COALESCE(MAX(catalog.remote_label_name), catalog.remote_label_id) AS name,
-            bool_or(catalog.official) AS official
+    `SELECT catalog.wa2_instance_id AS instance_id,
+            catalog.instance_name,
+            catalog.remote_label_id,
+            COALESCE(MAX(catalog.remote_label_name), catalog.remote_label_id) AS remote_label_name,
+            bool_or(catalog.official) AS official,
+            bool_and(catalog.enabled) AS enabled
      FROM (
-       SELECT remote_label_id, remote_label_name, true AS official
-       FROM wa2_label_bindings
-       WHERE tenant_id = $1
+       SELECT binding.wa2_instance_id, instance.name AS instance_name,
+              binding.remote_label_id, binding.remote_label_name,
+              (binding.enabled = true) AS official, instance.enabled
+       FROM wa2_label_bindings binding
+       JOIN wa2_instances instance
+         ON instance.tenant_id = binding.tenant_id AND instance.id = binding.wa2_instance_id
+       WHERE binding.tenant_id = $1
        UNION ALL
-       SELECT receipt.remote_label_id, NULL, false AS official
+       SELECT link.wa2_instance_id, instance.name AS instance_name,
+              receipt.remote_label_id, receipt.remote_label_name,
+              false AS official, instance.enabled
        FROM wa2_label_event_receipts receipt
+       JOIN wa2_instances instance
+         ON instance.tenant_id = receipt.tenant_id
+        AND instance.remote_instance_id = receipt.remote_instance_id
+       JOIN wa2_contact_links link
+         ON link.tenant_id = receipt.tenant_id
+        AND link.wa2_instance_id = instance.id
+        AND link.remote_chat_id = receipt.remote_chat_id
+        AND link.unlinked_at IS NULL
        WHERE receipt.tenant_id = $1
      ) catalog
-     GROUP BY catalog.remote_label_id
-     ORDER BY bool_or(catalog.official) DESC, name, id`,
+     GROUP BY catalog.wa2_instance_id, catalog.instance_name, catalog.remote_label_id
+     ORDER BY catalog.instance_name, bool_or(catalog.official) DESC, remote_label_name, catalog.remote_label_id`,
     [tenantId()],
   );
-  return result.rows;
+  return result.rows.map((row) => ({
+    ...row,
+    id: row.remote_label_id,
+    name: row.remote_label_name,
+  }));
+}
+
+export async function getWa2LabelFilterCounts({ createdAfter = operationStartAt() } = {}) {
+  const values = [tenantId()];
+  const where = ['leads.tenant_id = $1'];
+  if (createdAfter) {
+    values.push(createdAfter);
+    where.push(`COALESCE(leads.received_at, leads.created_at) >= $${values.length}`);
+  }
+  const result = await pool.query(
+    `${currentWa2LabelsCte()}
+     SELECT count(*)::int AS eligible_total,
+       count(*) FILTER (WHERE EXISTS (
+         SELECT 1 FROM current_wa2_labels current
+         WHERE current.tenant_id = leads.tenant_id AND current.lead_id = leads.id
+           AND current.operation = 'APPLY'
+       ))::int AS any_whatsapp,
+       count(*) FILTER (WHERE NOT EXISTS (
+         SELECT 1 FROM current_wa2_labels current
+         WHERE current.tenant_id = leads.tenant_id AND current.lead_id = leads.id
+           AND current.operation = 'APPLY'
+       ))::int AS none_whatsapp,
+       count(*) FILTER (WHERE EXISTS (
+         SELECT 1 FROM current_wa2_labels current
+         WHERE current.tenant_id = leads.tenant_id AND current.lead_id = leads.id
+           AND current.operation = 'APPLY' AND current.official = false
+       ))::int AS any_complementary,
+       count(*) FILTER (WHERE NOT EXISTS (
+         SELECT 1 FROM current_wa2_labels current
+         WHERE current.tenant_id = leads.tenant_id AND current.lead_id = leads.id
+           AND current.operation = 'APPLY' AND current.official = false
+       ))::int AS none_complementary,
+       count(*) FILTER (WHERE EXISTS (
+         SELECT 1 FROM current_wa2_labels current
+         WHERE current.tenant_id = leads.tenant_id AND current.lead_id = leads.id
+           AND current.operation = 'APPLY' AND current.official = true
+           AND current.remote_label_name ILIKE 'CRM 01%'
+       ))::int AS crm01,
+       count(*) FILTER (WHERE EXISTS (
+         SELECT 1 FROM current_wa2_labels current
+         WHERE current.tenant_id = leads.tenant_id AND current.lead_id = leads.id
+           AND current.operation = 'APPLY' AND current.official = true
+           AND current.remote_label_name ILIKE 'CRM 02%'
+       ))::int AS crm02,
+       count(*) FILTER (WHERE EXISTS (
+         SELECT 1 FROM current_wa2_labels current
+         WHERE current.tenant_id = leads.tenant_id AND current.lead_id = leads.id
+           AND current.operation = 'APPLY' AND current.official = true
+           AND current.remote_label_name ILIKE 'CRM 03%'
+       ))::int AS crm03,
+       count(*) FILTER (WHERE EXISTS (
+         SELECT 1 FROM current_wa2_labels current
+         WHERE current.tenant_id = leads.tenant_id AND current.lead_id = leads.id
+           AND current.operation = 'APPLY' AND current.official = true
+           AND current.remote_label_name ILIKE 'CRM 04%'
+       ))::int AS crm04,
+       count(*) FILTER (WHERE EXISTS (
+         SELECT 1 FROM current_wa2_labels current
+         WHERE current.tenant_id = leads.tenant_id AND current.lead_id = leads.id
+           AND current.operation = 'APPLY' AND current.official = true
+           AND current.remote_label_name ILIKE 'CRM 05%'
+       ))::int AS crm05,
+       count(*) FILTER (WHERE EXISTS (
+         SELECT 1 FROM current_wa2_labels current
+         WHERE current.tenant_id = leads.tenant_id AND current.lead_id = leads.id
+           AND current.operation = 'APPLY' AND current.official = true
+           AND current.remote_label_name ILIKE 'CRM 99%'
+       ))::int AS crm99
+     FROM leads
+     WHERE ${where.join(' AND ')}`,
+    values,
+  );
+  return result.rows[0];
 }
 
 function optionalActor(actor) {
@@ -3088,14 +3207,14 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
     const receiptResult = await client.query(
       `INSERT INTO wa2_label_event_receipts (
          tenant_id, event_id, remote_instance_id, remote_chat_id, jid,
-         phone_normalized, remote_label_id, operation, source,
+         phone_normalized, remote_label_id, remote_label_name, operation, source,
          eligible_for_crm, ineligible_reason, observed_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        ON CONFLICT (tenant_id, event_id) DO NOTHING
        RETURNING *`,
       [
         tenantId(), event.eventId, event.instanceId, event.chatId, event.jid,
-        event.phoneNormalized, event.waLabelId, event.operation, event.source,
+        event.phoneNormalized, event.waLabelId, event.waLabelName || null, event.operation, event.source,
         event.eligibleForCrm, event.ineligibleReason, event.observedAt,
       ],
     );

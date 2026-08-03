@@ -34,7 +34,7 @@ function wa2Labels(lead, { compact = false } = {}) {
   const visible = labels.filter((label) => label?.name && (!compact || !HIDDEN_WA2_LABELS.has(label.name)));
   const shown = compact ? visible.slice(0, 3) : visible;
   const extra = visible.length - shown.length;
-  return `${shown.map((label) => `<span class="wa2-tag">${esc(label.name)}</span>`).join('')}${extra > 0 ? `<span class="wa2-tag wa2-tag-more">+${extra}</span>` : ''}` || '<span class="muted">Sem etiquetas externas</span>';
+  return `${shown.map((label) => `<span class="wa2-tag">${esc(label.name)}</span>`).join('')}${extra > 0 ? `<span class="wa2-tag wa2-tag-more">+${extra}</span>` : ''}` || '<span class="muted">Sem etiquetas WhatsApp</span>';
 }
 
 function metaEventBadge(label, status, attributable) {
@@ -639,7 +639,7 @@ const ADVANCED_FILTER_KEYS = Object.freeze([
   'dateFrom', 'dateTo', 'sort',
 ]);
 
-function activeDashboardFilters(filters) {
+function activeDashboardFilters(filters, catalog = []) {
   const labels = {
     search: 'Busca', course: 'Curso', city: 'Cidade', stage: 'Etapa', commercial: 'Filtro comercial',
     lostReason: 'Motivo', instanceId: 'Instância WA2', labelId: 'Etiqueta WA2',
@@ -653,7 +653,24 @@ function activeDashboardFilters(filters) {
       const value = String(filters[key] || '');
       return value && !(key === 'sort' && value === 'recent');
     })
-    .map((key) => ({ key, label: labels[key], value: String(filters[key]) }));
+    .map((key) => {
+      let value = String(filters[key]);
+      if (key === 'labelId') {
+        const special = {
+          __external__: 'Com qualquer etiqueta WhatsApp',
+          __none__: 'Sem nenhuma etiqueta WhatsApp',
+          __complementary__: 'Com qualquer etiqueta complementar',
+          __none_complementary__: 'Sem etiquetas complementares',
+        };
+        if (special[value]) value = special[value];
+        else {
+          const [instanceId, remoteLabelId] = value.split(':');
+          const match = catalog.find((item) => item.instance_id === instanceId && item.remote_label_id === remoteLabelId);
+          if (match) value = `${match.instance_name} · ${match.remote_label_name}`;
+        }
+      }
+      return { key, label: labels[key], value };
+    });
 }
 
 function hiddenFilterFields(filters, excluded = []) {
@@ -767,7 +784,7 @@ export function dashboardView({
   const returnPath = `/?${dashboardFilterQuery(filters)}`;
   const rows = leads.map((lead) => renderLeadRow(lead, { csrfToken, returnPath, whatsappMessage })).join('');
   const cards = leads.map((lead) => renderLeadCard(lead, { csrfToken, returnPath, whatsappMessage })).join('');
-  const appliedFilters = activeDashboardFilters(filters);
+  const appliedFilters = activeDashboardFilters(filters, wa2LabelCatalog);
 
   return layout('Leads', `
     ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
@@ -821,7 +838,7 @@ export function dashboardView({
         <label>Filtro comercial<select name="commercial"><option value="">Todos</option><option value="mql"${filters.commercial === 'mql' ? ' selected' : ''}>Qualificados — CRM 02 a CRM 04</option></select></label>
         <label>Motivo da perda<select name="lostReason"><option value="">Todos</option>${Object.entries(LOST_REASON_LABELS).map(([value, label]) => `<option value="${value}"${filters.lostReason === value ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
         <label>Instância WA2<select name="instanceId"><option value="">Todas</option>${wa2Instances.map((instance) => `<option value="${esc(instance.id)}"${filters.instanceId === instance.id ? ' selected' : ''}>${detailValue(instance.name || instance.remote_instance_id)}</option>`).join('')}</select></label>
-        <label>Etiqueta WhatsApp<select name="labelId">${labelFilterOptions(wa2LabelCatalog, filters.labelId || '')}</select></label>
+        <label>Etiqueta WhatsApp<select name="labelId">${labelFilterOptions(wa2LabelCatalog, filters.labelId || '', filters.instanceId || '')}</select></label>
         <label>Conexão Meta<select name="metaConnectionId"><option value="">Todas</option>${metaConnections.map((connection) => `<option value="${esc(connection.id)}"${filters.metaConnectionId === connection.id ? ' selected' : ''}>${esc(connection.name)}</option>`).join('')}</select></label>
         <label>BM<input name="businessId" value="${esc(filters.businessId || '')}" inputmode="numeric"></label>
         <label>Página<input name="pageId" value="${esc(filters.pageId || '')}"></label>
@@ -1694,16 +1711,24 @@ export function wa2LinkConfirmView({
   `, { csrfToken });
 }
 
-function labelFilterOptions(catalog, selected) {
-  const labels = Array.isArray(catalog) ? catalog : [];
-  const official = labels.filter((label) => label.official || /^CRM 0[1-5] |^CRM 99 /.test(label.name));
-  const external = labels.filter((label) => !official.includes(label));
-  const option = (label) => `<option value="${esc(label.id)}"${selected === label.id ? ' selected' : ''}>${esc(label.name)}</option>`;
-  return `<option value="">Todas</option>
-    <option value="__external__"${selected === '__external__' ? ' selected' : ''}>Com qualquer etiqueta externa</option>
-    <option value="__none__"${selected === '__none__' ? ' selected' : ''}>Sem etiquetas externas</option>
-    <optgroup label="Etapas CRM">${official.map(option).join('')}</optgroup>
-    <optgroup label="Etiquetas complementares">${external.map(option).join('')}</optgroup>`;
+function labelFilterOptions(catalog, selected, instanceId = '') {
+  const labels = (Array.isArray(catalog) ? catalog : [])
+    .filter((label) => !instanceId || label.instance_id === instanceId);
+  const official = labels.filter((label) => label.official);
+  const external = labels.filter((label) => !label.official);
+  const option = (label) => {
+    const value = `${label.instance_id}:${label.remote_label_id}`;
+    const prefix = label.instance_name ? `${label.instance_name} · ` : '';
+    return `<option value="${esc(value)}"${selected === value ? ' selected' : ''}>${esc(prefix + label.remote_label_name)}</option>`;
+  };
+  const group = (name, items) => items.length ? `<optgroup label="${esc(name)}">${items.map(option).join('')}</optgroup>` : '';
+  return `<option value="">Todas as etiquetas</option>
+    <option value="__external__"${selected === '__external__' ? ' selected' : ''}>Com qualquer etiqueta WhatsApp</option>
+    <option value="__none__"${selected === '__none__' ? ' selected' : ''}>Sem nenhuma etiqueta WhatsApp</option>
+    <option value="__complementary__"${selected === '__complementary__' ? ' selected' : ''}>Com qualquer etiqueta complementar</option>
+    <option value="__none_complementary__"${selected === '__none_complementary__' ? ' selected' : ''}>Sem etiquetas complementares</option>
+    ${group('Etapas CRM', official)}
+    ${group('Etiquetas complementares', external)}`;
 }
 
 export function chatView({

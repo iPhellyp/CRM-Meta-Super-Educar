@@ -72,9 +72,12 @@ test('desktop usa tabela compacta de seis colunas e detalhes progressivos', () =
     html.indexOf('</thead>', html.indexOf('<table class="leads-table">')),
   );
   for (const heading of [
-    'Selecionar', 'Lead', 'Curso e cidade', 'Origem e chegada', 'Etapa', 'Ações',
+    'Lead', 'Curso e cidade', 'Origem e chegada', 'Etapa', 'Etiquetas / Meta', 'Ações',
   ]) assert.match(tableHead, new RegExp(heading));
+  assert.doesNotMatch(tableHead, /Selecionar/);
   assert.doesNotMatch(tableHead, /Campanha|Página\/formulário|BM|WA2/);
+  assert.doesNotMatch(html, /id="bulk-leads"|class="lead-select"|Ações em lote|Fila de leads/);
+  assert.equal((html.match(/href="\/leads\/export\.csv\?/g) || []).length, 1);
   assert.match(html, /<summary>Detalhes da origem<\/summary>/);
   assert.match(html, /class="table-wrap desktop-leads"/);
 });
@@ -91,6 +94,7 @@ test('mobile e tablet usam cards com os mesmos links diretos do WhatsApp', () =>
   assert.match(html, /Sem telefone/);
   assert.match(html, /Abrir no WhatsApp/);
   assert.match(html, /class="inline-stage-actions"/);
+  assert.doesNotMatch(html, /class="lead-select"|aria-label="Selecionar/);
   assert.doesNotMatch(html, /<summary>Atualizar etapa<\/summary>/);
   assert.match(html, /Mais ações/);
   assert.match(html, /aria-labelledby="lead-card-11111111-1111-4111-8111-111111111111"/);

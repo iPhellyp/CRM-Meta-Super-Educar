@@ -193,6 +193,7 @@
   .panel-title { display: flex; justify-content: space-between; align-items: center; gap: var(--space-4); margin-bottom: var(--space-4); }
   .panel-title h2 { margin-bottom: var(--space-1); }
   .panel-title small, .hero p, .muted { color: var(--color-text-secondary); }
+  .filter-panel-actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); flex-wrap: wrap; }
   .stat { padding: var(--space-4); border-radius: var(--radius-lg); }
   .stat span { display: block; color: var(--color-text-secondary); font-size: var(--font-label); }
   .stat strong { font-size: var(--font-number); font-variant-numeric: tabular-nums; }
@@ -325,12 +326,12 @@
   .table-wrap { width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; border-radius: var(--radius-md); }
   table { width: 100%; min-width: 1050px; border-collapse: collapse; font-size: var(--font-table); }
   .leads-table { min-width: 0; table-layout: fixed; }
-  .leads-table th:first-child { width: 42px; }
-  .leads-table th:nth-child(2) { width: 17%; }
-  .leads-table th:nth-child(3) { width: 15%; }
-  .leads-table th:nth-child(4) { width: 20%; }
-  .leads-table th:nth-child(5) { width: 12%; }
-  .leads-table th:nth-child(6) { width: 300px; }
+  .leads-table th:nth-child(1) { width: 18%; }
+  .leads-table th:nth-child(2) { width: 16%; }
+  .leads-table th:nth-child(3) { width: 20%; }
+  .leads-table th:nth-child(4) { width: 11%; }
+  .leads-table th:nth-child(5) { width: 15%; }
+  .leads-table th:nth-child(6) { width: 20%; }
   th, td { padding: var(--space-3) var(--space-2); border-bottom: 1px solid var(--color-border); text-align: left; vertical-align: top; }
   th { color: var(--color-text-secondary); font-size: var(--font-caption); letter-spacing: .03em; text-transform: uppercase; white-space: nowrap; }
   td small { display: block; max-width: 420px; margin-top: var(--space-1); color: var(--color-text-secondary); font-size: var(--font-caption); overflow-wrap: anywhere; }
@@ -362,7 +363,6 @@
   .lead-card-heading, .lead-card-heading > div { display: flex; min-width: 0; align-items: flex-start; gap: var(--space-2); }
   .lead-card-heading { justify-content: space-between; }
   .lead-card-heading h3 { min-width: 0; margin: 0; overflow-wrap: anywhere; }
-  .lead-card-heading .lead-select { width: 24px; min-height: 24px; margin-top: 2px; }
   .lead-card-summary { display: grid; gap: var(--space-3); margin: var(--space-4) 0; }
   .lead-card-summary div { min-width: 0; }
   .lead-card-summary dt { color: var(--color-text-secondary); font-size: var(--font-caption); }
@@ -544,7 +544,8 @@
     .panel { padding: var(--space-4); }
     .filter-grid, .grid-form { grid-template-columns: 1fr; }
     .filter-workspace .panel-title { align-items: stretch; flex-direction: column; }
-    .filter-workspace .panel-title > button { width: 100%; }
+    .filter-workspace .panel-title > .filter-panel-actions { width: 100%; }
+    .filter-panel-actions > * { flex: 1; min-width: 0; }
     .quick-search > div { grid-template-columns: 1fr; }
     .filter-drawer { width: 100%; max-width: none; height: min(92dvh, 900px); max-height: none; margin: auto 0 0; border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
     .filter-dialog-form { padding: var(--space-4); }
@@ -725,16 +726,17 @@ tbody td {
 
 .desktop-leads .lead-actions {
   display: grid !important;
-  grid-template-columns: minmax(118px, 1.15fr) minmax(0, 1fr) minmax(0, 1fr) !important;
-  align-items: center !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  align-items: stretch !important;
   width: 100% !important;
   max-width: none !important;
-  gap: 5px !important;
+  gap: 6px !important;
 }
 
 .desktop-leads .lead-actions .whatsapp-action,
 .desktop-leads .lead-actions .whatsapp-action > div {
   min-width: 0 !important;
+  width: 100% !important;
 }
 
 .desktop-leads .lead-actions .whatsapp-action .primary-action {
@@ -742,7 +744,9 @@ tbody td {
   padding: 7px 9px !important;
   border-radius: 999px !important;
   font-size: .72rem !important;
-  white-space: nowrap !important;
+  width: 100% !important;
+  white-space: normal !important;
+  line-height: 1.15 !important;
 }
 
 .desktop-leads .lead-actions .whatsapp-action .copy-phone,
@@ -751,7 +755,32 @@ tbody td {
 }
 
 .desktop-leads .lead-secondary-actions {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  width: 100% !important;
+  gap: 6px !important;
+}
+
+.desktop-leads .lead-secondary-actions > *,
+.desktop-leads .lead-secondary-actions form,
+.desktop-leads .lead-secondary-actions .inline-stage-actions form {
+  min-width: 0 !important;
+  width: 100% !important;
+}
+
+.desktop-leads .lead-secondary-actions .inline-stage-actions {
   display: contents !important;
+}
+
+.desktop-leads .lead-actions .action-button,
+.desktop-leads .lead-actions .action-menu-item {
+  width: 100% !important;
+  min-width: 0 !important;
+  min-height: 34px !important;
+  padding: 7px 6px !important;
+  line-height: 1.15 !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
 }
 
 .action-button,
@@ -780,11 +809,10 @@ button {
 }
 
 .desktop-leads .lead-actions .action-disclosure[open] .action-menu {
-  position: absolute !important;
-  top: calc(100% + 4px) !important;
-  right: 0 !important;
-  z-index: 5 !important;
-  min-width: 190px !important;
+  position: static !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  margin-top: 4px !important;
 }
 
 .leads-table td small {

@@ -516,8 +516,6 @@ function setupLeadChangesPolling() {
         const lead = item?.lead;
         if (!lead?.id) continue;
         const selector = `[data-lead-id="${CSS.escape(String(lead.id))}"]`;
-        const nodes = [...document.querySelectorAll(selector)];
-        const checked = nodes.flatMap((node) => [...node.querySelectorAll('input.lead-select:checked')]).length > 0;
         const row = document.querySelector(`tr${selector}`);
         const card = document.querySelector(`article${selector}`);
         if (item.removed) {
@@ -534,7 +532,6 @@ function setupLeadChangesPolling() {
             row.replaceWith(replacement);
             setupCopyPhoneActions(replacement);
             setupWhatsAppLogging(replacement);
-            if (checked) replacement.querySelector('.lead-select')?.click();
           }
         }
         if (card && item.cardHtml) {
@@ -543,7 +540,6 @@ function setupLeadChangesPolling() {
             card.replaceWith(replacement);
             setupCopyPhoneActions(replacement);
             setupWhatsAppLogging(replacement);
-            if (checked) replacement.querySelector('.lead-select')?.click();
           }
         }
       }

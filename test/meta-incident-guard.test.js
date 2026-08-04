@@ -9,7 +9,7 @@ test('Meta outbound fica desabilitado por padrão e não captura conversões', a
   const db = await read('src/db.js');
   assert.match(stack, /META_CAPI_OUTBOUND_ENABLED: \$\{META_CAPI_OUTBOUND_ENABLED:-false\}/);
   assert.match(db, /META_CAPI_OUTBOUND_ENABLED !== 'true'/);
-  assert.match(db, /job_type <> 'CONVERSION' OR \$2 = 'true'/);
+  assert.match(db, /job_type <> 'CONVERSION'[\s\S]*\$2 = 'true'/);
 });
 
 test('dataset integra a chave determinística do evento', async () => {

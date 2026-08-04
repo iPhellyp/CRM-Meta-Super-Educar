@@ -44,6 +44,9 @@ function metaEventBadge(label, status, attributable) {
 }
 
 function metaStatusMarkup(lead) {
+  if (lead.is_internal_test === true || lead.meta_outbound_eligible === false) {
+    return '<div class="meta-statuses"><span class="meta-status meta-failed">Eventos Meta bloqueados — teste interno</span></div>';
+  }
   const attributable = Boolean(lead.meta_lead_id);
   const mql = metaEventBadge('MQL', lead.mql_status, attributable);
   const opportunity = ['NEGOTIATING', 'OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT'].includes(lead.stage)
@@ -928,6 +931,7 @@ export function leadDetailView({
     META_EVENT_QUEUED: 'Evento Meta enfileirado',
     META_EVENT_SENT: 'Evento Meta enviado',
     META_EVENT_FAILED: 'Erro no evento Meta',
+    META_EVENT_BLOCKED_INTERNAL_TEST: 'Meta bloqueado — teste interno',
     SYNC_CONFLICT: 'Conflito de sincronização',
     LOST: 'Lead perdido',
   };
@@ -941,6 +945,7 @@ export function leadDetailView({
       ${item.meta_event_id ? `<small>Evento Meta: ${esc(item.meta_event_id)}</small>` : ''}
     </li>`).join('');
   return layout(`Lead ${lead.name}`, `
+    ${lead.is_internal_test ? `<div class="alert warning"><strong>TESTE INTERNO — EVENTOS META BLOQUEADOS</strong><br>Este lead permanece visível para validação técnica, mas não participa de MQL, Sales Opportunity, Converted, backfill ou métricas comerciais.${lead.internal_test_reason ? `<br>Motivo: ${esc(lead.internal_test_reason)}` : ''}${lead.internal_test_marked_at ? `<br>Marcado em: ${esc(formatDateTime(lead.internal_test_marked_at))}${lead.internal_test_marked_by ? ` · ${esc(lead.internal_test_marked_by)}` : ''}` : ''}</div>` : ''}
     <section class="hero">
       <div><h1>${esc(lead.name)}</h1><p>Detalhes administrativos e histórico auditável.</p></div>
       <span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span>
@@ -964,6 +969,7 @@ export function leadDetailView({
       <div><strong>Última sincronização WA2</strong><span>${detailValue(lead.wa2_labels_synced_at ? formatDateTime(lead.wa2_labels_synced_at) : null)}</span></div>
     </section>
     <section class="panel"><div class="panel-title"><h2>Etiquetas WhatsApp</h2><div class="wa2-tags">${wa2Labels(lead)}</div></div>${metaStatusMarkup(lead)}</section>
+    ${lead.is_internal_test ? '' : `<section class="panel"><h2>Marcar como teste interno</h2><p class="muted">Use somente após a importação oficial. A confirmação exige o Meta Lead ID exato e deixa o bloqueio permanente.</p><form method="post" action="/leads/${esc(lead.id)}/internal-test" class="compact-form stack">${csrfField(csrfToken)}<label>Meta Lead ID<input name="metaLeadId" value="${esc(lead.meta_lead_id || '')}" required maxlength="100" inputmode="numeric"></label><label>Motivo<input name="reason" value="WA2_END_TO_END_INTERNAL_TEST_2026_08_03" required maxlength="200"></label><label>Confirmação<input name="confirmation" placeholder="MARK_INTERNAL_TEST" required maxlength="32"></label><button class="danger">Bloquear eventos Meta</button></form></section>`}
     <section class="panel">
       <div class="panel-title"><h2>Linha do tempo</h2><span>${history.length} evento(s)</span></div>
       <ol class="timeline">${timeline || '<li>Nenhuma atividade registrada.</li>'}</ol>

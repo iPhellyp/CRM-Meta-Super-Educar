@@ -26,6 +26,10 @@ export function canCreateMetaForStage(stage, officialLabelEvidence = false) {
   return META_EVENT_STAGES.has(stage) && officialLabelEvidence === true;
 }
 
+export function isInternalTestLead(lead) {
+  return lead?.is_internal_test === true || lead?.meta_outbound_eligible === false;
+}
+
 export function canonicalInboundStage(stages) {
   const unique = [...new Set(stages)];
   const groups = [

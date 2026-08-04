@@ -26,6 +26,7 @@ import {
   canCreateMetaForStage,
   classifyWa2LinkResolution,
   decideInboundLabelAction,
+  isInternalTestLead,
 } from './historical-sync.js';
 
 const { Pool } = pg;
@@ -202,6 +203,7 @@ export async function listLeads({
   attributed,
   validPhone,
   unattended,
+  excludeInternalTests = false,
   createdAfter = operationStartAt(),
   createdBefore,
   sort = 'recent',
@@ -217,6 +219,7 @@ export async function listLeads({
     where.push(`leads.stage = $${values.length}`);
   }
   if (commercial === 'mql') {
+    where.push('leads.is_internal_test = false');
     where.push(`leads.stage IN ('QUALIFIED', 'NEGOTIATING', 'OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT')`);
   }
 
@@ -297,6 +300,7 @@ export async function listLeads({
     where.push('COALESCE(leads.phone_normalized, leads.whatsapp_normalized) IS NULL');
   }
   if (unattended === 'yes') where.push('leads.first_contact_at IS NULL');
+  if (excludeInternalTests) where.push('leads.is_internal_test = false');
 
   if (createdAfter) {
     values.push(createdAfter);
@@ -387,10 +391,16 @@ export async function getLeadById(id) {
   const result = await pool.query(
     `${currentWa2LabelsCte()}
      SELECT leads.*,
+       internal_test.flag AS internal_test_flag,
+       internal_test.reason AS internal_test_reason,
+       internal_test.marked_at AS internal_test_marked_at,
+       internal_test.marked_by AS internal_test_marked_by,
        instance.name AS wa2_instance_name,
        labels.labels AS wa2_labels, labels.last_sync_at AS wa2_labels_synced_at,
        meta_status.mql_status, meta_status.opportunity_status
      FROM leads
+     LEFT JOIN lead_internal_test_flags internal_test
+       ON internal_test.tenant_id = leads.tenant_id AND internal_test.lead_id = leads.id
      LEFT JOIN LATERAL (
        SELECT instance.name FROM wa2_contact_links link JOIN wa2_instances instance
          ON instance.tenant_id = link.tenant_id AND instance.id = link.wa2_instance_id
@@ -419,6 +429,81 @@ export async function getLeadById(id) {
     [id, tenantId()],
   );
   return result.rows[0] || null;
+}
+
+export async function markLeadInternalTest({
+  leadId,
+  metaLeadId,
+  reason,
+  confirmation,
+  actor,
+}) {
+  if (confirmation !== 'MARK_INTERNAL_TEST') throw new Error('INTERNAL_TEST_CONFIRMATION_REQUIRED');
+  const safeReason = String(reason || '').trim().slice(0, 200);
+  if (safeReason.length < 5) throw new Error('INTERNAL_TEST_REASON_REQUIRED');
+  const safeMetaLeadId = String(metaLeadId || '').trim();
+  if (!safeMetaLeadId) throw new Error('META_LEAD_ID_REQUIRED');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const selected = await client.query(
+      `SELECT * FROM leads
+       WHERE tenant_id = $1 AND id = $2
+       FOR UPDATE`,
+      [tenantId(), leadId],
+    );
+    const lead = selected.rows[0];
+    if (!lead) throw new Error('LEAD_NOT_FOUND');
+    if (!lead.meta_lead_id || String(lead.meta_lead_id) !== safeMetaLeadId) {
+      throw new Error('META_LEAD_ID_MISMATCH');
+    }
+    const flag = await client.query(
+      `INSERT INTO lead_internal_test_flags (
+         tenant_id, lead_id, reason, marked_by, metadata
+       ) VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (tenant_id, lead_id) DO UPDATE SET
+         reason = EXCLUDED.reason,
+         marked_by = EXCLUDED.marked_by,
+         metadata = lead_internal_test_flags.metadata || EXCLUDED.metadata
+       RETURNING *`,
+      [
+        lead.tenant_id,
+        lead.id,
+        safeReason,
+        String(actor || 'admin').slice(0, 320),
+        { confirmation, metaLeadId: safeMetaLeadId },
+      ],
+    );
+    const updated = await client.query(
+      `UPDATE leads
+       SET is_internal_test = true,
+           meta_outbound_eligible = false,
+           updated_at = now()
+       WHERE tenant_id = $1 AND id = $2
+       RETURNING *`,
+      [lead.tenant_id, lead.id],
+    );
+    await client.query(
+      `INSERT INTO lead_stage_history (
+         tenant_id, lead_id, previous_stage, new_stage, origin,
+         observation, activity_type, metadata
+       ) VALUES ($1,$2,$3,$3,'SYSTEM',$4,'META_EVENT_BLOCKED_INTERNAL_TEST',$5)`,
+      [
+        lead.tenant_id,
+        lead.id,
+        lead.stage,
+        `Lead marcado como INTERNAL_TEST: ${safeReason}`,
+        { flag: 'INTERNAL_TEST', reason: safeReason, markedBy: String(actor || 'admin').slice(0, 320) },
+      ],
+    );
+    await client.query('COMMIT');
+    return { lead: updated.rows[0], flag: flag.rows[0] };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export function encodeLeadChangesCursor(changedAt, leadId) {
@@ -2139,6 +2224,26 @@ async function createOrGetMetaEvent(client, { lead, eventName, eventTime, mode }
   return existing.rows[0];
 }
 
+async function recordInternalTestMetaBlock(client, lead, {
+  eventName = null,
+  source = 'CRM',
+  eventId = null,
+} = {}) {
+  await client.query(
+    `INSERT INTO lead_stage_history (
+       tenant_id, lead_id, previous_stage, new_stage, origin,
+       observation, activity_type, metadata
+     ) VALUES ($1,$2,$3,$3,'SYSTEM',$4,'META_EVENT_BLOCKED_INTERNAL_TEST',$5)`,
+    [
+      lead.tenant_id,
+      lead.id,
+      lead.stage,
+      'META_EVENT_BLOCKED_INTERNAL_TEST',
+      { eventName, source, eventId },
+    ],
+  );
+}
+
 async function enqueueConversionJob(client, event) {
   if (event.status === 'SENT') return false;
   const result = await client.query(
@@ -2174,6 +2279,18 @@ async function ensureMetaEventForStage(
   { lead, stage, eventTime, mode, officialLabelEvidence = false },
 ) {
   const sequenceSkipped = ['NEGOTIATING', 'OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT'].includes(stage);
+  if (isInternalTestLead(lead)) {
+    await recordInternalTestMetaBlock(client, lead, {
+      eventName: getStageEventName(stage),
+      source: 'STAGE_FLOW',
+    });
+    return {
+      event: null,
+      jobCreated: false,
+      reason: 'META_EVENT_BLOCKED_INTERNAL_TEST',
+      sequenceSkipped,
+    };
+  }
   if (process.env.META_CAPI_OUTBOUND_ENABLED !== 'true') {
     return { event: null, jobCreated: false, reason: 'META_OUTBOUND_DISABLED', sequenceSkipped };
   }
@@ -2424,6 +2541,7 @@ export async function moveLeadStage(id, stage, {
       lead,
       event,
       jobCreated,
+      metaReason,
       wa2LabelSync,
       stageChanged: true,
       attributed: Boolean(lead.meta_lead_id),
@@ -2546,6 +2664,8 @@ export async function backfillMetaQualifiedEvents({ batchSize = 50, execute = fa
        AND lead.stage IN ('QUALIFIED', 'NEGOTIATING', 'OPPORTUNITY',
                           'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT')
        AND lead.meta_lead_id IS NOT NULL
+       AND lead.is_internal_test = false
+       AND lead.meta_outbound_eligible = true
        AND NOT EXISTS (
          SELECT 1 FROM meta_conversion_events event
          WHERE event.tenant_id = lead.tenant_id
@@ -2674,7 +2794,7 @@ export async function backfillMetaQualifiedEvents({ batchSize = 50, execute = fa
 
 export async function getDashboardCounts({ createdAfter = operationStartAt() } = {}) {
   const values = [tenantId()];
-  const where = ['tenant_id = $1'];
+  const where = ['tenant_id = $1', 'is_internal_test = false'];
   if (createdAfter) {
     values.push(createdAfter);
     where.push(`COALESCE(received_at, created_at) >= $${values.length}`);
@@ -2720,7 +2840,27 @@ export async function claimNextJob() {
     WITH candidate AS (
       SELECT id
       FROM meta_jobs
-      WHERE tenant_id = $1 AND (job_type <> 'CONVERSION' OR $2 = 'true') AND ((
+      WHERE tenant_id = $1
+        AND (
+          job_type <> 'CONVERSION'
+          OR (
+            $2 = 'true'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM meta_conversion_events blocked_event
+              JOIN leads blocked_lead
+                ON blocked_lead.tenant_id = blocked_event.tenant_id
+               AND blocked_lead.id = blocked_event.lead_id
+              WHERE blocked_event.tenant_id = meta_jobs.tenant_id
+                AND blocked_event.id = CASE
+                  WHEN meta_jobs.job_type = 'CONVERSION' THEN (meta_jobs.payload->>'eventId')::uuid
+                  ELSE NULL
+                END
+                AND (blocked_lead.is_internal_test = true OR blocked_lead.meta_outbound_eligible = false)
+            )
+          )
+        )
+        AND ((
         status IN ('PENDING', 'RETRY')
         AND next_attempt_at <= now()
       ) OR (
@@ -2766,9 +2906,50 @@ export async function failJob(id, error, { retryAt = null } = {}) {
   return result.rows[0];
 }
 
+export async function blockMetaConversionJob(jobId, eventId) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const updated = await client.query(
+      `UPDATE meta_jobs
+       SET status = 'FAILED', last_error = 'META_EVENT_BLOCKED_INTERNAL_TEST',
+           locked_at = NULL, updated_at = now()
+       WHERE id = $1 AND tenant_id = $2 AND job_type = 'CONVERSION'
+       RETURNING id`,
+      [jobId, tenantId()],
+    );
+    if (updated.rowCount) {
+      await client.query(
+        `INSERT INTO lead_stage_history (
+           tenant_id, lead_id, previous_stage, new_stage, origin,
+           observation, activity_type, meta_event_id, metadata
+         )
+         SELECT lead.tenant_id, lead.id, lead.stage, lead.stage, 'SYSTEM',
+                'Evento Meta bloqueado: lead marcado como INTERNAL_TEST.',
+                'META_EVENT_BLOCKED_INTERNAL_TEST', event.id,
+                jsonb_build_object('eventId', event.event_id, 'source', 'WORKER')
+         FROM meta_conversion_events event
+         JOIN leads lead
+           ON lead.tenant_id = event.tenant_id AND lead.id = event.lead_id
+         WHERE event.tenant_id = $2 AND event.id = $3
+           AND (lead.is_internal_test = true OR lead.meta_outbound_eligible = false)`,
+        [jobId, tenantId(), eventId],
+      );
+    }
+    await client.query('COMMIT');
+    return updated.rowCount === 1;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function getMetaEventContext(id) {
   const result = await pool.query(
     `SELECT e.*, l.name, l.email, l.phone, l.phone_normalized, l.meta_lead_id,
+            l.is_internal_test, l.meta_outbound_eligible,
             l.meta_connection_id AS lead_meta_connection_id,
             connection.encrypted_access_token, connection.status AS connection_status,
             connection.active AS connection_active,
@@ -2789,12 +2970,19 @@ export async function getMetaEventContext(id) {
 }
 
 export async function markMetaEventProcessing(id, attempts) {
-  await pool.query(
+  const result = await pool.query(
     `UPDATE meta_conversion_events
      SET status = 'PROCESSING', attempts = $2, updated_at = now()
-     WHERE id = $1 AND tenant_id = $3 AND status <> 'SENT'`,
+     WHERE id = $1 AND tenant_id = $3 AND status <> 'SENT'
+       AND NOT EXISTS (
+         SELECT 1 FROM leads blocked_lead
+         WHERE blocked_lead.tenant_id = meta_conversion_events.tenant_id
+           AND blocked_lead.id = meta_conversion_events.lead_id
+           AND (blocked_lead.is_internal_test = true OR blocked_lead.meta_outbound_eligible = false)
+       )`,
     [id, attempts, tenantId()],
   );
+  return result.rowCount === 1;
 }
 
 export async function markMetaEventSent(id, response, attempts) {
@@ -2806,6 +2994,12 @@ export async function markMetaEventSent(id, response, attempts) {
        SET status = 'SENT', attempts = $3, meta_response = $2,
            sent_at = now(), last_error = NULL, updated_at = now()
        WHERE id = $1 AND tenant_id = $4 AND status <> 'SENT'
+         AND NOT EXISTS (
+           SELECT 1 FROM leads blocked_lead
+           WHERE blocked_lead.tenant_id = meta_conversion_events.tenant_id
+             AND blocked_lead.id = meta_conversion_events.lead_id
+             AND (blocked_lead.is_internal_test = true OR blocked_lead.meta_outbound_eligible = false)
+         )
        RETURNING tenant_id, lead_id, event_name`,
       [id, response, attempts, tenantId()],
     );
@@ -2915,12 +3109,49 @@ export async function retryFailedJob(id) {
   try {
     await client.query('BEGIN');
     const selected = await client.query(
-      'SELECT * FROM meta_jobs WHERE id = $1 AND tenant_id = $2 FOR UPDATE',
+      `SELECT job.*, lead.is_internal_test, lead.meta_outbound_eligible,
+              event.lead_id AS event_lead_id
+       FROM meta_jobs job
+       LEFT JOIN meta_conversion_events event
+         ON job.job_type = 'CONVERSION'
+        AND event.tenant_id = job.tenant_id
+        AND event.id = (job.payload->>'eventId')::uuid
+       LEFT JOIN leads lead
+         ON lead.tenant_id = event.tenant_id AND lead.id = event.lead_id
+       WHERE job.id = $1 AND job.tenant_id = $2
+       FOR UPDATE OF job`,
       [id, tenantId()],
     );
     const job = selected.rows[0];
     if (!job || job.status !== 'FAILED') {
       await client.query('ROLLBACK');
+      return false;
+    }
+
+    if (job.job_type === 'CONVERSION'
+      && (job.is_internal_test === true || job.meta_outbound_eligible === false)) {
+      await client.query(
+        `UPDATE meta_jobs
+         SET last_error = 'META_EVENT_BLOCKED_INTERNAL_TEST', updated_at = now()
+         WHERE id = $1 AND tenant_id = $2`,
+        [id, tenantId()],
+      );
+      if (job.event_lead_id) {
+        await client.query(
+          `INSERT INTO lead_stage_history (
+             tenant_id, lead_id, previous_stage, new_stage, origin,
+             observation, activity_type, metadata
+           )
+           SELECT lead.tenant_id, lead.id, lead.stage, lead.stage, 'SYSTEM',
+                  'Retry bloqueado: lead marcado como INTERNAL_TEST.',
+                  'META_EVENT_BLOCKED_INTERNAL_TEST',
+                  jsonb_build_object('eventId', $1::text, 'source', 'RETRY')
+           FROM leads lead
+           WHERE lead.tenant_id = $2 AND lead.id = $3`,
+          [job.payload?.eventId || null, tenantId(), job.event_lead_id],
+        );
+      }
+      await client.query('COMMIT');
       return false;
     }
 

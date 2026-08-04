@@ -43,6 +43,7 @@ import {
   WA2_ANY_COMPLEMENTARY_LABEL_FILTER,
   WA2_NO_COMPLEMENTARY_LABEL_FILTER,
   listLeadHistory,
+  markLeadInternalTest,
   listMetaConnections,
   listMetaImportForms,
   listHistoricalOperations,
@@ -1684,6 +1685,9 @@ app.post('/leads', async (req, res) => {
 function metaResultSuffix(eventName, result) {
   if (!eventName) return '';
   if (!result.attributed) return ' Lead sem atribuição Meta; nenhum evento foi criado.';
+  if (result.metaReason === 'META_EVENT_BLOCKED_INTERNAL_TEST') {
+    return ' Evento Meta bloqueado: teste interno.';
+  }
   if (!result.event) {
     return ' Evento Meta não criado: etiqueta oficial do WhatsApp não confirmada.';
   }
@@ -2146,6 +2150,46 @@ app.post('/leads/:id/whatsapp-opened', createWhatsAppOpenedHandler({
   recordWhatsAppOpened,
 }));
 
+app.post('/leads/:id/internal-test', async (req, res) => {
+  const parsedId = z.string().uuid().safeParse(req.params.id);
+  if (!parsedId.success) return redirectWith(res, '/', 'error', 'Lead inválido.');
+  const metaLeadId = z.string().trim().min(1).max(100).safeParse(req.body.metaLeadId);
+  const reason = z.string().trim().min(5).max(200).safeParse(req.body.reason);
+  const confirmation = z.string().safeParse(req.body.confirmation);
+  if (!metaLeadId.success || !reason.success || !confirmation.success) {
+    return redirectWith(res, `/leads/${parsedId.data}`, 'error', 'Dados da marcação INTERNAL_TEST inválidos.');
+  }
+  try {
+    await markLeadInternalTest({
+      leadId: parsedId.data,
+      metaLeadId: metaLeadId.data,
+      reason: reason.data,
+      confirmation: confirmation.data,
+      actor: req.user.sub,
+    });
+    return redirectWith(
+      res,
+      `/leads/${parsedId.data}`,
+      'message',
+      'Lead marcado como INTERNAL_TEST. Eventos Meta estão bloqueados permanentemente.',
+    );
+  } catch (error) {
+    const messages = {
+      LEAD_NOT_FOUND: 'Lead não encontrado.',
+      META_LEAD_ID_MISMATCH: 'O Meta Lead ID informado não corresponde ao lead.',
+      INTERNAL_TEST_CONFIRMATION_REQUIRED: 'Confirmação explícita obrigatória.',
+      INTERNAL_TEST_REASON_REQUIRED: 'Informe o motivo da marcação.',
+      META_LEAD_ID_REQUIRED: 'Meta Lead ID obrigatório.',
+    };
+    return redirectWith(
+      res,
+      `/leads/${parsedId.data}`,
+      'error',
+      messages[error?.message] || 'Não foi possível marcar o lead como teste interno.',
+    );
+  }
+});
+
 app.get('/leads/:id', async (req, res, next) => {
   if (req.params.id === 'export.csv') return next();
   const parsedId = z.string().uuid().safeParse(req.params.id);
@@ -2243,6 +2287,7 @@ app.get('/leads/export.csv', async (req, res) => {
     attributed: ['yes', 'no'].includes(req.query.attributed) ? req.query.attributed : '',
     validPhone: ['yes', 'no'].includes(req.query.validPhone) ? req.query.validPhone : '',
     unattended: req.query.unattended === 'yes' ? 'yes' : '',
+    excludeInternalTests: true,
     createdAfter: dateFrom.date || operationStartAt(),
     createdBefore: dateTo.date,
     limit: 200,

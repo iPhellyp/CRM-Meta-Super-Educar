@@ -5,6 +5,7 @@ import {
   claimWa2ReconciliationItem,
   claimNextWa2LabelJob,
   claimNextJob,
+  blockMetaConversionJob,
   closePool,
   completeWa2LabelJob,
   completeMetaHistoricalPage,
@@ -138,11 +139,27 @@ async function processJob(job) {
   if (job.job_type === 'CONVERSION') {
     const event = await getMetaEventContext(job.payload.eventId);
     if (!event) throw new Error('Evento de conversão não encontrado');
+    if (event.is_internal_test === true || event.meta_outbound_eligible === false) {
+      await blockMetaConversionJob(job.id, event.id);
+      return;
+    }
     if (event.status === 'SENT') {
       await completeJob(job.id);
       return;
     }
-    await markMetaEventProcessing(event.id, job.attempts);
+    const processing = await markMetaEventProcessing(event.id, job.attempts);
+    if (!processing) {
+      const latest = await getMetaEventContext(event.id);
+      if (latest?.is_internal_test === true || latest?.meta_outbound_eligible === false) {
+        await blockMetaConversionJob(job.id, event.id);
+        return;
+      }
+      if (latest?.status === 'SENT') {
+        await completeJob(job.id);
+        return;
+      }
+      throw new Error('Evento de conversão não pôde ser reservado para envio');
+    }
     const response = await sendMetaConversion(event);
     await markMetaEventSent(event.id, response, job.attempts);
     await completeJob(job.id);

@@ -52,6 +52,17 @@ test('eventId, cursor e ações são persistidos antes de avançar o feed', () =
   assert.match(db, /INTERNAL_API_LOOP_GUARD|decideInboundLabelAction/);
 });
 
+test('transição exclusiva agenda sincronização durável sem segunda ação ou histórico', () => {
+  const inboundStart = db.indexOf('export async function processWa2LabelEvent');
+  const inboundEnd = db.indexOf('export async function completeWa2LabelEventPage');
+  const inbound = db.slice(inboundStart, inboundEnd);
+  assert.match(inbound, /decision\.exclusiveTransition/);
+  assert.match(inbound, /enqueueWa2LabelJobs\(client/);
+  assert.match(inbound, /previousLabelObservedAt/);
+  assert.match(inbound, /officialLabelEvidence:[\s\S]*decision\.exclusiveTransition/);
+  assert.match(read('src/wa2-label-sync.js'), /pendingRemove/);
+});
+
 test('etapas protegidas geram conflito sem Converted automático no consumidor', () => {
   const inboundStart = db.indexOf('export async function processWa2LabelEvent');
   const inboundEnd = db.indexOf('export async function completeWa2LabelEventPage');

@@ -6,6 +6,8 @@ import {
   canCreateMetaForStage,
   classifyWa2LinkResolution,
   decideInboundLabelAction,
+  evaluateExclusiveStageTransition,
+  officialCrmLabelStageFor,
   historicalRetryDelayMs,
   reconciliationFailureResult,
   sanitizeHistoricalError,
@@ -97,6 +99,97 @@ test('duas etiquetas comerciais conflitantes exigem revisão', () => {
     }).code,
     'MULTIPLE_CRM_STAGE_LABELS',
   );
+});
+
+test('CRM01 + CRM02 é uma transição exclusiva válida somente com evidência ordenada', () => {
+  assert.equal(officialCrmLabelStageFor('IN_SERVICE'), 'IN_SERVICE');
+  const result = decideInboundLabelAction({
+    event: baseEvent,
+    currentStage: 'IN_SERVICE',
+    eventBindingStages: ['QUALIFIED'],
+    currentCrmLabelStages: [
+      ['NEW', 'CONTACT_STARTED', 'NO_RESPONSE', 'IN_SERVICE'],
+      ['QUALIFIED'],
+    ],
+    previousLabelObservedAt: '2026-08-04T20:43:52.400Z',
+    eventObservedAt: '2026-08-04T20:44:03.400Z',
+    identityMatch: true,
+    linkMatch: true,
+  });
+  assert.equal(result.action, 'STAGE_CHANGED');
+  assert.equal(result.exclusiveTransition, true);
+  assert.equal(result.transitionEvidence.validTransition, true);
+  assert.deepEqual(
+    evaluateExclusiveStageTransition({
+      currentStage: 'IN_SERVICE',
+      targetStage: 'QUALIFIED',
+      currentCrmLabelStages: [
+        ['NEW', 'CONTACT_STARTED', 'NO_RESPONSE', 'IN_SERVICE'],
+        ['QUALIFIED'],
+      ],
+      previousLabelObservedAt: '2026-08-04T20:43:52.400Z',
+      eventObservedAt: '2026-08-04T20:44:03.400Z',
+      identityMatch: true,
+      linkMatch: true,
+    }),
+    {
+      currentStage: 'IN_SERVICE',
+      targetStage: 'QUALIFIED',
+      previousLabelMatchesCurrentStage: true,
+      thirdStageLabels: 0,
+      identityMatch: true,
+      linkMatch: true,
+      eventLater: true,
+      validTransition: true,
+    },
+  );
+});
+
+test('transição exclusiva rejeita evento fora de ordem, vínculo ausente ou terceira etapa', () => {
+  const input = {
+    event: baseEvent,
+    currentStage: 'IN_SERVICE',
+    eventBindingStages: ['QUALIFIED'],
+    currentCrmLabelStages: [
+      ['IN_SERVICE'],
+      ['QUALIFIED'],
+    ],
+    previousLabelObservedAt: '2026-08-04T20:44:03.400Z',
+    eventObservedAt: '2026-08-04T20:43:52.400Z',
+  };
+  assert.equal(decideInboundLabelAction(input).code, 'MULTIPLE_CRM_STAGE_LABELS');
+  assert.equal(
+    decideInboundLabelAction({
+      ...input,
+      previousLabelObservedAt: '2026-08-04T20:43:52.400Z',
+      eventObservedAt: '2026-08-04T20:44:03.400Z',
+      linkMatch: false,
+    }).code,
+    'MULTIPLE_CRM_STAGE_LABELS',
+  );
+  assert.equal(
+    decideInboundLabelAction({
+      ...input,
+      previousLabelObservedAt: '2026-08-04T20:43:52.400Z',
+      eventObservedAt: '2026-08-04T20:44:03.400Z',
+      currentCrmLabelStages: [['IN_SERVICE'], ['QUALIFIED'], ['OPPORTUNITY']],
+    }).code,
+    'MULTIPLE_CRM_STAGE_LABELS',
+  );
+});
+
+test('evento repetido depois da etapa correta não cria nova transição', () => {
+  const result = decideInboundLabelAction({
+    event: baseEvent,
+    currentStage: 'QUALIFIED',
+    eventBindingStages: ['QUALIFIED'],
+    currentCrmLabelStages: [['IN_SERVICE'], ['QUALIFIED']],
+  });
+  assert.deepEqual(result, {
+    action: 'NOOP',
+    code: 'STAGE_ALREADY_CORRECT_LABEL_SYNC_PENDING_REMOVE',
+    targetStage: 'QUALIFIED',
+  });
 });
 
 test('CRM 05 é protegido e nunca confirma matrícula automaticamente pelo WA2', () => {

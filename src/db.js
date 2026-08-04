@@ -27,8 +27,10 @@ import {
 } from './wa2-label-sync.js';
 import {
   canCreateMetaForStage,
+  canonicalInboundStage,
   classifyWa2LinkResolution,
   decideInboundLabelAction,
+  officialCrmLabelStageFor,
   isInternalTestLead,
 } from './historical-sync.js';
 import {
@@ -4213,6 +4215,7 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
     let decision;
     let eventBindingStages = [];
     let currentCrmLabelStages = [];
+    let previousLabelObservedAt = null;
     if (event.source === 'WHATSAPP' && event.operation === 'APPLY' && event.eligibleForCrm) {
       if (!instance) {
         decision = { action: 'CONFLICT', code: 'INSTANCE_NOT_CONFIGURED' };
@@ -4254,9 +4257,32 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
         );
         const byLabel = new Map(bindings.rows.map((row) => [row.remote_label_id, row.stages]));
         eventBindingStages = byLabel.get(event.waLabelId) || [];
-        currentCrmLabelStages = currentRemoteLabelIds
+        const currentLabelIds = [...new Set(currentRemoteLabelIds)];
+        currentCrmLabelStages = currentLabelIds
           .map((id) => byLabel.get(id))
           .filter(Boolean);
+        if (currentCrmLabelStages.length > 1) {
+          const previousStageLabelIds = currentLabelIds.filter((labelId) => {
+            if (labelId === event.waLabelId) return false;
+            const labelStage = canonicalInboundStage(byLabel.get(labelId) || []);
+            return labelStage === officialCrmLabelStageFor(lead.stage);
+          });
+          if (previousStageLabelIds.length > 0) {
+            const previousEvent = await client.query(
+              `SELECT observed_at
+               FROM wa2_label_event_receipts
+               WHERE tenant_id = $1
+                 AND remote_instance_id = $2
+                 AND remote_chat_id = $3
+                 AND remote_label_id = ANY($4::text[])
+                 AND operation = 'APPLY'
+               ORDER BY observed_at DESC, received_at DESC, id DESC
+               LIMIT 1`,
+              [tenantId(), event.instanceId, event.chatId, previousStageLabelIds],
+            );
+            previousLabelObservedAt = previousEvent.rows[0]?.observed_at || null;
+          }
+        }
       }
     }
     decision ||= decideInboundLabelAction({
@@ -4264,6 +4290,10 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
       currentStage: lead?.stage,
       eventBindingStages,
       currentCrmLabelStages,
+      previousLabelObservedAt,
+      eventObservedAt: event.observedAt,
+      identityMatch: Boolean(link && instance),
+      linkMatch: Boolean(link && instance),
     });
     const actionResult = await client.query(
       `INSERT INTO wa2_inbound_label_actions (
@@ -4332,6 +4362,13 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
           `Evento WA2 ${event.eventId}`,
         ],
       );
+      if (decision.exclusiveTransition) {
+        await enqueueWa2LabelJobs(client, {
+          lead: updated.rows[0],
+          previousStage: lead.stage,
+          stageHistoryId: history.rows[0].id,
+        });
+      }
       await ensureMetaEventForStage(client, {
         lead: updated.rows[0],
         stage: decision.targetStage,
@@ -4339,7 +4376,7 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
         mode: process.env.META_TEST_MODE === 'true' ? 'test' : 'live',
         officialLabelEvidence: Boolean(
           currentRemoteLabelIds.includes(event.waLabelId) &&
-          currentCrmLabelStages.length <= 1,
+          (currentCrmLabelStages.length <= 1 || decision.exclusiveTransition === true),
         ),
       });
       void history;

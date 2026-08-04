@@ -117,6 +117,7 @@ test('mutação enfileirada não confirma conclusão enquanto estado remoto não
     mutationEnqueued: true,
     confirmed: false,
     remotePending: true,
+    pendingRemove: true,
   });
   assert.equal(listCalls, 2);
   assert.deepEqual(calls, [
@@ -248,6 +249,22 @@ test('estado não confirmado volta a PENDING futuro e falha ao atingir o limite'
       { now },
     ),
     { status: 'DONE' },
+  );
+
+  assert.equal(
+    wa2LabelJobCompletionDecision(
+      { confirmed: false, pendingRemove: true },
+      { attempts: 2, max_attempts: 5 },
+      { now },
+    ).pendingCode,
+    'LABEL_SYNC_PENDING_REMOVE',
+  );
+  assert.equal(
+    wa2LabelJobCompletionDecision(
+      { confirmed: false, pendingRemove: true },
+      { attempts: 5, max_attempts: 5 },
+    ).error.code,
+    'LABEL_SYNC_PENDING_REMOVE',
   );
 });
 

@@ -56,6 +56,78 @@ export function canAdvanceByOfficialCrmLabel(currentStage, desiredStage) {
   return Boolean(allowed[desiredStage]?.includes(currentStage));
 }
 
+export function officialCrmLabelStageFor(stage) {
+  if (['NEW', 'CONTACT_STARTED', 'NO_RESPONSE', 'IN_SERVICE'].includes(stage)) {
+    return 'IN_SERVICE';
+  }
+  if (['OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT'].includes(stage)) {
+    return 'OPPORTUNITY';
+  }
+  if (['ENROLLED', 'PAID'].includes(stage)) return 'ENROLLED';
+  if (['LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED'].includes(stage)) {
+    return 'LOST';
+  }
+  return stage || null;
+}
+
+function eventIsLaterThanPreviousLabel(eventObservedAt, previousLabelObservedAt) {
+  const eventTime = Date.parse(String(eventObservedAt || ''));
+  const previousTime = Date.parse(String(previousLabelObservedAt || ''));
+  return Number.isFinite(eventTime) && Number.isFinite(previousTime) && eventTime > previousTime;
+}
+
+export function evaluateExclusiveStageTransition({
+  currentStage,
+  targetStage,
+  currentCrmLabelStages = [],
+  previousLabelObservedAt = null,
+  eventObservedAt = null,
+  identityMatch = true,
+  linkMatch = true,
+}) {
+  const activeStages = currentCrmLabelStages
+    .map((stages) => canonicalInboundStage(Array.isArray(stages) ? stages : [stages]))
+    .filter(Boolean);
+  const previousLabelStage = officialCrmLabelStageFor(currentStage);
+  const previousCount = activeStages.filter((stage) => stage === previousLabelStage).length;
+  const targetCount = activeStages.filter((stage) => stage === targetStage).length;
+  const thirdStageLabels = activeStages.filter(
+    (stage) => stage !== previousLabelStage && stage !== targetStage,
+  ).length;
+  const previousLabelMatchesCurrentStage =
+    previousLabelStage !== targetStage && previousCount === 1;
+  const eventLater = eventIsLaterThanPreviousLabel(eventObservedAt, previousLabelObservedAt);
+  const validTransition = Boolean(
+    targetStage &&
+    previousLabelMatchesCurrentStage &&
+    targetCount === 1 &&
+    activeStages.length === 2 &&
+    thirdStageLabels === 0 &&
+    canAdvanceByOfficialCrmLabel(currentStage, targetStage) &&
+    identityMatch === true &&
+    linkMatch === true &&
+    eventLater,
+  );
+  return {
+    currentStage,
+    targetStage,
+    previousLabelMatchesCurrentStage,
+    thirdStageLabels,
+    identityMatch: identityMatch === true,
+    linkMatch: linkMatch === true,
+    eventLater,
+    validTransition,
+  };
+}
+
+function isExclusiveCleanupState({ currentStage, desiredStage, activeStages }) {
+  if (currentStage !== desiredStage || activeStages.length !== 2 || !activeStages.includes(desiredStage)) {
+    return false;
+  }
+  const previousStages = activeStages.filter((stage) => stage !== desiredStage);
+  return previousStages.length === 1 && canAdvanceByOfficialCrmLabel(previousStages[0], desiredStage);
+}
+
 export function classifyWa2LinkResolution({
   instanceConfigured,
   linkCount = 0,
@@ -80,6 +152,10 @@ export function decideInboundLabelAction({
   currentStage,
   eventBindingStages = [],
   currentCrmLabelStages = [],
+  previousLabelObservedAt = null,
+  eventObservedAt = null,
+  identityMatch = true,
+  linkMatch = true,
 }) {
   if (event.source === 'INTERNAL_API') {
     return { action: 'IGNORED', code: 'INTERNAL_API_LOOP_GUARD' };
@@ -107,7 +183,34 @@ export function decideInboundLabelAction({
       .map((stages) => canonicalInboundStage(Array.isArray(stages) ? stages : [stages]))
       .filter(Boolean),
   )];
+
+  if (isExclusiveCleanupState({ currentStage, desiredStage, activeStages })) {
+    return {
+      action: 'NOOP',
+      code: 'STAGE_ALREADY_CORRECT_LABEL_SYNC_PENDING_REMOVE',
+      targetStage: desiredStage,
+    };
+  }
+
   if (activeStages.length > 1) {
+    const exclusive = evaluateExclusiveStageTransition({
+      currentStage,
+      targetStage: desiredStage,
+      currentCrmLabelStages,
+      previousLabelObservedAt,
+      eventObservedAt,
+      identityMatch,
+      linkMatch,
+    });
+    if (exclusive.validTransition) {
+      return {
+        action: 'STAGE_CHANGED',
+        code: 'OFFICIAL_TRANSITION',
+        targetStage: desiredStage,
+        exclusiveTransition: true,
+        transitionEvidence: exclusive,
+      };
+    }
     return { action: 'CONFLICT', code: 'MULTIPLE_CRM_STAGE_LABELS' };
   }
   if (activeStages.length === 1 && activeStages[0] !== desiredStage) {

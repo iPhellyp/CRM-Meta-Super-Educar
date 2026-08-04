@@ -150,6 +150,7 @@ export async function synchronizeWa2LabelJob(job, client) {
     mutationEnqueued: mutationResults.some((result) => result.enqueued === true),
     confirmed,
     remotePending: !confirmed,
+    pendingRemove: !confirmed && plan.remove.length > 0,
   };
 }
 
@@ -163,7 +164,9 @@ export function wa2LabelJobCompletionDecision(
     return {
       status: 'FAILED',
       error: {
-        code: 'WA2_LABEL_SYNC_NOT_CONFIRMED',
+        code: syncResult.pendingRemove
+          ? 'LABEL_SYNC_PENDING_REMOVE'
+          : 'WA2_LABEL_SYNC_NOT_CONFIRMED',
         message: 'O estado final da etiqueta não foi confirmado no WA2.',
       },
     };
@@ -171,7 +174,9 @@ export function wa2LabelJobCompletionDecision(
   return {
     status: 'PENDING',
     availableAt: new Date(now + WA2_REMOTE_CONFIRM_DELAY_MS),
-    pendingCode: 'WA2_REMOTE_PENDING',
+    pendingCode: syncResult.pendingRemove
+      ? 'LABEL_SYNC_PENDING_REMOVE'
+      : 'WA2_REMOTE_PENDING',
   };
 }
 

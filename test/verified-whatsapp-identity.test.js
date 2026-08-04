@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const read = (file) => fs.readFileSync(path.join(here, '..', file), 'utf8');
 const migration = read('sql/013_verified_whatsapp_identities.sql');
+const phoneJidMigration = read('sql/014_fix_verified_whatsapp_phone_jid_check.sql');
 const db = read('src/db.js');
 const server = read('src/server.js');
 const views = read('src/views.js');
@@ -22,6 +23,13 @@ test('identidade verificada tem migração aditiva, tenant e unicidade', () => {
   assert.match(migration, /canonical_phone/);
   assert.match(migration, /aliases JSONB/);
   assert.match(migration, /evidence_wa_message_id/);
+});
+
+test('constraint do PN aceita os domínios WA2 reais sem aceitar JID arbitrário', () => {
+  assert.match(phoneJidMigration, /phone_jid/);
+  assert.match(phoneJidMigration, /s\[\.\]whatsapp\[\.\]net/);
+  assert.match(phoneJidMigration, /c\[\.\]us/);
+  assert.doesNotMatch(phoneJidMigration, /DROP TABLE|DELETE FROM|TRUNCATE/i);
 });
 
 test('ação de identidade preserva lead, exige INTERNAL_TEST e é transacional/idempotente', () => {

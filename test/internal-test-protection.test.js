@@ -21,6 +21,13 @@ test('migration cria flags persistentes e auditoria sem operação destrutiva', 
   assert.doesNotMatch(sql, /DROP\s+TABLE|TRUNCATE|DELETE\s+FROM/i);
 });
 
+test('migration permite auditar bloqueio INTERNAL_TEST no histórico', async () => {
+  const sql = await read('sql/012_internal_test_history_activity.sql');
+  assert.match(sql, /lead_stage_history_activity_type_check/);
+  assert.match(sql, /META_EVENT_BLOCKED_INTERNAL_TEST/);
+  assert.doesNotMatch(sql, /DROP\s+TABLE|TRUNCATE|DELETE\s+FROM/i);
+});
+
 test('bloqueio cobre criação, worker, retry, backfill e caminhos WA2', async () => {
   const db = await read('src/db.js');
   const worker = await read('src/worker.js');

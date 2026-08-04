@@ -2041,12 +2041,6 @@ export async function createVerifiedWhatsAppIdentityAndLink({
         'WA2_VERIFIED_IDENTITY_NOT_INTERNAL_TEST',
       );
     }
-    if (lead.phone_normalized === canonicalPhone) {
-      throw new Wa2DataError(
-        'O telefone canônico já é o telefone original do lead',
-        'WA2_VERIFIED_IDENTITY_NOT_ALTERNATE',
-      );
-    }
     const instanceResult = await client.query(
       `SELECT * FROM wa2_instances
        WHERE tenant_id = $1 AND id = $2

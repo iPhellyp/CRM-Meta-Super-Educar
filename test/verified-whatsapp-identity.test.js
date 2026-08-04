@@ -41,6 +41,7 @@ test('ação de identidade preserva lead, exige INTERNAL_TEST e é transacional/
   assert.match(source, /UPDATE leads[\s\S]*whatsapp_normalized/);
   assert.doesNotMatch(source, /UPDATE leads[\s\S]*\bphone\s*=/);
   assert.doesNotMatch(source, /UPDATE leads[\s\S]*\bstage\s*=/);
+  assert.doesNotMatch(source, /WA2_VERIFIED_IDENTITY_NOT_ALTERNATE/);
   assert.doesNotMatch(source, /meta_conversion_events/);
   assert.match(source, /WHATSAPP_IDENTITY_VERIFIED/);
 });

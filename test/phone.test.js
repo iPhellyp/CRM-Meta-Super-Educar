@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import {
   PHONE_CLASSIFICATIONS,
   classifyBrazilianPhone,
+  getBrazilianPhoneIdentity,
   getWhatsAppUrl,
   normalizeBrazilianPhone,
+  normalizeConfirmedWhatsAppPhone,
   normalizeWhatsAppPhone,
   normalizeWhatsAppPhoneOrNull,
   selectBestLeadPhone,
@@ -24,6 +26,35 @@ test('preserva telefones válidos que já contêm DDI 55', () => {
 test('não adiciona nem remove o nono dígito', () => {
   assert.equal(normalizeWhatsAppPhone('3833330000'), '553833330000');
   assert.equal(normalizeWhatsAppPhone('38999990000'), '5538999990000');
+});
+
+test('normaliza alias móvel brasileiro confirmado no ponto correto', () => {
+  const identity = getBrazilianPhoneIdentity('553888515846', { confirmedMobile: true });
+  assert.equal(identity.canonicalE164, '5538988515846');
+  assert.deepEqual(identity.aliases, [
+    '553888515846',
+    '5538988515846',
+    '3888515846',
+    '38988515846',
+  ]);
+  assert.equal(identity.classification, PHONE_CLASSIFICATIONS.BR_MOBILE_LEGACY);
+  assert.equal(normalizeConfirmedWhatsAppPhone('553888515846'), '5538988515846');
+  assert.equal(
+    getBrazilianPhoneIdentity('5538988515846', { confirmedMobile: true }).canonicalE164,
+    '5538988515846',
+  );
+});
+
+test('não transforma fixo, estrangeiro ou número diferente em móvel equivalente', () => {
+  assert.equal(
+    getBrazilianPhoneIdentity('553833330000').classification,
+    PHONE_CLASSIFICATIONS.BR_FIXED,
+  );
+  assert.equal(normalizeConfirmedWhatsAppPhone('+1 202 555 0100'), '');
+  assert.notEqual(
+    getBrazilianPhoneIdentity('553888515847', { confirmedMobile: true }).canonicalE164,
+    '5538988515846',
+  );
 });
 
 test('rejeita formatos de telefone não reconhecidos', () => {

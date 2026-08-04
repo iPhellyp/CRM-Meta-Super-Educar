@@ -11,6 +11,10 @@ const BRAZILIAN_AREA_CODES = new Set([
 ]);
 
 export const PHONE_CLASSIFICATIONS = Object.freeze({
+  BR_MOBILE_CANONICAL: 'BR_MOBILE_CANONICAL',
+  BR_MOBILE_LEGACY: 'BR_MOBILE_LEGACY',
+  BR_FIXED: 'BR_FIXED',
+  UNKNOWN: 'UNKNOWN',
   VALID: 'VALID',
   PHONE_EMPTY: 'PHONE_EMPTY',
   PHONE_INVALID: 'PHONE_INVALID',
@@ -24,13 +28,46 @@ function safePhoneText(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-export function classifyBrazilianPhone(value) {
+export function getBrazilianPhoneIdentity(value, { confirmedMobile = false } = {}) {
   const raw = safePhoneText(value);
   if (!raw) {
-    return { status: PHONE_CLASSIFICATIONS.PHONE_EMPTY, phoneNormalized: null };
+    return {
+      original: raw,
+      countryCode: null,
+      areaCode: null,
+      subscriber: null,
+      canonicalE164: null,
+      aliases: [],
+      classification: PHONE_CLASSIFICATIONS.UNKNOWN,
+      status: PHONE_CLASSIFICATIONS.PHONE_EMPTY,
+      phoneNormalized: null,
+    };
   }
   if (/@lid$/i.test(raw)) {
-    return { status: PHONE_CLASSIFICATIONS.LID_UNRESOLVED, phoneNormalized: null };
+    return {
+      original: raw,
+      countryCode: null,
+      areaCode: null,
+      subscriber: null,
+      canonicalE164: null,
+      aliases: [],
+      classification: PHONE_CLASSIFICATIONS.UNKNOWN,
+      status: PHONE_CLASSIFICATIONS.LID_UNRESOLVED,
+      phoneNormalized: null,
+    };
+  }
+  if (/^\+\s*(?!55)/.test(raw)) {
+    return {
+      original: raw,
+      countryCode: null,
+      areaCode: null,
+      subscriber: null,
+      canonicalE164: null,
+      aliases: [],
+      classification: PHONE_CLASSIFICATIONS.UNKNOWN,
+      status: PHONE_CLASSIFICATIONS.PHONE_INVALID,
+      phoneNormalized: null,
+    };
   }
 
   const withoutJid = raw.replace(/@(s\.whatsapp\.net|c\.us)$/i, '');
@@ -40,23 +77,82 @@ export function classifyBrazilianPhone(value) {
   let digits = withoutJid.replace(/\D/g, '');
   if (digits.length === 10 || digits.length === 11) digits = `55${digits}`;
   if (!/^55\d{10,11}$/.test(digits)) {
-    return { status: PHONE_CLASSIFICATIONS.PHONE_INVALID, phoneNormalized: null };
+    return {
+      original: raw,
+      countryCode: null,
+      areaCode: null,
+      subscriber: null,
+      canonicalE164: null,
+      aliases: [],
+      classification: PHONE_CLASSIFICATIONS.UNKNOWN,
+      status: PHONE_CLASSIFICATIONS.PHONE_INVALID,
+      phoneNormalized: null,
+    };
   }
 
   const areaCode = Number(digits.slice(2, 4));
   const localNumber = digits.slice(4);
-  if (
-    !BRAZILIAN_AREA_CODES.has(areaCode) ||
-    !/^\d{8,9}$/.test(localNumber) ||
-    /^0+$/.test(localNumber)
-  ) {
-    return { status: PHONE_CLASSIFICATIONS.PHONE_INVALID, phoneNormalized: null };
+  if (!BRAZILIAN_AREA_CODES.has(areaCode) || !/^\d{8,9}$/.test(localNumber) || /^0+$/.test(localNumber)) {
+    return {
+      original: raw,
+      countryCode: 55,
+      areaCode,
+      subscriber: localNumber,
+      canonicalE164: null,
+      aliases: [],
+      classification: PHONE_CLASSIFICATIONS.UNKNOWN,
+      status: PHONE_CLASSIFICATIONS.PHONE_INVALID,
+      phoneNormalized: null,
+    };
   }
-  return { status: PHONE_CLASSIFICATIONS.VALID, phoneNormalized: digits };
+
+  const legacyMobile = localNumber.length === 8 && confirmedMobile;
+  const canonicalE164 = legacyMobile
+    ? `55${digits.slice(2, 4)}9${localNumber}`
+    : digits;
+  const canonicalMobile = localNumber.length === 9 && localNumber.startsWith('9');
+  const classification = canonicalMobile
+    ? PHONE_CLASSIFICATIONS.BR_MOBILE_CANONICAL
+    : legacyMobile
+      ? PHONE_CLASSIFICATIONS.BR_MOBILE_LEGACY
+      : PHONE_CLASSIFICATIONS.BR_FIXED;
+  const legacyE164 = canonicalMobile
+    ? `55${digits.slice(2, 4)}${localNumber.slice(1)}`
+    : digits;
+  const legacyLocal = `${digits.slice(2, 4)}${canonicalMobile ? localNumber.slice(1) : localNumber}`;
+  const canonicalLocal = `${digits.slice(2, 4)}${canonicalMobile ? localNumber : `9${localNumber}`}`;
+  const aliases = classification === PHONE_CLASSIFICATIONS.BR_FIXED
+    ? [digits, `${digits.slice(2)}`]
+    : [
+      digits,
+      canonicalE164,
+      legacyE164,
+      legacyLocal,
+      canonicalLocal,
+    ].filter((alias, index, all) => all.indexOf(alias) === index);
+  return {
+    original: raw,
+    countryCode: 55,
+    areaCode,
+    subscriber: localNumber,
+    canonicalE164,
+    aliases,
+    classification,
+    status: PHONE_CLASSIFICATIONS.VALID,
+    phoneNormalized: canonicalE164,
+  };
+}
+
+export function classifyBrazilianPhone(value, options = {}) {
+  return getBrazilianPhoneIdentity(value, options);
 }
 
 export function normalizeBrazilianPhone(value) {
   return classifyBrazilianPhone(value).phoneNormalized || '';
+}
+
+export function normalizeConfirmedWhatsAppPhone(value) {
+  return getBrazilianPhoneIdentity(value, { confirmedMobile: true }).canonicalE164 || '';
 }
 
 export function normalizeWhatsAppPhone(value) {
@@ -77,7 +173,12 @@ export function selectBestLeadPhone(lead = {}) {
   let lidFound = false;
   for (const candidate of candidates) {
     const classified = classifyBrazilianPhone(candidate);
-    if (classified.status === PHONE_CLASSIFICATIONS.VALID) return classified;
+    if (classified.status === PHONE_CLASSIFICATIONS.VALID) {
+      return {
+        status: classified.status,
+        phoneNormalized: classified.phoneNormalized,
+      };
+    }
     if (classified.status === PHONE_CLASSIFICATIONS.LID_UNRESOLVED) lidFound = true;
   }
 

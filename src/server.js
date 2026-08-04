@@ -22,6 +22,7 @@ import {
   enqueueLeadgenJobs,
   enqueueLeadWa2Resync,
   closePool,
+  createVerifiedWhatsAppIdentityAndLink,
   getActiveWa2ContactLinkForLead,
   getDashboardCounts,
   getLeadById,
@@ -48,6 +49,7 @@ import {
   listMetaImportForms,
   listHistoricalOperations,
   listWa2InstancesLocal,
+  listVerifiedWhatsAppIdentitiesForLead,
   listWa2LabelBindings,
   listWa2LabelJobs,
   listWa2ReconciliationItems,
@@ -157,6 +159,7 @@ import {
 } from './wa2.js';
 import {
   getWhatsAppUrl,
+  normalizeConfirmedWhatsAppPhone,
   normalizeWhatsAppPhone,
   selectBestLeadPhone,
 } from './phone.js';
@@ -1293,6 +1296,13 @@ function wa2LinkErrorMessage(error) {
       WA2_RESOLUTION_CHANGED:
         'A confirmação expirou ou o contato/chat mudou. Resolva novamente.',
       WA2_CONTACT_WITHOUT_CHAT: 'O contato foi encontrado, mas ainda não possui chat.',
+      WA2_VERIFIED_IDENTITY_INVALID: 'A evidência de identidade WhatsApp é inválida.',
+      WA2_VERIFIED_IDENTITY_PHONE_INVALID: 'A identidade verificada precisa ser um móvel brasileiro.',
+      WA2_VERIFIED_IDENTITY_PHONE_MISMATCH: 'O telefone verificado não corresponde ao contato WA2.',
+      WA2_VERIFIED_IDENTITY_NOT_INTERNAL_TEST: 'A ação está restrita ao lead de teste interno bloqueado.',
+      WA2_VERIFIED_IDENTITY_NOT_ALTERNATE: 'O telefone já é o telefone original do lead.',
+      WA2_VERIFIED_IDENTITY_CONFLICT: 'A identidade WhatsApp já está vinculada a outro lead.',
+      WA2_VERIFIED_IDENTITY_CHANGED: 'A evidência da identidade WhatsApp mudou.',
     };
     return messages[error.code] || 'Não foi possível alterar o vínculo WA2.';
   }
@@ -1351,10 +1361,11 @@ app.get('/leads/:id/wa2', async (req, res) => {
   const parsedId = z.string().uuid().safeParse(req.params.id);
   if (!parsedId.success) return redirectWith(res, '/', 'error', 'Lead inválido.');
   try {
-    const [lead, instances, links] = await Promise.all([
+    const [lead, instances, links, verifiedIdentities] = await Promise.all([
       getLeadById(parsedId.data),
       listWa2InstancesLocal({ enabledOnly: true }),
       getActiveWa2ContactLinkForLead(parsedId.data),
+      listVerifiedWhatsAppIdentitiesForLead(parsedId.data),
     ]);
     if (!lead) return redirectWith(res, '/', 'error', 'Lead não encontrado.');
     const labelSync = await getWa2LabelSyncStatusForLead(lead.id, lead.stage);
@@ -1362,6 +1373,7 @@ app.get('/leads/:id/wa2', async (req, res) => {
       lead,
       instances,
       links,
+      verifiedIdentities,
       labelSync,
       message: req.query.message || '',
       error: req.query.error || '',
@@ -1494,6 +1506,62 @@ app.post('/leads/:id/wa2/confirm', async (req, res) => {
       'error',
       wa2LinkErrorMessage(error),
     );
+  }
+});
+
+app.post('/leads/:id/wa2/verify-identity', async (req, res) => {
+  const parsedLeadId = z.string().uuid().safeParse(req.params.id);
+  const parsedInstanceId = z.string().uuid().safeParse(req.body.instanceId);
+  const phoneInput = z.string().trim().min(10).max(20).safeParse(req.body.phoneNormalized);
+  const evidenceWaMessageId = z.string().trim().min(1).max(255).safeParse(req.body.waMessageId);
+  const evidenceObservedAt = z.string().datetime().safeParse(req.body.observedAt);
+  const evidenceLidJid = z.string().trim().regex(/^[A-Za-z0-9._:-]+@lid$/i).safeParse(req.body.lidJid);
+  if (
+    !parsedLeadId.success ||
+    !parsedInstanceId.success ||
+    !phoneInput.success ||
+    !evidenceWaMessageId.success ||
+    !evidenceObservedAt.success ||
+    !evidenceLidJid.success ||
+    req.body.confirmation !== 'VERIFY_MOBILE_ALIAS'
+  ) {
+    return redirectWith(res, '/', 'error', 'Evidência de identidade WhatsApp inválida.');
+  }
+  try {
+    const [lead, instance] = await Promise.all([
+      getLeadById(parsedLeadId.data),
+      getWa2InstanceLocalById(parsedInstanceId.data),
+    ]);
+    if (!lead) return redirectWith(res, '/', 'error', 'Lead não encontrado.');
+    if (!instance) return redirectWith(res, `/leads/${parsedLeadId.data}/wa2`, 'error', 'Instância WA2 não encontrada.');
+    const canonicalPhone = normalizeConfirmedWhatsAppPhone(phoneInput.data);
+    if (!canonicalPhone) {
+      return redirectWith(res, `/leads/${parsedLeadId.data}/wa2`, 'error', 'Telefone móvel brasileiro inválido.');
+    }
+    const resolved = await getWa2ContactByPhone(instance.remote_instance_id, canonicalPhone);
+    const result = await createVerifiedWhatsAppIdentityAndLink({
+      leadId: lead.id,
+      instanceId: instance.id,
+      expectedPhoneNormalized: canonicalPhone,
+      resolved,
+      evidence: {
+        waMessageId: evidenceWaMessageId.data,
+        observedAt: evidenceObservedAt.data,
+        lidJid: evidenceLidJid.data,
+      },
+      actor: req.user.sub,
+    });
+    return redirectWith(
+      res,
+      `/leads/${lead.id}/wa2`,
+      'message',
+      result.idempotent
+        ? 'Identidade WhatsApp já estava verificada e o vínculo permanece único.'
+        : 'Identidade WhatsApp verificada e vínculo WA2 criado sem alterar a etapa.',
+    );
+  } catch (error) {
+    const path = parsedLeadId.success ? `/leads/${parsedLeadId.data}/wa2` : '/';
+    return redirectWith(res, path, 'error', wa2LinkErrorMessage(error));
   }
 });
 

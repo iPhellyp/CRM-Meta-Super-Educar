@@ -11,6 +11,9 @@ import {
   originMayConfirmProtectedStage,
 } from './funnel.js';
 import {
+  getBrazilianPhoneIdentity,
+  normalizeConfirmedWhatsAppPhone,
+  normalizeWhatsAppPhone,
   normalizeWhatsAppPhoneOrNull,
 } from './phone.js';
 import {
@@ -1909,6 +1912,284 @@ export async function getWa2ContactLinkById(id) {
   return result.rows[0] || null;
 }
 
+export const VERIFIED_WHATSAPP_SOURCE = 'USER_CONFIRMED_CONTACT_MATHEUS_PH_2026_08_04';
+export const VERIFIED_WHATSAPP_REASON = 'BRAZIL_NINTH_DIGIT_LEGACY_ALIAS';
+
+export async function listVerifiedWhatsAppIdentitiesForLead(leadId) {
+  const result = await pool.query(
+    `SELECT identity.*, instance.name AS instance_name,
+            instance.remote_instance_id
+     FROM lead_verified_whatsapp_identities identity
+     JOIN wa2_instances instance
+       ON instance.tenant_id = identity.tenant_id
+      AND instance.id = identity.wa2_instance_id
+     WHERE identity.tenant_id = $1 AND identity.lead_id = $2
+     ORDER BY identity.verified_at DESC`,
+    [tenantId(), leadId],
+  );
+  return result.rows;
+}
+
+function verifiedIdentityText(value, maxLength, field) {
+  const text = String(value || '').trim();
+  if (!text || text.length > maxLength) {
+    throw new Wa2DataError(`Evidência ${field} inválida`, 'WA2_VERIFIED_IDENTITY_INVALID');
+  }
+  return text;
+}
+
+function verifiedIdentityJid(value, pattern, field) {
+  const text = verifiedIdentityText(value, 255, field).toLowerCase();
+  if (!pattern.test(text)) {
+    throw new Wa2DataError(`Evidência ${field} inválida`, 'WA2_VERIFIED_IDENTITY_INVALID');
+  }
+  return text;
+}
+
+export async function createVerifiedWhatsAppIdentityAndLink({
+  leadId,
+  instanceId,
+  expectedPhoneNormalized,
+  resolved,
+  evidence,
+  actor,
+}) {
+  const identity = getBrazilianPhoneIdentity(expectedPhoneNormalized, { confirmedMobile: true });
+  if (
+    !identity.canonicalE164 ||
+    ![
+      'BR_MOBILE_CANONICAL',
+      'BR_MOBILE_LEGACY',
+    ].includes(identity.classification)
+  ) {
+    throw new Wa2DataError(
+      'A identidade verificada precisa ser um móvel brasileiro',
+      'WA2_VERIFIED_IDENTITY_PHONE_INVALID',
+    );
+  }
+  if (!resolved?.contact?.id || !resolved?.chat?.id || !resolved?.contact?.jid) {
+    throw new Wa2DataError(
+      'Contato ou chat WA2 ausente na evidência',
+      'WA2_VERIFIED_IDENTITY_INVALID',
+    );
+  }
+  const canonicalPhone = identity.canonicalE164;
+  const sourcePhone = normalizeConfirmedWhatsAppPhone(
+    resolved.contact.sourcePhoneNormalized || resolved.contact.phoneNormalized,
+  );
+  if (!sourcePhone || sourcePhone !== canonicalPhone) {
+    throw new Wa2DataError(
+      'A identidade WA2 não corresponde ao telefone canônico',
+      'WA2_VERIFIED_IDENTITY_PHONE_MISMATCH',
+    );
+  }
+  const phoneJid = verifiedIdentityJid(
+    resolved.contact.jid,
+    /^\d+@(s\.whatsapp\.net|c\.us)$/,
+    'phoneJid',
+  );
+  const evidenceLidJid = evidence?.lidJid
+    ? verifiedIdentityJid(evidence.lidJid, /^[a-z0-9._:-]+@lid$/, 'lidJid')
+    : null;
+  const resolvedLidJid = String(resolved.chat.jid || '').toLowerCase().endsWith('@lid')
+    ? verifiedIdentityJid(resolved.chat.jid, /^[a-z0-9._:-]+@lid$/, 'lidJid')
+    : null;
+  if (evidenceLidJid && resolvedLidJid && evidenceLidJid !== resolvedLidJid) {
+    throw new Wa2DataError(
+      'O LID da evidência não corresponde ao chat resolvido',
+      'WA2_VERIFIED_IDENTITY_CHANGED',
+    );
+  }
+  const lidJid = evidenceLidJid || resolvedLidJid;
+  const evidenceMessageId = verifiedIdentityText(
+    evidence?.waMessageId,
+    255,
+    'waMessageId',
+  );
+  const evidenceObservedAt = new Date(evidence?.observedAt);
+  if (!Number.isFinite(evidenceObservedAt.getTime())) {
+    throw new Wa2DataError(
+      'Data da evidência WA2 inválida',
+      'WA2_VERIFIED_IDENTITY_INVALID',
+    );
+  }
+  const safeActor = optionalActor(actor) || 'admin';
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const leadResult = await client.query(
+      `SELECT * FROM leads
+       WHERE tenant_id = $1 AND id = $2
+       FOR UPDATE`,
+      [tenantId(), leadId],
+    );
+    const lead = leadResult.rows[0];
+    if (!lead) throw new Wa2DataError('Lead não encontrado', 'WA2_LEAD_NOT_FOUND');
+    if (!lead.is_internal_test || lead.meta_outbound_eligible !== false) {
+      throw new Wa2DataError(
+        'Identidade alternativa só pode ser registrada para teste interno bloqueado',
+        'WA2_VERIFIED_IDENTITY_NOT_INTERNAL_TEST',
+      );
+    }
+    if (lead.phone_normalized === canonicalPhone) {
+      throw new Wa2DataError(
+        'O telefone canônico já é o telefone original do lead',
+        'WA2_VERIFIED_IDENTITY_NOT_ALTERNATE',
+      );
+    }
+    const instanceResult = await client.query(
+      `SELECT * FROM wa2_instances
+       WHERE tenant_id = $1 AND id = $2
+       FOR UPDATE`,
+      [tenantId(), instanceId],
+    );
+    const instance = instanceResult.rows[0];
+    if (!instance) throw new Wa2DataError('Instância não encontrada', 'WA2_INSTANCE_NOT_FOUND');
+    if (!instance.enabled) throw new Wa2DataError('Instância desabilitada', 'WA2_INSTANCE_DISABLED');
+
+    const otherLeadResult = await client.query(
+      `SELECT id FROM leads
+       WHERE tenant_id = $1 AND id <> $2
+         AND (phone_normalized = $3 OR whatsapp_normalized = $3)
+       FOR UPDATE`,
+      [tenantId(), leadId, canonicalPhone],
+    );
+    if (otherLeadResult.rowCount > 0) {
+      throw new Wa2DataError(
+        'O telefone canônico já pertence a outro lead',
+        'WA2_VERIFIED_IDENTITY_CONFLICT',
+      );
+    }
+
+    const existingIdentityResult = await client.query(
+      `SELECT * FROM lead_verified_whatsapp_identities
+       WHERE tenant_id = $1 AND wa2_instance_id = $2 AND canonical_phone = $3
+       FOR UPDATE`,
+      [tenantId(), instanceId, canonicalPhone],
+    );
+    const existingIdentity = existingIdentityResult.rows[0];
+    if (existingIdentity && existingIdentity.lead_id !== leadId) {
+      throw new Wa2DataError(
+        'A identidade WhatsApp já está vinculada a outro lead',
+        'WA2_VERIFIED_IDENTITY_CONFLICT',
+      );
+    }
+    if (
+      existingIdentity &&
+      (existingIdentity.remote_chat_id !== resolved.chat.id ||
+        existingIdentity.phone_jid !== phoneJid ||
+        existingIdentity.lid_jid !== lidJid)
+    ) {
+      throw new Wa2DataError(
+        'A evidência da identidade WhatsApp mudou',
+        'WA2_VERIFIED_IDENTITY_CHANGED',
+      );
+    }
+
+    const activeLinksResult = await client.query(
+      `SELECT * FROM wa2_contact_links
+       WHERE tenant_id = $1 AND wa2_instance_id = $2
+         AND unlinked_at IS NULL
+         AND (lead_id = $3 OR remote_chat_id = $4)
+       FOR UPDATE`,
+      [tenantId(), instanceId, leadId, resolved.chat.id],
+    );
+    const activeConflict = activeLinksResult.rows.find(
+      (link) => link.lead_id !== leadId || link.remote_chat_id !== resolved.chat.id,
+    );
+    if (activeConflict) {
+      throw new Wa2DataError(
+        'Já existe vínculo ativo conflitante para o lead ou chat',
+        'WA2_LINK_CONFLICT',
+      );
+    }
+    const currentLink = activeLinksResult.rows[0] || null;
+    if (existingIdentity && currentLink && lead.whatsapp_normalized === canonicalPhone) {
+      await client.query('COMMIT');
+      return { identity: existingIdentity, link: currentLink, idempotent: true };
+    }
+    let savedIdentity = existingIdentity;
+    if (!savedIdentity) {
+      const insertedIdentity = await client.query(
+        `INSERT INTO lead_verified_whatsapp_identities (
+           tenant_id, lead_id, wa2_instance_id, canonical_phone, aliases,
+           source_phone, phone_jid, lid_jid, verification_source,
+           verification_reason, remote_contact_id, remote_chat_id,
+           evidence_wa_message_id, evidence_observed_at, verified_by
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+         RETURNING *`,
+        [
+          lead.tenant_id,
+          lead.id,
+          instance.id,
+          canonicalPhone,
+          JSON.stringify(identity.aliases),
+          resolved.contact.sourcePhoneNormalized || resolved.contact.phoneNormalized,
+          phoneJid,
+          lidJid,
+          VERIFIED_WHATSAPP_SOURCE,
+          VERIFIED_WHATSAPP_REASON,
+          resolved.contact.id,
+          resolved.chat.id,
+          evidenceMessageId,
+          evidenceObservedAt,
+          safeActor,
+        ],
+      );
+      savedIdentity = insertedIdentity.rows[0];
+    }
+
+    await client.query(
+      `UPDATE leads
+       SET whatsapp_normalized = $3, updated_at = now()
+       WHERE tenant_id = $1 AND id = $2`,
+      [lead.tenant_id, lead.id, canonicalPhone],
+    );
+
+    let link = currentLink;
+    if (!link) {
+      link = await insertWa2ContactLink(client, {
+        leadId: lead.id,
+        instanceId: instance.id,
+        expectedPhoneNormalized: canonicalPhone,
+        resolved,
+        actor: safeActor,
+      });
+    }
+    await client.query(
+      `INSERT INTO lead_stage_history (
+         tenant_id, lead_id, previous_stage, new_stage, origin,
+         observation, activity_type, metadata
+       ) VALUES ($1,$2,$3,$3,'SYSTEM',$4,'WHATSAPP_IDENTITY_VERIFIED',$5)`,
+      [
+        lead.tenant_id,
+        lead.id,
+        lead.stage,
+        'Identidade WhatsApp verificada e vínculo WA2 confirmado sem alterar a etapa.',
+        {
+          identityId: savedIdentity.id,
+          canonicalPhone,
+          aliases: identity.aliases,
+          source: VERIFIED_WHATSAPP_SOURCE,
+          reason: VERIFIED_WHATSAPP_REASON,
+          evidenceWaMessageId: evidenceMessageId,
+          remoteContactId: resolved.contact.id,
+          remoteChatId: resolved.chat.id,
+          lidJid,
+          phoneJid,
+        },
+      ],
+    );
+    await client.query('COMMIT');
+    return { identity: savedIdentity, link, idempotent: Boolean(existingIdentity && currentLink) };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw mapWa2UniqueViolation(error);
+  } finally {
+    client.release();
+  }
+}
+
 async function lockWa2LinkParents(client, { leadId, instanceId, expectedPhoneNormalized }) {
   const leadResult = await client.query(
     `SELECT * FROM leads
@@ -1969,7 +2250,7 @@ async function insertWa2ContactLink(client, {
       instanceId,
       resolved.contact.id,
       resolved.chat.id,
-      resolved.chat.jid,
+      resolved.contact?.jid || resolved.chat.jid,
       expectedPhoneNormalized,
       optionalActor(actor),
     ],
@@ -2036,6 +2317,7 @@ export async function verifyWa2ContactLink({ linkId, resolved }) {
     await client.query('BEGIN');
     const selected = await client.query(
       `SELECT link.*, lead.phone_normalized AS current_lead_phone,
+              lead.whatsapp_normalized AS current_whatsapp_phone,
               instance.enabled AS current_instance_enabled
        FROM wa2_contact_links link
        JOIN leads lead
@@ -2054,7 +2336,11 @@ export async function verifyWa2ContactLink({ linkId, resolved }) {
     if (!link.current_instance_enabled) {
       throw new Wa2DataError('Instância local está desabilitada', 'WA2_INSTANCE_DISABLED');
     }
-    if (link.current_lead_phone !== link.phone_normalized) {
+    const currentLeadPhone = link.current_whatsapp_phone || link.current_lead_phone;
+    if (
+      normalizeWhatsAppPhone(currentLeadPhone) !==
+      normalizeWhatsAppPhone(link.phone_normalized)
+    ) {
       throw new Wa2DataError(
         'O telefone do lead mudou durante a verificação',
         'WA2_LEAD_PHONE_CHANGED',
@@ -2063,8 +2349,9 @@ export async function verifyWa2ContactLink({ linkId, resolved }) {
     if (
       link.remote_contact_id !== resolved.contact.id ||
       link.remote_chat_id !== resolved.chat.id ||
-      link.jid !== resolved.chat.jid ||
-      link.phone_normalized !== resolved.contact.phoneNormalized
+      link.jid !== (resolved.contact?.jid || resolved.chat.jid) ||
+      normalizeWhatsAppPhone(link.phone_normalized) !==
+        normalizeWhatsAppPhone(resolved.contact.phoneNormalized)
     ) {
       throw new Wa2DataError('O contato ou chat remoto mudou', 'WA2_LINK_CHANGED');
     }

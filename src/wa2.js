@@ -1,5 +1,9 @@
 import crypto from 'node:crypto';
-import { normalizeWhatsAppPhone } from './phone.js';
+import {
+  getBrazilianPhoneIdentity,
+  normalizeConfirmedWhatsAppPhone,
+  normalizeWhatsAppPhone,
+} from './phone.js';
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MIN_TIMEOUT_MS = 500;
@@ -178,15 +182,9 @@ function individualJidPhone(value) {
   };
 }
 
-export function brazilianPhoneAliases(phoneNormalized) {
-  const aliases = new Set([phoneNormalized]);
-  if (!/^55\d{10,11}$/.test(phoneNormalized)) return aliases;
-  if (phoneNormalized.length === 12) {
-    aliases.add(`${phoneNormalized.slice(0, 4)}9${phoneNormalized.slice(4)}`);
-  } else if (phoneNormalized[4] === '9') {
-    aliases.add(`${phoneNormalized.slice(0, 4)}${phoneNormalized.slice(5)}`);
-  }
-  return aliases;
+export function brazilianPhoneAliases(phoneNormalized, { confirmedMobile = false } = {}) {
+  const identity = getBrazilianPhoneIdentity(phoneNormalized, { confirmedMobile });
+  return new Set(identity.aliases.length ? identity.aliases : [phoneNormalized]);
 }
 
 function sameResolvedPhone(requestedPhone, resolvedPhone) {
@@ -445,18 +443,28 @@ function sanitizeContactByPhone(payload, requestedPhone) {
     });
   }
   const contactId = requiredRemoteText(value.contact.id, 200, 'WA2_CONTACT_INVALID');
-  const phoneNormalized = requiredRemoteText(
+  const sourcePhoneNormalized = requiredRemoteText(
     value.contact.phoneNormalized,
     20,
     'WA2_CONTACT_INVALID',
   );
-  if (phoneNormalized !== requestedPhone) {
+  const requestedIdentity = getBrazilianPhoneIdentity(requestedPhone, { confirmedMobile: true });
+  const sourceIdentity = getBrazilianPhoneIdentity(sourcePhoneNormalized, { confirmedMobile: true });
+  if (
+    !requestedIdentity.canonicalE164 ||
+    !sourceIdentity.canonicalE164 ||
+    sourceIdentity.canonicalE164 !== requestedIdentity.canonicalE164
+  ) {
     throw new Wa2Error('Telefone retornado pelo WA2 é divergente', {
       code: 'WA2_PHONE_MISMATCH',
     });
   }
   const contactJid = individualJidPhone(value.contact.jid);
-  if (!sameResolvedPhone(requestedPhone, contactJid.phoneNormalized)) {
+  const contactJidIdentity = getBrazilianPhoneIdentity(
+    contactJid.phoneNormalized,
+    { confirmedMobile: true },
+  );
+  if (contactJidIdentity.canonicalE164 !== requestedIdentity.canonicalE164) {
     throw new Wa2Error('JID do contato diverge do telefone', {
       code: 'WA2_JID_MISMATCH',
     });
@@ -475,9 +483,13 @@ function sanitizeContactByPhone(payload, requestedPhone) {
       };
     } else {
       const chatJid = individualJidPhone(value.chat.jid);
+      const chatJidIdentity = getBrazilianPhoneIdentity(
+        chatJid.phoneNormalized,
+        { confirmedMobile: true },
+      );
       if (
-        !sameResolvedPhone(requestedPhone, chatJid.phoneNormalized) ||
-        chatJid.phoneNormalized !== contactJid.phoneNormalized
+        chatJidIdentity.canonicalE164 !== requestedIdentity.canonicalE164 ||
+        chatJidIdentity.canonicalE164 !== contactJidIdentity.canonicalE164
       ) {
         throw new Wa2Error('JID do chat diverge do contato', {
           code: 'WA2_JID_MISMATCH',
@@ -498,7 +510,13 @@ function sanitizeContactByPhone(payload, requestedPhone) {
   return {
     contact: {
       id: contactId,
-      phoneNormalized,
+      phoneNormalized: requestedIdentity.canonicalE164,
+      ...(sourcePhoneNormalized !== requestedIdentity.canonicalE164
+        ? {
+          sourcePhoneNormalized,
+          phoneAliases: sourceIdentity.aliases,
+        }
+        : {}),
       name: optionalRemoteText(value.contact.name, 200, 'WA2_CONTACT_INVALID'),
       jid: contactJid.jid,
     },
@@ -982,7 +1000,15 @@ export function createWa2Client({
       parse: parseWa2Qr,
     }),
     getContactByPhone: (instanceId, phoneNormalized) => {
-      const phone = validateNormalizedPhone(phoneNormalized);
+      const rawPhone = String(phoneNormalized || '').trim();
+      const normalizedInput = normalizeWhatsAppPhone(rawPhone);
+      if (!normalizedInput || rawPhone !== normalizedInput) {
+        throw new Wa2Error('Telefone não está normalizado', { code: 'WA2_PHONE_INVALID' });
+      }
+      const phone = normalizeConfirmedWhatsAppPhone(phoneNormalized);
+      if (!phone) {
+        throw new Wa2Error('Telefone WA2 inválido', { code: 'WA2_PHONE_INVALID' });
+      }
       return request(instancePath(
         instanceId,
         `/contacts/by-phone/${encodeURIComponent(phone)}`,

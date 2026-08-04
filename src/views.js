@@ -1586,6 +1586,7 @@ export function leadWa2View({
   lead,
   instances,
   links,
+  verifiedIdentities = [],
   labelSync = [],
   message = '',
   error = '',
@@ -1632,6 +1633,45 @@ export function leadWa2View({
         ? `<small class="error-text">${esc(sync.last_error_code)} · ${esc(sync.last_error_message || '')}</small>`
         : '—'}</td>
     </tr>`).join('');
+  const verifiedIdentityRows = verifiedIdentities.map((identity) => `
+    <tr>
+      <td>${detailValue(identity.instance_name || identity.remote_instance_id)}</td>
+      <td>${detailValue(identity.canonical_phone)}<small>Alias(es): ${detailValue(Array.isArray(identity.aliases) ? identity.aliases.join(', ') : identity.aliases)}</small></td>
+      <td>${detailValue(identity.remote_contact_id)}<small>${detailValue(identity.remote_chat_id)} · ${esc(maskJid(identity.phone_jid))}</small></td>
+      <td>${formatDateTime(identity.verified_at)}<small>${detailValue(identity.verification_reason)}</small></td>
+    </tr>`).join('');
+  const verifiedIdentitySection = verifiedIdentities.length
+    ? `<section class="panel">
+        <div class="panel-title"><h2>Identidade WhatsApp verificada</h2><span>${verifiedIdentities.length}</span></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Instância</th><th>Canônico/aliases</th><th>Contato/chat</th><th>Auditoria</th></tr></thead>
+          <tbody>${verifiedIdentityRows}</tbody>
+        </table></div>
+        <p class="muted">Telefone original do formulário e telefone normalizado original permanecem preservados.</p>
+      </section>`
+    : lead.is_internal_test && lead.meta_outbound_eligible === false
+      ? `<section class="panel">
+          <h2>Verificar identidade WhatsApp alternativa</h2>
+          <p class="muted">Use somente para a mensagem inbound já auditada. A confirmação exige o telefone exato, o LID e o waMessageId; não altera etapa nem cria evento Meta.</p>
+          <form method="post" action="/leads/${esc(lead.id)}/wa2/verify-identity" class="stack compact-form">
+            ${csrfField(csrfToken)}
+            <label>Telefone canônico ou alias confirmado
+              <input name="phoneNormalized" value="${esc(lead.whatsapp_normalized || '')}" required maxlength="20" inputmode="numeric">
+            </label>
+            <label>waMessageId da evidência inbound
+              <input name="waMessageId" required maxlength="255">
+            </label>
+            <label>LID da evidência
+              <input name="lidJid" required maxlength="255">
+            </label>
+            <label>Data/hora da evidência
+              <input name="observedAt" type="text" placeholder="2026-08-04T13:49:11.231Z" required maxlength="50">
+            </label>
+            <input type="hidden" name="confirmation" value="VERIFY_MOBILE_ALIAS">
+            <button class="success" type="submit">Registrar identidade e criar vínculo WA2</button>
+          </form>
+        </section>`
+      : '';
 
   return layout('Vínculo WA2', `
     ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
@@ -1644,6 +1684,7 @@ export function leadWa2View({
       <div><strong>Telefone normalizado</strong><span>${detailValue(lead.phone_normalized)}</span></div>
       <div><strong>Origem do lead</strong><span>${detailValue(lead.source)}</span></div>
     </section>
+    ${verifiedIdentitySection}
     <section class="panel">
       <h2>Resolver contato no WA2</h2>
       ${instances.length ? `

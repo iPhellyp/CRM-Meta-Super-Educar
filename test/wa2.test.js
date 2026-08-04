@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import {
   Wa2Error,
+  brazilianPhoneAliases,
   classifyWa2Jid,
   createWa2Client,
   parseWa2Qr,
@@ -449,6 +450,51 @@ test('aceita alias brasileiro unívoco retornado pelo WA2', async () => {
   const result = await client.getContactByPhone('instance-1', '5538999990000');
   assert.equal(result.contact.phoneNormalized, '5538999990000');
   assert.equal(result.chat.jid, '553899990000@s.whatsapp.net');
+});
+
+test('canonicaliza PN legado móvel sem perder o alias da resposta WA2', async () => {
+  let capturedUrl;
+  const client = clientWith(async (url) => {
+    capturedUrl = url;
+    return jsonResponse({
+      contact: {
+        id: 'contact-legacy',
+        phoneNormalized: '553888515846',
+        name: 'Matheus PH',
+        jid: '553888515846@s.whatsapp.net',
+      },
+      chat: { id: 'chat-legacy', jid: '123456@lid' },
+    });
+  });
+  const result = await client.getContactByPhone('instance-1', '553888515846');
+  assert.equal(
+    capturedUrl,
+    'http://localhost:3100/api/internal/v1/instances/instance-1/contacts/by-phone/5538988515846',
+  );
+  assert.equal(result.contact.phoneNormalized, '5538988515846');
+  assert.equal(result.contact.sourcePhoneNormalized, '553888515846');
+  assert.deepEqual(result.contact.phoneAliases, [
+    '553888515846',
+    '5538988515846',
+    '3888515846',
+    '38988515846',
+  ]);
+  assert.equal(result.chat.jid, '123456@lid');
+});
+
+test('não cria alias móvel para telefone fixo sem evidência explícita', () => {
+  assert.deepEqual(
+    [...brazilianPhoneAliases('553833330000')],
+    ['553833330000', '3833330000'],
+  );
+  assert.deepEqual(
+    [...brazilianPhoneAliases('553888515846')],
+    ['553888515846', '3888515846'],
+  );
+  assert.equal(
+    brazilianPhoneAliases('553888515846', { confirmedMobile: true }).has('5538988515846'),
+    true,
+  );
 });
 
 test('aceita chat LID somente quando contato canônico resolve o telefone', async () => {

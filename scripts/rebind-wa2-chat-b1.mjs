@@ -2,7 +2,6 @@ import 'dotenv/config';
 import {
   closePool,
   getActiveWa2ContactLinkForLead,
-  getLeadById,
   listVerifiedWhatsAppIdentitiesForLead,
   listWa2InstancesLocal,
   rebindVerifiedWa2IdentityToChat,
@@ -25,8 +24,6 @@ function fail(message) {
 }
 
 async function loadSnapshot() {
-  const lead = await getLeadById(LEAD_ID);
-  if (!lead) fail('Lead de rebind não encontrado');
   const instances = await listWa2InstancesLocal({ enabledOnly: true });
   const instanceMatches = instances.filter((item) => item.name === INSTANCE_NAME);
   if (instanceMatches.length !== 1) fail('Instância de rebind não é única');
@@ -69,7 +66,6 @@ async function loadSnapshot() {
   const idempotencyKey = `wa2-rebind:${LEAD_ID}:${instance.id}:${sha256(message.waMessageId)}`;
   return {
     requestedTenantId: process.env.DEFAULT_TENANT_ID || 'super-educar',
-    lead,
     instance,
     currentLink,
     identity,

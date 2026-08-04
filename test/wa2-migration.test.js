@@ -116,7 +116,8 @@ test('migration restringe JID a contatos individuais suportados', () => {
 test('queries de vínculo mantêm tenant e não alteram funil ou dados Meta', () => {
   const start = dbSource.indexOf('export async function getActiveWa2ContactLinkForLead');
   const end = dbSource.indexOf('async function createOrGetMetaEvent');
-  const linkQueries = dbSource.slice(start, end);
+  const rebindStart = dbSource.indexOf('export async function rebindVerifiedWa2IdentityToChat', start);
+  const linkQueries = dbSource.slice(start, rebindStart > start ? rebindStart : end);
   assert.ok(start >= 0 && end > start);
   assert.match(linkQueries, /tenant_id/g);
   assert.match(linkQueries, /FOR UPDATE/);

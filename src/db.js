@@ -31,6 +31,14 @@ import {
   decideInboundLabelAction,
   isInternalTestLead,
 } from './historical-sync.js';
+import {
+  WA2_CHAT_REBIND_ACTIVITY,
+  WA2_CHAT_REBIND_REASON,
+  createRebindHistoryMetadata,
+  rebindPayloadHash,
+  sameAliasSet,
+  validateRebindAdapterEvidence,
+} from './wa2-rebind.js';
 
 const { Pool } = pg;
 const DEFAULT_TENANT_ID = 'super-educar';
@@ -2462,6 +2470,387 @@ export async function replaceWa2ContactLink({
     });
     await client.query('COMMIT');
     return { replaced: true, link };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw mapWa2UniqueViolation(error);
+  } finally {
+    client.release();
+  }
+}
+
+export async function rebindVerifiedWa2IdentityToChat({
+  requestedTenantId = tenantId(),
+  leadId,
+  instanceId,
+  expectedActiveLinkId,
+  expectedOldRemoteChatId,
+  newRemoteChatId,
+  newRemoteContactId,
+  newRemoteJid,
+  canonicalPhone,
+  pn,
+  lid,
+  evidenceWaMessageId,
+  evidenceTimestamp,
+  evidence,
+  reason = WA2_CHAT_REBIND_REASON,
+  actor = null,
+  idempotencyKey,
+  dryRun = false,
+}) {
+  if (requestedTenantId !== tenantId()) {
+    throw new Wa2DataError('Tenant do rebind inválido', 'WA2_REBIND_TENANT_CONFLICT');
+  }
+  if (!leadId || !instanceId || !expectedActiveLinkId || !expectedOldRemoteChatId || !newRemoteChatId) {
+    throw new Wa2DataError('Identificadores do rebind incompletos', 'WA2_REBIND_INPUT_INVALID');
+  }
+  if (expectedOldRemoteChatId === newRemoteChatId) {
+    throw new Wa2DataError('O novo chat precisa ser diferente do chat antigo', 'WA2_REBIND_CHAT_NOT_NEW');
+  }
+  if (reason !== WA2_CHAT_REBIND_REASON) {
+    throw new Wa2DataError('Razão de rebind inválida', 'WA2_REBIND_REASON_INVALID');
+  }
+  const safeActor = optionalActor(actor) || 'system';
+  const safeIdempotencyKey = String(idempotencyKey || '').trim();
+  if (!/^[A-Za-z0-9:._-]{16,255}$/.test(safeIdempotencyKey)) {
+    throw new Wa2DataError('Idempotency key inválida', 'WA2_REBIND_IDEMPOTENCY_INVALID');
+  }
+  const safeEvidenceTimestamp = new Date(evidenceTimestamp);
+  if (!Number.isFinite(safeEvidenceTimestamp.getTime())) {
+    throw new Wa2DataError('Timestamp da evidência inválido', 'WA2_REBIND_EVIDENCE_INVALID');
+  }
+  let canonicalIdentity;
+  try {
+    canonicalIdentity = getBrazilianPhoneIdentity(canonicalPhone, { confirmedMobile: true });
+    verifiedIdentityJid(newRemoteJid, /^\d+@(s\.whatsapp\.net|c\.us)$/, 'phoneJid');
+    verifiedIdentityJid(pn, /^\d+@(s\.whatsapp\.net|c\.us)$/, 'phoneJid');
+    verifiedIdentityJid(lid, /^[a-z0-9._:-]+@lid$/, 'lidJid');
+    validateRebindAdapterEvidence(evidence, {
+      instanceId: evidence?.instanceId,
+      chatId: newRemoteChatId,
+      contactId: newRemoteContactId,
+      waMessageId: evidenceWaMessageId,
+      lidJid: lid,
+      phoneJid: pn,
+      observedAt: safeEvidenceTimestamp,
+    });
+  } catch {
+    throw new Wa2DataError('Evidência do rebind inválida', 'WA2_REBIND_EVIDENCE_INVALID');
+  }
+  if (
+    !canonicalIdentity.canonicalE164 ||
+    !['BR_MOBILE_CANONICAL', 'BR_MOBILE_LEGACY'].includes(canonicalIdentity.classification) ||
+    canonicalIdentity.canonicalE164 !== canonicalPhone ||
+    newRemoteJid !== pn
+  ) {
+    throw new Wa2DataError('Identidade canônica do rebind divergente', 'WA2_REBIND_IDENTITY_MISMATCH');
+  }
+  const payloadHash = rebindPayloadHash({
+    leadId,
+    instanceId,
+    expectedActiveLinkId,
+    expectedOldRemoteChatId,
+    newRemoteChatId,
+    newRemoteContactId,
+    newRemoteJid,
+    canonicalPhone,
+    pn,
+    lid,
+    evidenceWaMessageId,
+    evidenceTimestamp: safeEvidenceTimestamp,
+    reason,
+    idempotencyKey: safeIdempotencyKey,
+  });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const leadResult = await client.query(
+      `SELECT * FROM leads
+       WHERE tenant_id = $1 AND id = $2
+       FOR UPDATE`,
+      [tenantId(), leadId],
+    );
+    const lead = leadResult.rows[0];
+    if (!lead) throw new Wa2DataError('Lead não encontrado', 'WA2_LEAD_NOT_FOUND');
+
+    const instanceResult = await client.query(
+      `SELECT * FROM wa2_instances
+       WHERE tenant_id = $1 AND id = $2
+       FOR UPDATE`,
+      [tenantId(), instanceId],
+    );
+    const instance = instanceResult.rows[0];
+    if (!instance || !instance.enabled) {
+      throw new Wa2DataError('Instância WA2 inválida ou desabilitada', 'WA2_REBIND_INSTANCE_INVALID');
+    }
+    if (instance.remote_instance_id !== evidence.instanceId) {
+      throw new Wa2DataError('Evidência pertence a outra instância', 'WA2_REBIND_INSTANCE_MISMATCH');
+    }
+
+    const historyResult = await client.query(
+      `SELECT * FROM lead_stage_history
+       WHERE tenant_id = $1 AND lead_id = $2
+         AND activity_type = $3
+         AND metadata->>'idempotencyKey' = $4
+       FOR UPDATE`,
+      [tenantId(), leadId, WA2_CHAT_REBIND_ACTIVITY, safeIdempotencyKey],
+    );
+
+    const activeLinksResult = await client.query(
+      `SELECT * FROM wa2_contact_links
+       WHERE tenant_id = $1 AND lead_id = $2 AND wa2_instance_id = $3
+         AND unlinked_at IS NULL
+       FOR UPDATE`,
+      [tenantId(), leadId, instanceId],
+    );
+    const identityResult = await client.query(
+      `SELECT * FROM lead_verified_whatsapp_identities
+       WHERE tenant_id = $1 AND lead_id = $2 AND wa2_instance_id = $3
+       FOR UPDATE`,
+      [tenantId(), leadId, instanceId],
+    );
+
+    if (historyResult.rowCount > 0) {
+      const history = historyResult.rows[0];
+      if (history.metadata?.payloadHash !== payloadHash) {
+        throw new Wa2DataError(
+          'Idempotency key reutilizada com payload diferente',
+          'WA2_REBIND_IDEMPOTENCY_CONFLICT',
+        );
+      }
+      const current = activeLinksResult.rows[0];
+      const identity = identityResult.rows[0];
+      if (
+        activeLinksResult.rowCount !== 1 ||
+        !current ||
+        current.remote_chat_id !== newRemoteChatId ||
+        current.remote_contact_id !== newRemoteContactId ||
+        current.jid !== newRemoteJid ||
+        identityResult.rowCount !== 1 ||
+        !identity ||
+        identity.remote_chat_id !== newRemoteChatId ||
+        identity.remote_contact_id !== newRemoteContactId
+      ) {
+        throw new Wa2DataError('Rebind anterior não corresponde ao snapshot atual', 'WA2_REBIND_STATE_CONFLICT');
+      }
+      await client.query('COMMIT');
+      return {
+        status: 'ALREADY_REBOUND',
+        idempotent: true,
+        historyId: history.id,
+        link: current,
+        identity,
+      };
+    }
+
+    if (activeLinksResult.rowCount !== 1) {
+      throw new Wa2DataError('Quantidade de vínculos ativos inesperada', 'WA2_REBIND_LINK_COUNT');
+    }
+    if (identityResult.rowCount !== 1 || identityResult.rows[0].verified !== true) {
+      throw new Wa2DataError('Identidade verificada ausente ou ambígua', 'WA2_REBIND_IDENTITY_COUNT');
+    }
+    const current = activeLinksResult.rows[0];
+    const identity = identityResult.rows[0];
+    if (current.id !== expectedActiveLinkId || current.remote_chat_id !== expectedOldRemoteChatId) {
+      throw new Wa2DataError('Vínculo ativo esperado mudou', 'WA2_REBIND_LINK_CHANGED');
+    }
+    if (
+      identity.canonical_phone !== canonicalPhone ||
+      identity.phone_jid !== pn ||
+      identity.lid_jid !== lid ||
+      !sameAliasSet(identity.aliases, canonicalIdentity.aliases) ||
+      current.phone_normalized !== canonicalPhone ||
+      current.jid !== pn
+    ) {
+      throw new Wa2DataError('Identidade ou vínculo antigo divergente', 'WA2_REBIND_IDENTITY_MISMATCH');
+    }
+    if (lead.stage !== 'NEW') throw new Wa2DataError('A etapa do lead não é NEW', 'WA2_REBIND_STAGE_CHANGED');
+    if (lead.is_internal_test !== true || lead.meta_outbound_eligible !== false) {
+      throw new Wa2DataError('Lead não está protegido como INTERNAL_TEST', 'WA2_REBIND_INTERNAL_TEST_REQUIRED');
+    }
+
+    const conflictsResult = await client.query(
+      `SELECT id FROM wa2_contact_links
+       WHERE tenant_id = $1 AND wa2_instance_id = $2
+         AND unlinked_at IS NULL
+         AND (remote_chat_id = $3 OR remote_contact_id = $4 OR jid = $5)
+       FOR UPDATE`,
+      [tenantId(), instanceId, newRemoteChatId, newRemoteContactId, newRemoteJid],
+    );
+    if (conflictsResult.rowCount > 0) {
+      throw new Wa2DataError('Novo chat ou contato já possui vínculo ativo', 'WA2_REBIND_LINK_CONFLICT');
+    }
+    const otherLeadResult = await client.query(
+      `SELECT count(*)::int AS count FROM leads
+       WHERE tenant_id = $1 AND id <> $2
+         AND (phone_normalized = $3 OR whatsapp_normalized = $3)`,
+      [tenantId(), leadId, canonicalPhone],
+    );
+    if (Number(otherLeadResult.rows[0]?.count || 0) !== 0) {
+      throw new Wa2DataError('Telefone canônico pertence a outro lead', 'WA2_REBIND_LEAD_CONFLICT');
+    }
+    const otherIdentityResult = await client.query(
+      `SELECT count(*)::int AS count FROM lead_verified_whatsapp_identities
+       WHERE tenant_id = $1 AND wa2_instance_id = $2
+         AND canonical_phone = $3 AND lead_id <> $4`,
+      [tenantId(), instanceId, canonicalPhone, leadId],
+    );
+    if (Number(otherIdentityResult.rows[0]?.count || 0) !== 0) {
+      throw new Wa2DataError('Identidade canônica pertence a outro lead', 'WA2_REBIND_IDENTITY_CONFLICT');
+    }
+
+    const [labelResult, actionResult, conflictResult, metaResult, jobResult] = await Promise.all([
+      client.query(
+        `WITH latest AS (
+           SELECT DISTINCT ON (remote_chat_id, remote_label_id)
+                  remote_chat_id, remote_label_id, operation
+           FROM wa2_label_event_receipts
+           WHERE tenant_id = $1 AND remote_chat_id = ANY($2::text[])
+           ORDER BY remote_chat_id, remote_label_id,
+                    observed_at DESC NULLS LAST, received_at DESC NULLS LAST, id DESC
+         )
+         SELECT count(*)::int AS count
+         FROM latest
+         JOIN wa2_label_bindings binding
+           ON binding.tenant_id = $1
+          AND binding.wa2_instance_id = $3
+          AND binding.remote_label_id = latest.remote_label_id
+          AND binding.enabled = true
+         WHERE latest.operation = 'APPLY'
+           AND binding.remote_label_name IN ('CRM 01 - Em atendimento','CRM 02 - Qualificado')`,
+        [tenantId(), [expectedOldRemoteChatId, newRemoteChatId], instanceId],
+      ),
+      client.query(
+        `SELECT count(*)::int AS count FROM wa2_inbound_label_actions
+         WHERE tenant_id = $1 AND lead_id = $2`,
+        [tenantId(), leadId],
+      ),
+      client.query(
+        `SELECT count(*)::int AS count FROM wa2_label_conflicts
+         WHERE tenant_id = $1 AND lead_id = $2`,
+        [tenantId(), leadId],
+      ),
+      client.query(
+        `SELECT count(*)::int AS count FROM meta_conversion_events
+         WHERE tenant_id = $1 AND lead_id = $2`,
+        [tenantId(), leadId],
+      ),
+      client.query(
+        `SELECT count(*)::int AS count FROM meta_jobs
+         WHERE tenant_id = $1 AND payload::text LIKE '%' || $2 || '%'`,
+        [tenantId(), leadId],
+      ),
+    ]);
+    if (Number(labelResult.rows[0]?.count || 0) !== 0) {
+      throw new Wa2DataError('CRM01 ou CRM02 já está aplicado', 'WA2_REBIND_STAGE_LABEL_PRESENT');
+    }
+    if (
+      Number(actionResult.rows[0]?.count || 0) !== 0 ||
+      Number(conflictResult.rows[0]?.count || 0) !== 0 ||
+      Number(metaResult.rows[0]?.count || 0) !== 0 ||
+      Number(jobResult.rows[0]?.count || 0) !== 0
+    ) {
+      throw new Wa2DataError('Lead possui atividade protegida incompatível com o rebind', 'WA2_REBIND_STATE_CONFLICT');
+    }
+
+    if (dryRun === true) {
+      await client.query('ROLLBACK');
+      return {
+        status: 'DRY_RUN_VALID',
+        classification: 'A',
+        sameInstance: true,
+        canonicalPhoneMatch: true,
+        aliasesMatch: true,
+        pnMatch: true,
+        lidMatch: true,
+        evidenceValid: true,
+        currentActiveLinks: 1,
+        newChatActiveLinks: 0,
+        otherLeadCandidates: 0,
+        conflicts: 0,
+        wouldSupersede: 1,
+        wouldCreateOrActivate: 1,
+        wouldUpdateIdentity: 1,
+        wouldCreateHistory: 1,
+        wouldChangeStage: false,
+        wouldCreateMeta: false,
+      };
+    }
+
+    const oldLinkResult = await client.query(
+      `UPDATE wa2_contact_links
+       SET unlinked_at = now(), unlinked_by = $2,
+           unlink_reason = $3, updated_at = now()
+       WHERE tenant_id = $1 AND id = $4 AND unlinked_at IS NULL
+       RETURNING *`,
+      [tenantId(), safeActor, reason, current.id],
+    );
+    if (oldLinkResult.rowCount !== 1) {
+      throw new Wa2DataError('Vínculo antigo mudou durante o rebind', 'WA2_REBIND_LINK_CHANGED');
+    }
+    const newLinkResult = await client.query(
+      `INSERT INTO wa2_contact_links (
+         tenant_id, lead_id, wa2_instance_id, remote_contact_id,
+         remote_chat_id, jid, phone_normalized, linked_by,
+         resolved_at, last_verified_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),now())
+       RETURNING *`,
+      [tenantId(), leadId, instanceId, newRemoteContactId, newRemoteChatId, newRemoteJid, canonicalPhone, safeActor],
+    );
+    const newLink = newLinkResult.rows[0];
+    const identityResultUpdated = await client.query(
+      `UPDATE lead_verified_whatsapp_identities
+       SET remote_contact_id = $4, remote_chat_id = $5,
+           phone_jid = $6, lid_jid = $7,
+           evidence_wa_message_id = $8, evidence_observed_at = $9,
+           verified_at = now(), verified_by = $10, updated_at = now()
+       WHERE tenant_id = $1 AND id = $2 AND lead_id = $3
+       RETURNING *`,
+      [tenantId(), identity.id, leadId, newRemoteContactId, newRemoteChatId, pn, lid,
+        evidenceWaMessageId, safeEvidenceTimestamp, safeActor],
+    );
+    if (identityResultUpdated.rowCount !== 1) {
+      throw new Wa2DataError('Identidade não pôde ser atualizada', 'WA2_REBIND_IDENTITY_CHANGED');
+    }
+    const metadata = createRebindHistoryMetadata({
+      identityId: identity.id,
+      oldLinkId: current.id,
+      newLinkId: newLink.id,
+      instanceId,
+      oldRemoteChatId: expectedOldRemoteChatId,
+      newRemoteChatId,
+      remoteContactId: newRemoteContactId,
+      pn,
+      lid,
+      evidenceWaMessageId,
+      evidenceTimestamp: safeEvidenceTimestamp,
+      reason,
+      actor: safeActor,
+      idempotencyKey: safeIdempotencyKey,
+      payloadHash,
+    });
+    const rebindHistoryResult = await client.query(
+      `INSERT INTO lead_stage_history (
+         tenant_id, lead_id, previous_stage, new_stage, origin,
+         observation, activity_type, metadata
+       ) VALUES ($1,$2,'NEW','NEW','SYSTEM',$3,$4,$5)
+       RETURNING id`,
+      [
+        tenantId(), leadId,
+        'Rebind determinístico da identidade WhatsApp após recriação do chat.',
+        WA2_CHAT_REBIND_ACTIVITY,
+        metadata,
+      ],
+    );
+    await client.query('COMMIT');
+    return {
+      status: 'REBIND_COMPLETED',
+      idempotent: false,
+      link: newLink,
+      identity: identityResultUpdated.rows[0],
+      historyId: rebindHistoryResult.rows[0].id,
+      oldLink: oldLinkResult.rows[0],
+    };
   } catch (error) {
     await client.query('ROLLBACK');
     throw mapWa2UniqueViolation(error);

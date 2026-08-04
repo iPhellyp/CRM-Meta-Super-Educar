@@ -10,6 +10,7 @@ ARG RELEASE_VERSION=dev
 RUN sed -i "s/__ASSET_VERSION__/${RELEASE_VERSION}/g" public/service-worker.js public/offline.html
 COPY --chown=node:node scripts/backfill-meta-phones.js ./scripts/backfill-meta-phones.js
 COPY --chown=node:node scripts/backfill-meta-qualified.js ./scripts/backfill-meta-qualified.js
+COPY --chown=node:node scripts/rebind-wa2-chat-b1.mjs ./scripts/rebind-wa2-chat-b1.mjs
 USER node
 EXPOSE 3000
 CMD ["node", "src/server.js"]

@@ -4727,23 +4727,85 @@ export async function hasWa2ReconciliationRunToday() {
   return result.rows[0]?.scheduled === true;
 }
 
-export async function enqueueDailyWa2Reconciliations(readyLocalInstanceIds) {
+export async function withWa2DailyReconciliationLock(callback) {
+  if (typeof callback !== 'function') throw new TypeError('Callback do lock diário é obrigatório');
+  const client = await pool.connect();
+  let localRunDate;
+  let locked = false;
+  const lockKey = () => `WA2_DAILY_RECONCILIATION:${tenantId()}:${localRunDate}`;
+  try {
+    const dateResult = await client.query(
+      `SELECT (now() AT TIME ZONE 'America/Sao_Paulo')::date::text AS local_run_date`,
+    );
+    localRunDate = dateResult.rows[0]?.local_run_date;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(localRunDate))) {
+      throw new Error('Data local do agendamento WA2 inválida');
+    }
+    const lockResult = await client.query(
+      `SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked`,
+      [lockKey()],
+    );
+    locked = lockResult.rows[0]?.locked === true;
+    if (!locked) return { locked: false, localRunDate };
+    return {
+      locked: true,
+      localRunDate,
+      value: await callback(localRunDate),
+    };
+  } finally {
+    if (locked) {
+      await client.query(
+        `SELECT pg_advisory_unlock(hashtextextended($1, 0))`,
+        [lockKey()],
+      ).catch(() => undefined);
+    }
+    client.release();
+  }
+}
+
+export async function claimDailyWa2ReconciliationDecision(localRunDate) {
+  const result = await pool.query(
+    `INSERT INTO scheduled_task_runs (tenant_id, task_name, local_run_date)
+     VALUES ($1, 'WA2_DAILY_RECONCILIATION', $2::date)
+     ON CONFLICT DO NOTHING
+     RETURNING local_run_date`,
+    [tenantId(), localRunDate],
+  );
+  return result.rows.length > 0;
+}
+
+export async function releaseDailyWa2ReconciliationDecision(localRunDate) {
+  await pool.query(
+    `DELETE FROM scheduled_task_runs
+     WHERE tenant_id = $1
+       AND task_name = 'WA2_DAILY_RECONCILIATION'
+       AND local_run_date = $2::date`,
+    [tenantId(), localRunDate],
+  );
+}
+
+export async function enqueueDailyWa2Reconciliations(
+  readyLocalInstanceIds,
+  { decisionClaimed = false, localRunDate = null } = {},
+) {
   if (!Array.isArray(readyLocalInstanceIds) || readyLocalInstanceIds.length === 0) return 0;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const marker = await client.query(
-      `INSERT INTO scheduled_task_runs (tenant_id, task_name, local_run_date)
-       SELECT $1, 'WA2_DAILY_RECONCILIATION',
-              (now() AT TIME ZONE 'America/Sao_Paulo')::date
-       WHERE (now() AT TIME ZONE 'America/Sao_Paulo')::time >= time '00:01'
-       ON CONFLICT DO NOTHING
-       RETURNING local_run_date`,
-      [tenantId()],
-    );
-    if (!marker.rows[0]) {
-      await client.query('ROLLBACK');
-      return 0;
+    if (!decisionClaimed) {
+      const marker = await client.query(
+        `INSERT INTO scheduled_task_runs (tenant_id, task_name, local_run_date)
+         SELECT $1, 'WA2_DAILY_RECONCILIATION',
+                (now() AT TIME ZONE 'America/Sao_Paulo')::date
+         WHERE (now() AT TIME ZONE 'America/Sao_Paulo')::time >= time '00:01'
+         ON CONFLICT DO NOTHING
+         RETURNING local_run_date`,
+        [tenantId()],
+      );
+      if (!marker.rows[0]) {
+        await client.query('ROLLBACK');
+        return 0;
+      }
     }
     const runs = await client.query(
       `INSERT INTO wa2_reconciliation_runs (

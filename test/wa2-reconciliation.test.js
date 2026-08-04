@@ -81,6 +81,6 @@ test('agenda automática filtra somente instâncias que concluíram o preparo', 
   const database = await readFile(new URL('../src/db.js', import.meta.url), 'utf8');
   assert.match(
     database,
-    /enqueueDailyWa2Reconciliations\(readyLocalInstanceIds\)[\s\S]*id = ANY\(\$2::uuid\[\]\)/,
+    /enqueueDailyWa2Reconciliations\(\s*readyLocalInstanceIds[\s\S]*id = ANY\(\$2::uuid\[\]\)/,
   );
 });

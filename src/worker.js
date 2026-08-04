@@ -12,6 +12,7 @@ import {
   completeWa2LabelEventPage,
   completeWa2ReconciliationItem,
   completeJob,
+  claimDailyWa2ReconciliationDecision,
   failWa2LabelJob,
   failWa2LabelEventCursor,
   failWa2ReconciliationItem,
@@ -32,7 +33,9 @@ import {
   recordMetaHistoricalInvalid,
   recordMetaHistoricalLead,
   recordWorkerHeartbeat,
+  releaseDailyWa2ReconciliationDecision,
   requeueWa2LabelJobForRemoteConfirmation,
+  withWa2DailyReconciliationLock,
   validateDatabaseConfig,
 } from './db.js';
 import { runStartupMigrations } from './startup-migrations.js';
@@ -79,13 +82,21 @@ import {
 import { createWorkerHeartbeatLoop } from './worker-heartbeat.js';
 import { PHONE_CLASSIFICATIONS, selectBestLeadPhone } from './phone.js';
 import { decryptSecret } from './secret-crypto.js';
+import {
+  createWa2DailyScheduleState,
+  describeWa2DailyError,
+  isWa2DailyReconciliationEnabled,
+} from './wa2-daily-scheduler.js';
 
 const MAX_ATTEMPTS = 6;
 const IDLE_DELAY_MS = 2_000;
 const HEARTBEAT_INTERVAL_MS = 10_000;
+const DAILY_RECONCILIATION_INTERVAL_MS = 60_000;
 let stopping = false;
-let lastDailyScheduleCheckAt = 0;
 let heartbeatLoop = null;
+let dailyReconciliationTimer = null;
+let dailyReconciliationPromise = null;
+const dailyReconciliationState = createWa2DailyScheduleState();
 const labeledIdentityCache = new Map();
 const identityRefreshByInstance = new Map();
 const IDENTITY_REFRESH_COOLDOWN_MS = 5 * 60_000;
@@ -502,42 +513,83 @@ async function processWa2Reconciliation() {
 }
 
 async function scheduleDailyReconciliationIfNeeded() {
-  if (Date.now() - lastDailyScheduleCheckAt < 60_000) return;
-  lastDailyScheduleCheckAt = Date.now();
-  try {
-    if (await hasWa2ReconciliationRunToday()) return;
-    const instances = await listWa2InstancesLocal({ enabledOnly: true });
-    const candidatePhones = await listWa2ReconciliationCandidatePhones();
-    const readyLocalInstanceIds = [];
-    for (const instance of instances) {
-      const ids = wa2ReconciliationInstanceIds(instance);
-      await prepareWa2Reconciliation({
-        ids,
-        candidatePhones,
-        health: getWa2Health,
-        getStatus: getWa2InstanceStatus,
-        connect: connectWa2Instance,
-        quickSync: syncWa2Instance,
-        rebuild: rebuildWa2Identities,
-        getRebuildStatus: getWa2IdentityRebuildStatus,
-      });
-      readyLocalInstanceIds.push(ids.localInstanceId);
-    }
-    const scheduled = await enqueueDailyWa2Reconciliations(readyLocalInstanceIds);
-    if (scheduled > 0) {
+  if (!isWa2DailyReconciliationEnabled()) return;
+  const task = dailyReconciliationState.run(async () => {
+    const result = await withWa2DailyReconciliationLock(async (lockedDate) => {
+      if (await hasWa2ReconciliationRunToday()) return { status: 'already-decided' };
+
+      const instances = await listWa2InstancesLocal({ enabledOnly: true });
+      const candidatePhones = await listWa2ReconciliationCandidatePhones();
+      if (instances.length === 0 || candidatePhones.length === 0) {
+        const claimed = await claimDailyWa2ReconciliationDecision(lockedDate);
+        return { status: claimed ? 'no-op' : 'already-decided' };
+      }
+
+      const claimed = await claimDailyWa2ReconciliationDecision(lockedDate);
+      if (!claimed) return { status: 'already-decided' };
+
+      try {
+        const readyLocalInstanceIds = [];
+        for (const instance of instances) {
+          const ids = wa2ReconciliationInstanceIds(instance);
+          await prepareWa2Reconciliation({
+            ids,
+            candidatePhones,
+            health: getWa2Health,
+            getStatus: getWa2InstanceStatus,
+            connect: connectWa2Instance,
+            quickSync: syncWa2Instance,
+            rebuild: rebuildWa2Identities,
+            getRebuildStatus: getWa2IdentityRebuildStatus,
+          });
+          readyLocalInstanceIds.push(ids.localInstanceId);
+        }
+        const scheduled = await enqueueDailyWa2Reconciliations(
+          readyLocalInstanceIds,
+          { decisionClaimed: true, localRunDate: lockedDate },
+        );
+        return { status: scheduled > 0 ? 'enqueued' : 'no-op', scheduled };
+      } catch (error) {
+        await releaseDailyWa2ReconciliationDecision(lockedDate);
+        throw error;
+      }
+    });
+
+    if (!result.locked || !result.value) return;
+    if (result.value.status === 'enqueued') {
       console.log(JSON.stringify({
         level: 'info',
         msg: 'Reconciliação diária WA2 enfileirada',
-        scheduled,
+        scheduled: result.value.scheduled,
+      }));
+    } else if (result.value.status === 'no-op') {
+      console.log(JSON.stringify({
+        level: 'info',
+        msg: 'Reconciliação diária WA2 sem candidatos elegíveis',
       }));
     }
-  } catch (error) {
+  });
+  if (!task) return;
+  dailyReconciliationPromise = task.catch((error) => {
+    const details = describeWa2DailyError(error);
+    const state = dailyReconciliationState.getState();
+    const retryAt = details.transient && state.backoffUntil > Date.now()
+      ? state.backoffUntil
+      : null;
     console.error(JSON.stringify({
       level: 'error',
       msg: 'Falha ao agendar reconciliação diária WA2',
-      error: error?.name || 'Error',
+      errorCode: details.code,
+      errorMessage: details.message,
+      remoteStatus: details.status,
+      remoteCode: details.remoteCode,
+      stackFingerprint: details.fingerprint,
+      retryAt: retryAt ? new Date(retryAt).toISOString() : null,
     }));
-  }
+  }).finally(() => {
+    dailyReconciliationPromise = null;
+  });
+  return dailyReconciliationPromise;
 }
 
 async function run() {
@@ -557,8 +609,13 @@ async function run() {
   });
   console.log(JSON.stringify({ level: 'info', msg: 'Worker Meta iniciado' }));
 
+  dailyReconciliationTimer = setInterval(() => {
+    void scheduleDailyReconciliationIfNeeded();
+  }, DAILY_RECONCILIATION_INTERVAL_MS);
+  dailyReconciliationTimer.unref();
+  void scheduleDailyReconciliationIfNeeded();
+
   while (!stopping) {
-    await scheduleDailyReconciliationIfNeeded();
     if (stopping) break;
     const metaJob = await claimNextJob();
     if (metaJob) {
@@ -611,6 +668,8 @@ async function run() {
 
 function stop(signal) {
   stopping = true;
+  if (dailyReconciliationTimer) clearInterval(dailyReconciliationTimer);
+  dailyReconciliationTimer = null;
   heartbeatLoop?.stop();
   heartbeatLoop = null;
   console.log(JSON.stringify({ level: 'info', msg: 'Worker encerrando', signal }));
@@ -629,5 +688,6 @@ try {
   }));
   process.exitCode = 1;
 } finally {
+  await dailyReconciliationPromise?.catch(() => undefined);
   await closePool();
 }

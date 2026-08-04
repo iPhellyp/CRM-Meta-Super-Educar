@@ -107,6 +107,7 @@ test('action transacional não altera etapa nem cria Meta', () => {
   assert.match(source, /idempotencyKey/);
   assert.match(source, /ROLLBACK/);
   assert.match(source, /UPDATE wa2_contact_links/);
+  assert.match(source, /AND id <> \$5/);
   assert.match(source, /UPDATE lead_verified_whatsapp_identities/);
   assert.doesNotMatch(source, /UPDATE leads SET stage/);
   assert.doesNotMatch(source, /INSERT INTO meta_conversion_events/);

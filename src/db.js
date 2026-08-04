@@ -2673,9 +2673,10 @@ export async function rebindVerifiedWa2IdentityToChat({
       `SELECT id FROM wa2_contact_links
        WHERE tenant_id = $1 AND wa2_instance_id = $2
          AND unlinked_at IS NULL
-         AND (remote_chat_id = $3 OR remote_contact_id = $4 OR jid = $5)
+         AND id <> $5
+         AND (remote_chat_id = $3 OR remote_contact_id = $4 OR jid = $6)
        FOR UPDATE`,
-      [tenantId(), instanceId, newRemoteChatId, newRemoteContactId, newRemoteJid],
+      [tenantId(), instanceId, newRemoteChatId, newRemoteContactId, expectedActiveLinkId, newRemoteJid],
     );
     if (conflictsResult.rowCount > 0) {
       throw new Wa2DataError('Novo chat ou contato já possui vínculo ativo', 'WA2_REBIND_LINK_CONFLICT');

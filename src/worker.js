@@ -76,6 +76,7 @@ import {
   reconciliationFailureResult,
   sanitizeHistoricalError,
 } from './historical-sync.js';
+import { createWorkerHeartbeatLoop } from './worker-heartbeat.js';
 import { PHONE_CLASSIFICATIONS, selectBestLeadPhone } from './phone.js';
 import { decryptSecret } from './secret-crypto.js';
 
@@ -83,8 +84,8 @@ const MAX_ATTEMPTS = 6;
 const IDLE_DELAY_MS = 2_000;
 const HEARTBEAT_INTERVAL_MS = 10_000;
 let stopping = false;
-let lastHeartbeatAt = 0;
 let lastDailyScheduleCheckAt = 0;
+let heartbeatLoop = null;
 const labeledIdentityCache = new Map();
 const identityRefreshByInstance = new Map();
 const IDENTITY_REFRESH_COOLDOWN_MS = 5 * 60_000;
@@ -500,12 +501,6 @@ async function processWa2Reconciliation() {
   }
 }
 
-async function heartbeatIfNeeded() {
-  if (Date.now() - lastHeartbeatAt < HEARTBEAT_INTERVAL_MS) return;
-  await recordWorkerHeartbeat();
-  lastHeartbeatAt = Date.now();
-}
-
 async function scheduleDailyReconciliationIfNeeded() {
   if (Date.now() - lastDailyScheduleCheckAt < 60_000) return;
   lastDailyScheduleCheckAt = Date.now();
@@ -551,11 +546,18 @@ async function run() {
   validateWa2Config();
   await runStartupMigrations();
   await recordWorkerHeartbeat({ started: true });
-  lastHeartbeatAt = Date.now();
+  heartbeatLoop = createWorkerHeartbeatLoop({
+    intervalMs: HEARTBEAT_INTERVAL_MS,
+    record: () => recordWorkerHeartbeat(),
+    onError: (error) => console.error(JSON.stringify({
+      level: 'error',
+      msg: 'Falha ao registrar heartbeat do worker',
+      error: error?.name || 'Error',
+    })),
+  });
   console.log(JSON.stringify({ level: 'info', msg: 'Worker Meta iniciado' }));
 
   while (!stopping) {
-    await heartbeatIfNeeded();
     await scheduleDailyReconciliationIfNeeded();
     if (stopping) break;
     const metaJob = await claimNextJob();
@@ -609,6 +611,8 @@ async function run() {
 
 function stop(signal) {
   stopping = true;
+  heartbeatLoop?.stop();
+  heartbeatLoop = null;
   console.log(JSON.stringify({ level: 'info', msg: 'Worker encerrando', signal }));
 }
 

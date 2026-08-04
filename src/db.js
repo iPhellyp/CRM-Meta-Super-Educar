@@ -1974,10 +1974,20 @@ export async function createVerifiedWhatsAppIdentityAndLink({
     );
   }
   const canonicalPhone = identity.canonicalE164;
-  const sourcePhone = normalizeConfirmedWhatsAppPhone(
-    resolved.contact.sourcePhoneNormalized || resolved.contact.phoneNormalized,
+  const sourcePhone = verifiedIdentityText(
+    evidence?.sourcePhoneNormalized ||
+      resolved.contact.sourcePhoneNormalized ||
+      resolved.contact.phoneNormalized,
+    20,
+    'sourcePhoneNormalized',
   );
-  if (!sourcePhone || sourcePhone !== canonicalPhone) {
+  const sourceIdentity = getBrazilianPhoneIdentity(sourcePhone, { confirmedMobile: true });
+  if (
+    normalizeWhatsAppPhoneOrNull(sourcePhone) !== sourcePhone ||
+    !sourceIdentity.canonicalE164 ||
+    sourceIdentity.canonicalE164 !== canonicalPhone ||
+    !['BR_MOBILE_CANONICAL', 'BR_MOBILE_LEGACY'].includes(sourceIdentity.classification)
+  ) {
     throw new Wa2DataError(
       'A identidade WA2 não corresponde ao telefone canônico',
       'WA2_VERIFIED_IDENTITY_PHONE_MISMATCH',
@@ -2124,7 +2134,7 @@ export async function createVerifiedWhatsAppIdentityAndLink({
           instance.id,
           canonicalPhone,
           JSON.stringify(identity.aliases),
-          resolved.contact.sourcePhoneNormalized || resolved.contact.phoneNormalized,
+          sourcePhone,
           phoneJid,
           lidJid,
           VERIFIED_WHATSAPP_SOURCE,

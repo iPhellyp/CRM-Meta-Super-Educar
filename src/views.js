@@ -1658,6 +1658,9 @@ export function leadWa2View({
             <label>Telefone canônico ou alias confirmado
               <input name="phoneNormalized" value="${esc(lead.whatsapp_normalized || '')}" required maxlength="20" inputmode="numeric">
             </label>
+            <label>PN recebido na mensagem
+              <input name="sourcePhoneNormalized" required maxlength="20" inputmode="numeric">
+            </label>
             <label>waMessageId da evidência inbound
               <input name="waMessageId" required maxlength="255">
             </label>

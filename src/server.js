@@ -1513,6 +1513,7 @@ app.post('/leads/:id/wa2/verify-identity', async (req, res) => {
   const parsedLeadId = z.string().uuid().safeParse(req.params.id);
   const parsedInstanceId = z.string().uuid().safeParse(req.body.instanceId);
   const phoneInput = z.string().trim().min(10).max(20).safeParse(req.body.phoneNormalized);
+  const sourcePhoneInput = z.string().trim().min(10).max(20).safeParse(req.body.sourcePhoneNormalized);
   const evidenceWaMessageId = z.string().trim().min(1).max(255).safeParse(req.body.waMessageId);
   const evidenceObservedAt = z.string().datetime().safeParse(req.body.observedAt);
   const evidenceLidJid = z.string().trim().regex(/^[A-Za-z0-9._:-]+@lid$/i).safeParse(req.body.lidJid);
@@ -1520,6 +1521,7 @@ app.post('/leads/:id/wa2/verify-identity', async (req, res) => {
     !parsedLeadId.success ||
     !parsedInstanceId.success ||
     !phoneInput.success ||
+    !sourcePhoneInput.success ||
     !evidenceWaMessageId.success ||
     !evidenceObservedAt.success ||
     !evidenceLidJid.success ||
@@ -1548,6 +1550,7 @@ app.post('/leads/:id/wa2/verify-identity', async (req, res) => {
         waMessageId: evidenceWaMessageId.data,
         observedAt: evidenceObservedAt.data,
         lidJid: evidenceLidJid.data,
+        sourcePhoneNormalized: sourcePhoneInput.data,
       },
       actor: req.user.sub,
     });

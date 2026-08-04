@@ -34,6 +34,7 @@ test('ação de identidade preserva lead, exige INTERNAL_TEST e é transacional/
   assert.match(source, /FOR UPDATE/);
   assert.match(source, /existingIdentity/);
   assert.match(source, /evidence\?\.lidJid/);
+  assert.match(source, /sourcePhoneNormalized/);
   assert.match(source, /O LID da evidência não corresponde/);
   assert.match(source, /idempotent: true/);
   assert.match(source, /activeConflict/);

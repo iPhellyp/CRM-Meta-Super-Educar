@@ -98,7 +98,7 @@ test('migration do rebind é aditiva e protege idempotência', () => {
 
 test('action transacional não altera etapa nem cria Meta', () => {
   const start = db.indexOf('export async function rebindVerifiedWa2IdentityToChat');
-  const end = db.indexOf('async function createOrGetMetaEvent', start);
+  const end = db.indexOf('export async function rebindNormalLeadToCurrentWa2Chat', start);
   const source = db.slice(start, end);
   assert.ok(start >= 0 && end > start);
   assert.match(source, /BEGIN/);

@@ -468,8 +468,8 @@ export async function getLeadById(id) {
             AND event.event_id = concat('crm:', leads.id, ':sales_opportunity:', '${currentMetaMode}')
           ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS opportunity_status
      ) meta_status ON true
-     WHERE leads.id = $1 AND leads.tenant_id = $2`,
-    [id, tenantId()],
+     WHERE leads.id = $2 AND leads.tenant_id = $3`,
+    [tenantId(), id, tenantId()],
   );
   return result.rows[0] || null;
 }

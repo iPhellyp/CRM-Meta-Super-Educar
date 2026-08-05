@@ -51,7 +51,7 @@ test('lista feed incremental com Bearer, Request ID, cursor e limite', async () 
   assert.equal(page.hasMore, true);
 });
 
-test('evento individual divergente e paginação inválida são rejeitados', async () => {
+test('evento individual divergente é isolado e paginação inválida é rejeitada', async () => {
   let calls = 0;
   const client = createWa2Client({
     env,
@@ -64,10 +64,9 @@ test('evento individual divergente e paginação inválida são rejeitados', asy
       }));
     },
   });
-  await assert.rejects(
-    client.listLabelEvents({ limit: 100 }),
-    (error) => error instanceof Wa2Error && error.code === 'WA2_LABEL_EVENT_INVALID',
-  );
+  const page = await client.listLabelEvents({ limit: 100 });
+  assert.equal(page.events[0].eligibleForCrm, false);
+  assert.equal(page.events[0].ineligibleReason, 'NON_INDIVIDUAL_JID');
   assert.throws(
     () => client.listLabelEvents({ after: '../unsafe', limit: 100 }),
     (error) => error instanceof Wa2Error && error.code === 'WA2_LABEL_EVENTS_PAGE_INVALID',
@@ -91,7 +90,7 @@ test('grupo não elegível é preservado de forma sanitizada', async () => {
   });
   const page = await client.listLabelEvents();
   assert.equal(page.events[0].eligibleForCrm, false);
-  assert.equal(page.events[0].ineligibleReason, 'GROUP');
+  assert.equal(page.events[0].ineligibleReason, 'NON_INDIVIDUAL_JID');
 });
 
 test('LID resolvido indicado pelo WA2 é aceito sem inventar JID de telefone', async () => {

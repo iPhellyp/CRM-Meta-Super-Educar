@@ -230,7 +230,7 @@ test('CRM 05 é protegido e nunca confirma matrícula automaticamente pelo WA2',
   );
 });
 
-test('INTERNAL_API evita loop, REMOVE não retrocede e UNKNOWN conflita', () => {
+test('INTERNAL_API evita loop, REMOVE não retrocede e UNKNOWN é técnico', () => {
   assert.equal(
     decideInboundLabelAction({
       event: { ...baseEvent, source: 'INTERNAL_API' },
@@ -250,7 +250,7 @@ test('INTERNAL_API evita loop, REMOVE não retrocede e UNKNOWN conflita', () => 
       event: { ...baseEvent, source: 'UNKNOWN' },
       currentStage: 'NEW',
     }).action,
-    'CONFLICT',
+    'IGNORED',
   );
 });
 

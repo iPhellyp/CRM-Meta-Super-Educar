@@ -161,7 +161,7 @@ export function decideInboundLabelAction({
     return { action: 'IGNORED', code: 'INTERNAL_API_LOOP_GUARD' };
   }
   if (event.source === 'UNKNOWN') {
-    return { action: 'CONFLICT', code: 'UNKNOWN_SOURCE' };
+    return { action: 'IGNORED', code: 'IGNORED_TECHNICAL_EVENT' };
   }
   if (event.operation === 'REMOVE') {
     return { action: 'IGNORED', code: 'REMOVE_NO_REGRESSION' };

@@ -54,7 +54,7 @@ test('importação Meta usa checklist acessível e orienta o estado vazio', () =
   assert.doesNotMatch(ready, /<Formulário>/);
 });
 
-test('reconciliação comunica progresso, datas de São Paulo e retry como fila', () => {
+test('reconciliação não aparece na interface operacional', () => {
   const html = historicalOperationsView({
     operations: operations({
       reconciliations: [{
@@ -73,11 +73,19 @@ test('reconciliação comunica progresso, datas de São Paulo e retry como fila'
     instances: [],
     csrfToken: 'csrf',
   });
-  assert.match(html, /role="progressbar"/);
-  assert.match(html, /aria-valuenow="3"/);
-  assert.match(html, /29\/07\/2026 às 07:31/);
-  assert.match(html, /Enfileirar falhas/);
-  assert.match(html, /data-confirm="Enfileirar novamente somente as falhas elegíveis/);
+  assert.doesNotMatch(html, /Reconciliação WA2/);
+  assert.doesNotMatch(html, /Iniciar reconciliação/);
+  assert.doesNotMatch(html, /\/operations\/reconciliations/);
+});
+
+test('menu remove Chat e reconciliação, mantendo a rota antiga protegida', () => {
+  const source = read('src/views.js');
+  const server = read('src/server.js');
+  assert.doesNotMatch(source, /href="\/chat"/);
+  assert.doesNotMatch(source, /href="\/operations#reconciliacoes"/);
+  assert.match(server, /app\.get\('\/chat',[\s\S]*?res\.redirect\(302, '\/'\)/);
+  assert.match(server, /app\.post\('\/operations\/reconciliations',[\s\S]*?WA2_RECONCILIATION_DISABLED/);
+  assert.match(server, /app\.post\('\/chat\/send',[\s\S]*?CHAT_DISABLED/);
 });
 
 test('eventos e jobs têm status textual, cards mobile e erro escapado', () => {

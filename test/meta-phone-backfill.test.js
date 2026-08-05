@@ -141,6 +141,7 @@ test('Dockerfile inclui somente scripts administrativos explicitamente autorizad
     'scripts/meta-clean-canary.mjs',
     'scripts/meta-clean-historical.mjs',
     'scripts/import-univc-spreadsheet.mjs',
+    'scripts/reprocess-wa2-technical.mjs',
   ]);
   assert.equal(copiedScriptSources.some((source) => (
     /^\.?\/?scripts\/?$/.test(source)

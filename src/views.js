@@ -85,11 +85,9 @@ function appNavigation(csrfToken) {
       </div>
       <div class="nav-groups">
         <a class="nav-direct" href="/">Leads</a>
-        <a class="nav-direct" href="/chat">Chat</a>
         <details class="nav-group">
           <summary>Operação</summary>
-          <div class="nav-group-links"><a href="/operations">Importações</a>
-            <a href="/operations#reconciliacoes">Reconciliações</a></div>
+          <div class="nav-group-links"><a href="/operations">Importações</a></div>
         </details>
         <details class="nav-group">
           <summary>Integrações</summary>
@@ -253,35 +251,15 @@ export function historicalOperationsView({
   csrfToken = '',
 }) {
   const cursor = operations.cursor;
-  const enabledInstances = instances.filter((item) => item.enabled);
-  const openReconciliations = operations.reconciliations.filter(
-    (run) => !['COMPLETED', 'CANCELLED'].includes(run.status),
-  ).length;
-  const reconciliationFailures = operations.reconciliations.reduce(
-    (total, run) => total + Number(run.results?.ERROR || 0) + Number(run.results?.CONFLICT || 0),
-    0,
-  );
-  const resultLabels = {
-    MATCHED: 'Correspondências encontradas',
-    UPDATED: 'Leads atualizados',
-    PHONE_EMPTY: 'Telefone vazio',
-    PHONE_INVALID: 'Telefone inválido',
-    NOT_FOUND_IN_WA2: 'Não encontrado no WA2',
-    LID_UNRESOLVED: 'LID não resolvido',
-    LABEL_UNMAPPED: 'Etiqueta sem vínculo',
-    CONFLICT: 'Conflito',
-    ERROR: 'Erro',
-  };
-  return layout('Importação e reconciliação', `
-    <section class="hero"><div><h1>Importações e reconciliações</h1>
+  return layout('Importações', `
+    <section class="hero"><div><h1>Importações</h1>
       <p>Acompanhe operações em lote sem perder o contexto comercial dos leads.</p></div></section>
     ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
     ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
     <section class="stats operation-summary" aria-label="Resumo operacional">
       ${stat('Importações Meta', operations.imports.length)}
       ${stat('Arquivos enviados', (operations.fileImports || []).length)}
-      ${stat('Reconciliações abertas', openReconciliations)}
-      ${stat('Falhas ou conflitos', reconciliationFailures, reconciliationFailures ? 'attention' : '')}
+      ${stat('Conflitos abertos', operations.conflicts.length, operations.conflicts.length ? 'attention' : '')}
     </section>
     <div class="operation-columns">
       <section class="panel operation-source meta-source">
@@ -371,45 +349,6 @@ export function historicalOperationsView({
         <dl><div><dt>Cursor atual</dt><dd>${esc(cursor?.cursor_value || 'Inicial')}</dd></div>
           <div><dt>Atividade</dt><dd>${formatDateTime(cursor?.updated_at || cursor?.last_processed_at)}</dd></div></dl>
       </details>
-    </section>
-    <section class="panel" id="reconciliacoes">
-      <div class="panel-title"><div><h2>Reconciliação WA2</h2>
-        <p>Compare os leads do CRM com uma instância WhatsApp validada.</p></div>
-        <span>${openReconciliations} abertas</span></div>
-      ${enabledInstances.length ? `<form method="post" action="/operations/reconciliations" class="compact-form stack">
-        ${csrfField(csrfToken)}
-        <label>Instância<select name="instanceId" required><option value="">Selecione uma instância</option>
-          ${enabledInstances.map((item) =>
-            `<option value="${esc(item.id)}">${esc(item.name || item.remote_instance_id)}${item.is_default ? ' · padrão' : ''}</option>`).join('')}
-        </select></label><button type="submit">Iniciar reconciliação</button>
-      </form>` : `<div class="empty-state"><h3>Nenhuma instância habilitada</h3>
-        <p>Valide e habilite uma instância WA2 antes de iniciar a reconciliação.</p>
-        <a class="button-link" href="/wa2">Configurar WhatsApp</a></div>`}
-      <div class="operation-card-list reconciliation-list">
-        ${operations.reconciliations.map((run) => `<article class="operation-card reconciliation-card">
-          <header><div><span class="eyebrow">Reconciliação WA2</span><h3>${esc(run.instance_name)}</h3>
-            <small>Criada em ${formatDateTime(run.created_at)}</small></div>${operationStatus(run.status)}</header>
-          ${operationProgress(run.processed_count, run.total_count)}
-          <p class="muted">Duração: ${esc(operationDuration(run.started_at, run.completed_at))} · ${esc(run.retry_count || 0)} nova(s) tentativa(s)</p>
-          ${run.last_error ? `<div class="alert error">${esc(run.last_error)}</div>` : ''}
-          <div class="result-groups">
-            ${Object.entries(run.results || {}).map(([result, count]) => `<a href="/operations/reconciliations/${esc(run.id)}/items?result=${esc(result)}">
-              <strong>${esc(count)}</strong><span>${esc(resultLabels[result] || result)}</span></a>`).join('')
-              || '<p class="muted">Os resultados aparecerão após o início do processamento.</p>'}
-          </div>
-          <div class="actions">
-            <a class="button-link secondary small" href="/operations/reconciliations/${esc(run.id)}/errors.csv">Exportar erros CSV</a>
-            ${['PARTIAL', 'FAILED'].includes(run.status) ? `<form method="post" action="/operations/reconciliations/${esc(run.id)}/retry"
-              data-confirm="Enfileirar novamente somente as falhas elegíveis desta reconciliação?">
-              ${csrfField(csrfToken)}<button>Enfileirar falhas</button></form>` : ''}
-          </div>
-          <details class="technical-details"><summary>Detalhes técnicos</summary><dl>
-            <div><dt>ID da operação</dt><dd>${esc(run.id)}</dd></div>
-            <div><dt>Início</dt><dd>${formatDateTime(run.started_at)}</dd></div>
-            <div><dt>Fim</dt><dd>${formatDateTime(run.completed_at)}</dd></div>
-          </dl></details>
-        </article>`).join('') || '<div class="empty-state"><h3>Nenhuma reconciliação</h3><p>Selecione uma instância para iniciar o primeiro lote.</p></div>'}
-      </div>
     </section>
     <section class="panel"><h2>Conflitos abertos</h2><ul>
       ${operations.conflicts.map((item) =>
@@ -628,7 +567,7 @@ function dashboardFilterQuery(filters, overrides = {}) {
     'search', 'course', 'city', 'stage', 'commercial', 'lostReason', 'instanceId', 'labelId',
     'metaConnectionId', 'businessId', 'pageId', 'formId', 'campaignId',
     'adsetId', 'adId', 'attributed', 'validPhone', 'unattended',
-    'dateFrom', 'dateTo', 'sort', 'page',
+    'review', 'dateFrom', 'dateTo', 'sort', 'page',
   ]) {
     if (source[key] != null && String(source[key]) !== '') {
       params.set(key, String(source[key]));
@@ -641,7 +580,7 @@ const ADVANCED_FILTER_KEYS = Object.freeze([
     'course', 'city', 'stage', 'commercial', 'lostReason', 'instanceId', 'labelId',
   'metaConnectionId', 'businessId', 'pageId', 'formId', 'campaignId',
   'adsetId', 'adId', 'attributed', 'validPhone', 'unattended',
-  'dateFrom', 'dateTo', 'sort',
+  'review', 'dateFrom', 'dateTo', 'sort',
 ]);
 
 function activeDashboardFilters(filters, catalog = []) {
@@ -651,7 +590,7 @@ function activeDashboardFilters(filters, catalog = []) {
     metaConnectionId: 'Conexão Meta', businessId: 'BM', pageId: 'Página',
     formId: 'Formulário', campaignId: 'Campanha', adsetId: 'Conjunto',
     adId: 'Anúncio', attributed: 'Atribuição', validPhone: 'Telefone',
-    unattended: 'Atendimento', dateFrom: 'Desde', dateTo: 'Até', sort: 'Ordenação',
+    unattended: 'Atendimento', review: 'Fila de revisão', dateFrom: 'Desde', dateTo: 'Até', sort: 'Ordenação',
   };
   return ['search', ...ADVANCED_FILTER_KEYS]
     .filter((key) => {
@@ -804,6 +743,7 @@ export function dashboardView({
   operationStartAt = null,
   filters = {},
   pagination = { page: 1, hasNext: false },
+  firstLinkDiagnostic = null,
   wa2Instances = [],
   wa2LabelCatalog = [],
   metaConnections = [],
@@ -814,6 +754,17 @@ export function dashboardView({
   const rows = leads.map((lead) => renderLeadRow(lead, { csrfToken, returnPath, whatsappMessage })).join('');
   const cards = leads.map((lead) => renderLeadCard(lead, { csrfToken, returnPath, whatsappMessage })).join('');
   const appliedFilters = activeDashboardFilters(filters, wa2LabelCatalog);
+  const reviewQueueLabels = {
+    PHONE_INVALID_OR_MISSING: 'Telefone inválido/ausente',
+    POSSIBLE_PHONE_DUPLICATE: 'Possível duplicidade de telefone',
+    MULTIPLE_ACTIVE_WA_LINKS: 'Múltiplos vínculos WA2 ativos',
+    PENDING_IDENTITY: 'Identidade pendente',
+    AWAITING_MANUAL_RECLASSIFICATION: 'Aguardando reclassificação',
+    READY_FOR_FIRST_LINK: 'Prontos para primeiro vínculo',
+    ROUTING_PENDING: 'Roteamento pendente',
+    MQL_ALREADY_VALID: 'MQL válido existente',
+  };
+  const diagnosticState = firstLinkDiagnostic?.state || 'WAITING_FOR_NEW_LABEL';
 
   return layout('Leads', `
     ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
@@ -878,6 +829,7 @@ export function dashboardView({
         <label>Atribuição Meta<select name="attributed"><option value="">Todas</option><option value="yes"${filters.attributed === 'yes' ? ' selected' : ''}>Atribuído</option><option value="no"${filters.attributed === 'no' ? ' selected' : ''}>Não atribuído</option></select></label>
         <label>Telefone<select name="validPhone"><option value="">Todos</option><option value="yes"${filters.validPhone === 'yes' ? ' selected' : ''}>Válido</option><option value="no"${filters.validPhone === 'no' ? ' selected' : ''}>Inválido/ausente</option></select></label>
         <label>Atendimento<select name="unattended"><option value="">Todos</option><option value="yes"${filters.unattended === 'yes' ? ' selected' : ''}>Sem atendimento</option></select></label>
+        <label>Fila de revisão<select name="review"><option value="">Todas</option>${Object.entries(reviewQueueLabels).map(([value, label]) => `<option value="${value}"${filters.review === value ? ' selected' : ''}>${esc(label)} (${esc(counts.reviewQueues?.[value] || 0)})</option>`).join('')}</select></label>
         <label>Entrada desde<input type="date" name="dateFrom" value="${esc(filters.dateFrom || '')}"></label>
         <label>Entrada até<input type="date" name="dateTo" value="${esc(filters.dateTo || '')}"></label>
         <label>Ordenar<select name="sort">${[['recent','Mais recentes'],['oldest','Mais antigos'],['stage','Etapa'],['unattended','Sem atendimento'],['updated','Última atualização'],['conversation','Última conversa']].map(([value, label]) => `<option value="${value}"${filters.sort === value ? ' selected' : ''}>${label}</option>`).join('')}</select></label>
@@ -900,6 +852,24 @@ export function dashboardView({
       ${stat('Pagos', counts.paid)}${stat('Perdidos', counts.lost)}
       ${stat('Taxa de qualificação', `${counts.qualificationRate}%`)}
       ${stat('Taxa de matrícula', `${counts.matriculationRate}%`)}
+    </section>
+
+    <section class="panel first-link-diagnostic" aria-labelledby="first-link-diagnostic-title">
+      <div class="panel-title"><div><h2 id="first-link-diagnostic-title">Diagnóstico do primeiro vínculo</h2>
+        <p class="muted">Somente leitura. A evidência considerada é o último APPLY após o armamento.</p></div>
+        <span class="badge ${diagnosticState === 'WAITING_FOR_NEW_LABEL' ? 'new' : diagnosticState === 'BLOCKED' ? 'lost' : 'qualified'}">${esc(diagnosticState)}</span></div>
+      <dl class="diagnostic-grid">
+        <div><dt>Etiqueta</dt><dd>${detailValue(firstLinkDiagnostic?.remote_label_name)}</dd></div>
+        <div><dt>Horário</dt><dd>${firstLinkDiagnostic?.observed_at ? formatDateTime(firstLinkDiagnostic.observed_at) : 'Aguardando'}</dd></div>
+        <div><dt>Lead encontrado</dt><dd>${firstLinkDiagnostic?.evidence_lead_id ? 'SIM' : 'NÃO'}</dd></div>
+        <div><dt>Telefone correspondente</dt><dd>${firstLinkDiagnostic?.evidencePhonePresent ? (firstLinkDiagnostic.phoneMatch ? 'SIM' : 'NÃO') : 'AUSENTE'}</dd></div>
+        <div><dt>Vínculo</dt><dd>${firstLinkDiagnostic ? `${esc(firstLinkDiagnostic.active_link_count)} ativo(s)` : '—'}</dd></div>
+        <div><dt>Identidade</dt><dd>${firstLinkDiagnostic ? `${esc(firstLinkDiagnostic.verified_identity_count)} verificada(s)` : '—'}</dd></div>
+        <div><dt>Etapa</dt><dd>${detailValue(firstLinkDiagnostic?.stage)}</dd></div>
+        <div><dt>Dataset</dt><dd>${detailValue(firstLinkDiagnostic?.dataset_id)}</dd></div>
+        <div><dt>Resultado Meta</dt><dd>${detailValue(firstLinkDiagnostic?.mql_status || firstLinkDiagnostic?.mql_validity)}</dd></div>
+        <div><dt>Motivo de bloqueio</dt><dd>${detailValue(firstLinkDiagnostic?.detail_code)}</dd></div>
+      </dl>
     </section>
 
     <details class="panel dashboard-tool" id="whatsapp-settings">

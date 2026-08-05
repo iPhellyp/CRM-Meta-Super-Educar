@@ -15,6 +15,7 @@ COPY --chown=node:node scripts/rebind-normal-lead-crm02.mjs ./scripts/rebind-nor
 COPY --chown=node:node scripts/meta-clean-canary.mjs ./scripts/meta-clean-canary.mjs
 COPY --chown=node:node scripts/meta-clean-historical.mjs ./scripts/meta-clean-historical.mjs
 COPY --chown=node:node scripts/import-univc-spreadsheet.mjs ./scripts/import-univc-spreadsheet.mjs
+COPY --chown=node:node scripts/reprocess-wa2-technical.mjs ./scripts/reprocess-wa2-technical.mjs
 USER node
 EXPOSE 3000
 CMD ["node", "src/server.js"]

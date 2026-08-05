@@ -82,7 +82,7 @@ export function parseWa2LabelKey(value) {
 }
 
 function currentWa2LabelsCte() {
-  return `WITH current_wa2_labels AS (
+  return `WITH current_wa2_labels AS MATERIALIZED (
     SELECT DISTINCT ON (
       receipt.tenant_id, link.wa2_instance_id, receipt.remote_chat_id, receipt.remote_label_id
     )
@@ -238,6 +238,7 @@ export async function listLeads({
   attributed,
   validPhone,
   unattended,
+  review,
   excludeInternalTests = false,
   createdAfter = operationStartAt(),
   createdBefore,
@@ -336,6 +337,34 @@ export async function listLeads({
   }
   if (unattended === 'yes') where.push('leads.first_contact_at IS NULL');
   if (excludeInternalTests) where.push('leads.is_internal_test = false');
+  if (review === 'PHONE_INVALID_OR_MISSING') {
+    where.push("(leads.import_phone_status IN ('PHONE_INVALID', 'PHONE_MISSING') OR COALESCE(leads.phone_normalized, leads.whatsapp_normalized) IS NULL)");
+  }
+  if (review === 'POSSIBLE_PHONE_DUPLICATE') where.push("leads.import_phone_status = 'POSSIBLE_PHONE_DUPLICATE'");
+  if (review === 'MULTIPLE_ACTIVE_WA_LINKS') {
+    where.push(`(SELECT count(*) FROM wa2_contact_links review_link
+      WHERE review_link.tenant_id = leads.tenant_id AND review_link.lead_id = leads.id
+        AND review_link.unlinked_at IS NULL) > 1`);
+  }
+  if (review === 'PENDING_IDENTITY') {
+    where.push("leads.stage_verification_status IN ('PENDING_WA_LABEL', 'UNVERIFIED_LEGACY')");
+  }
+  if (review === 'AWAITING_MANUAL_RECLASSIFICATION') where.push('leads.awaiting_manual_reclassification = true');
+  if (review === 'READY_FOR_FIRST_LINK') {
+    where.push('leads.awaiting_manual_reclassification = true');
+    where.push("COALESCE(leads.import_phone_status, '') NOT IN ('PHONE_INVALID', 'PHONE_MISSING', 'POSSIBLE_PHONE_DUPLICATE')");
+    where.push('COALESCE(leads.phone_normalized, leads.whatsapp_normalized) IS NOT NULL');
+    where.push(`NOT EXISTS (SELECT 1 FROM wa2_contact_links ready_link
+      WHERE ready_link.tenant_id = leads.tenant_id AND ready_link.lead_id = leads.id
+        AND ready_link.unlinked_at IS NULL)`);
+  }
+  if (review === 'ROUTING_PENDING') where.push("leads.routing_source = 'ROUTING_PENDING'");
+  if (review === 'MQL_ALREADY_VALID') {
+    where.push(`EXISTS (SELECT 1 FROM meta_conversion_events review_event
+      WHERE review_event.tenant_id = leads.tenant_id AND review_event.lead_id = leads.id
+        AND review_event.event_name = 'Marketing Qualified Lead'
+        AND review_event.validity_status = 'VALID')`);
+  }
 
   if (createdAfter) {
     values.push(createdAfter);
@@ -5452,6 +5481,14 @@ export async function getDashboardCounts({ createdAfter = operationStartAt() } =
     where.push(`COALESCE(received_at, created_at) >= $${values.length}`);
   }
   const [result, queue] = await Promise.all([pool.query(`
+    WITH scoped AS (
+      SELECT leads.*,
+        (SELECT count(*)::int FROM wa2_contact_links link
+         WHERE link.tenant_id = leads.tenant_id AND link.lead_id = leads.id
+           AND link.unlinked_at IS NULL) AS active_link_count
+      FROM leads
+      ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+    )
     SELECT
       count(*)::int AS total,
       count(*) FILTER (WHERE stage = 'NEW')::int AS new,
@@ -5459,21 +5496,30 @@ export async function getDashboardCounts({ createdAfter = operationStartAt() } =
       count(*) FILTER (WHERE stage = 'NO_RESPONSE')::int AS no_response,
       count(*) FILTER (WHERE stage = 'QUALIFIED')::int AS qualified,
       count(*) FILTER (WHERE stage IN ('CONTACT_STARTED', 'IN_SERVICE'))::int AS in_service,
-      count(*) FILTER (
-        WHERE stage IN (
-          'OPPORTUNITY', 'NEGOTIATING', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT'
-        )
-      )::int AS opportunities,
+      count(*) FILTER (WHERE stage IN ('OPPORTUNITY', 'NEGOTIATING', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT'))::int AS opportunities,
       count(*) FILTER (WHERE stage = 'AWAITING_ENROLLMENT')::int AS awaiting_enrollment,
       count(*) FILTER (WHERE stage = 'AWAITING_PAYMENT')::int AS awaiting_payment,
       count(*) FILTER (WHERE stage = 'ENROLLED')::int AS enrolled,
       count(*) FILTER (WHERE stage = 'PAID')::int AS paid,
-      count(*) FILTER (
-        WHERE stage IN ('LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED')
-      )::int AS lost,
-      count(*) FILTER (WHERE meta_lead_id IS NOT NULL)::int AS attributed
-    FROM leads
-    ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+      count(*) FILTER (WHERE stage IN ('LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED'))::int AS lost,
+      count(*) FILTER (WHERE meta_lead_id IS NOT NULL)::int AS attributed,
+      count(*) FILTER (WHERE import_phone_status IN ('PHONE_INVALID', 'PHONE_MISSING')
+        OR COALESCE(phone_normalized, whatsapp_normalized) IS NULL)::int AS phone_invalid_or_missing,
+      count(*) FILTER (WHERE import_phone_status = 'POSSIBLE_PHONE_DUPLICATE')::int AS possible_phone_duplicate,
+      count(*) FILTER (WHERE active_link_count > 1)::int AS multiple_active_wa_links,
+      count(*) FILTER (WHERE stage_verification_status IN ('PENDING_WA_LABEL', 'UNVERIFIED_LEGACY'))::int AS pending_identity,
+      count(*) FILTER (WHERE awaiting_manual_reclassification = true)::int AS awaiting_manual_reclassification,
+      count(*) FILTER (WHERE awaiting_manual_reclassification = true
+        AND COALESCE(import_phone_status, '') NOT IN ('PHONE_INVALID', 'PHONE_MISSING', 'POSSIBLE_PHONE_DUPLICATE')
+        AND COALESCE(phone_normalized, whatsapp_normalized) IS NOT NULL
+        AND active_link_count = 0)::int AS ready_for_first_link,
+      count(*) FILTER (WHERE routing_source = 'ROUTING_PENDING')::int AS routing_pending,
+      count(*) FILTER (WHERE EXISTS (
+        SELECT 1 FROM meta_conversion_events event
+        WHERE event.tenant_id = scoped.tenant_id AND event.lead_id = scoped.id
+          AND event.event_name = 'Marketing Qualified Lead' AND event.validity_status = 'VALID'
+      ))::int AS mql_already_valid
+    FROM scoped
   `, values), getQueueHealth()]);
   const counts = result.rows[0];
   const qualifiedJourney = counts.qualified + counts.opportunities + counts.enrolled + counts.paid;
@@ -5484,6 +5530,95 @@ export async function getDashboardCounts({ createdAfter = operationStartAt() } =
     metaPending: queue.pending,
     metaRetry: queue.retry,
     metaFailed: queue.failed,
+    reviewQueues: {
+      PHONE_INVALID_OR_MISSING: counts.phone_invalid_or_missing,
+      POSSIBLE_PHONE_DUPLICATE: counts.possible_phone_duplicate,
+      MULTIPLE_ACTIVE_WA_LINKS: counts.multiple_active_wa_links,
+      PENDING_IDENTITY: counts.pending_identity,
+      AWAITING_MANUAL_RECLASSIFICATION: counts.awaiting_manual_reclassification,
+      READY_FOR_FIRST_LINK: counts.ready_for_first_link,
+      ROUTING_PENDING: counts.routing_pending,
+      MQL_ALREADY_VALID: counts.mql_already_valid,
+    },
+  };
+}
+
+function firstLinkDiagnosticState(row) {
+  if (!row?.evidence_id) return 'WAITING_FOR_NEW_LABEL';
+  const code = String(row.detail_code || '');
+  if (['MULTIPLE_LEAD_MATCHES', 'LEAD_PHONE_MULTIPLE', 'CHAT_LINK_MULTIPLE'].includes(code)) return 'MULTIPLE_LEAD_MATCHES';
+  if (code.includes('IDENTITY_CONFLICT') || code.includes('WA_IDENTITY')) return 'WA_IDENTITY_CONFLICT';
+  if (['NO_MATCH', 'CHAT_LINK_NOT_FOUND', 'LEAD_PHONE_NOT_FOUND', 'LID_UNRESOLVED'].includes(code)) return 'NO_MATCH';
+  if (row.action === 'CONFLICT') return 'BLOCKED';
+  if (row.mql_status === 'SENT' && row.mql_validity === 'VALID') return 'MQL_SENT';
+  if (row.mql_validity === 'VALID') return 'MQL_ALREADY_VALID';
+  if (row.action === 'STAGE_CHANGED') return 'STAGE_UPDATED';
+  if (Number(row.verified_identity_count) === 1) return 'IDENTITY_VERIFIED';
+  if (Number(row.active_link_count) === 1) return 'LINK_CREATED';
+  return 'EXACT_SINGLE_MATCH';
+}
+
+export async function getFirstLinkDiagnostic() {
+  const result = await pool.query(`
+    WITH armed AS (
+      SELECT lead.*
+      FROM leads lead
+      WHERE lead.tenant_id = $1 AND lead.awaiting_manual_reclassification = true
+        AND lead.reclassification_armed_at IS NOT NULL
+      ORDER BY lead.reclassification_armed_at, lead.id
+      LIMIT 1
+    )
+    SELECT armed.id, armed.name, armed.stage, armed.dataset_id,
+      armed.phone_normalized AS lead_phone_normalized,
+      armed.reclassification_armed_at,
+      evidence.id AS evidence_id, evidence.remote_label_id,
+      evidence.remote_label_name, evidence.observed_at,
+      evidence.phone_normalized AS evidence_phone_normalized,
+      evidence.action, evidence.detail_code, evidence.lead_id AS evidence_lead_id,
+      COALESCE(active_links.count, 0)::int AS active_link_count,
+      COALESCE(identities.count, 0)::int AS verified_identity_count,
+      mql.status AS mql_status, mql.validity_status AS mql_validity
+    FROM armed
+    LEFT JOIN LATERAL (
+      SELECT receipt.id, receipt.remote_label_id, receipt.remote_label_name,
+        receipt.observed_at, receipt.phone_normalized,
+        action.action, action.detail_code, action.lead_id
+      FROM wa2_label_event_receipts receipt
+      LEFT JOIN wa2_inbound_label_actions action
+        ON action.tenant_id = receipt.tenant_id AND action.receipt_id = receipt.id
+      WHERE receipt.tenant_id = armed.tenant_id
+        AND receipt.operation = 'APPLY' AND receipt.source = 'WHATSAPP'
+        AND receipt.observed_at > armed.reclassification_armed_at
+      ORDER BY receipt.observed_at DESC, receipt.received_at DESC, receipt.id DESC
+      LIMIT 1
+    ) evidence ON true
+    LEFT JOIN LATERAL (
+      SELECT count(*)::int AS count FROM wa2_contact_links link
+      WHERE link.tenant_id = armed.tenant_id AND link.lead_id = armed.id
+        AND link.unlinked_at IS NULL
+    ) active_links ON true
+    LEFT JOIN LATERAL (
+      SELECT count(*)::int AS count FROM lead_verified_whatsapp_identities identity
+      WHERE identity.tenant_id = armed.tenant_id AND identity.lead_id = armed.id
+        AND identity.verified = true
+    ) identities ON true
+    LEFT JOIN LATERAL (
+      SELECT event.status, event.validity_status
+      FROM meta_conversion_events event
+      WHERE event.tenant_id = armed.tenant_id AND event.lead_id = armed.id
+        AND event.event_name = 'Marketing Qualified Lead'
+      ORDER BY event.updated_at DESC, event.created_at DESC
+      LIMIT 1
+    ) mql ON true
+  `, [tenantId()]);
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    ...row,
+    state: firstLinkDiagnosticState(row),
+    leadPhonePresent: Boolean(row.lead_phone_normalized),
+    evidencePhonePresent: Boolean(row.evidence_phone_normalized),
+    phoneMatch: Boolean(row.evidence_phone_normalized && row.lead_phone_normalized === row.evidence_phone_normalized),
   };
 }
 
@@ -6137,6 +6272,14 @@ export async function claimWa2LabelEventCursor() {
   return result.rows[0] || null;
 }
 
+export async function getWa2LabelEventCursor() {
+  const result = await pool.query(
+    'SELECT * FROM wa2_label_event_cursors WHERE tenant_id = $1',
+    [tenantId()],
+  );
+  return result.rows[0] || null;
+}
+
 async function resolveSpreadsheetReclassification(client, { instance, event }) {
   if (
     !instance || event.source !== 'WHATSAPP' || event.operation !== 'APPLY' ||
@@ -6485,6 +6628,13 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
         pending: pendingReclassification,
       });
     }
+    const detailCode = {
+      LEAD_PHONE_MULTIPLE: 'MULTIPLE_LEAD_MATCHES',
+      CHAT_LINK_MULTIPLE: 'MULTIPLE_LEAD_MATCHES',
+      WA2_VERIFIED_IDENTITY_CONFLICT: 'IDENTITY_CONFLICT',
+      WA2_IDENTITY_USED_BY_ANOTHER_LEAD: 'IDENTITY_CONFLICT',
+      UNKNOWN_SOURCE: 'IGNORED_TECHNICAL_EVENT',
+    }[decision.code] || decision.code;
     const actionResult = await client.query(
       `INSERT INTO wa2_inbound_label_actions (
          tenant_id, receipt_id, wa2_instance_id, wa2_contact_link_id,
@@ -6492,7 +6642,7 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
       [
         tenantId(), receipt.id, instance?.id || null, link?.id || null,
-        lead?.id || null, decision.targetStage || null, decision.action, decision.code,
+        lead?.id || null, decision.targetStage || null, decision.action, detailCode,
       ],
     );
     const action = actionResult.rows[0];
@@ -7866,7 +8016,7 @@ export async function decideWa2StageConfirmation(id, decision, actor) {
 }
 
 export async function listHistoricalOperations() {
-  const [cursor, imports, fileImports, reconciliations, conflicts, confirmations] = await Promise.all([
+  const [cursor, imports, fileImports, conflicts, confirmations] = await Promise.all([
     pool.query('SELECT * FROM wa2_label_event_cursors WHERE tenant_id = $1', [tenantId()]),
     pool.query(
       `SELECT * FROM meta_historical_imports
@@ -7876,20 +8026,6 @@ export async function listHistoricalOperations() {
     pool.query(
       `SELECT * FROM lead_file_imports
        WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 20`,
-      [tenantId()],
-    ),
-    pool.query(
-      `SELECT run.*, instance.name AS instance_name,
-              (SELECT jsonb_object_agg(result, count) FROM (
-                SELECT result, count(*)::int AS count
-                FROM wa2_reconciliation_items item
-                WHERE item.tenant_id = run.tenant_id AND item.run_id = run.id
-                  AND result IS NOT NULL GROUP BY result
-              ) totals) AS results
-       FROM wa2_reconciliation_runs run
-       JOIN wa2_instances instance
-         ON instance.tenant_id = run.tenant_id AND instance.id = run.wa2_instance_id
-       WHERE run.tenant_id = $1 ORDER BY run.created_at DESC LIMIT 20`,
       [tenantId()],
     ),
     pool.query(
@@ -7915,7 +8051,7 @@ export async function listHistoricalOperations() {
     cursor: cursor.rows[0] || null,
     imports: imports.rows,
     fileImports: fileImports.rows,
-    reconciliations: reconciliations.rows,
+    reconciliations: [],
     conflicts: conflicts.rows,
     confirmations: confirmations.rows,
   };

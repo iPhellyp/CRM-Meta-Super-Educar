@@ -28,6 +28,7 @@ import {
   createVerifiedWhatsAppIdentityAndLink,
   getActiveWa2ContactLinkForLead,
   getDashboardCounts,
+  getFirstLinkDiagnostic,
   getLeadById,
   getMetaConnectionById,
   getMetaSourceContext,
@@ -134,7 +135,6 @@ import {
   wa2LabelBindingsView,
   wa2LabelJobsView,
   wa2QrView,
-  chatView,
   renderLeadRow,
   renderLeadCard,
 } from './views.js';
@@ -194,6 +194,7 @@ const loginAttempts = new Map();
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 5;
 const LEAD_FILE_TIMEOUT_MS = 15_000;
+const LEADS_PAGE_SIZE = 50;
 const leadFileUpload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -449,6 +450,11 @@ function dashboardFiltersFromQuery(query = {}) {
     attributed: ['yes', 'no'].includes(query.attributed) ? query.attributed : '',
     validPhone: ['yes', 'no'].includes(query.validPhone) ? query.validPhone : '',
     unattended: query.unattended === 'yes' ? 'yes' : '',
+    review: [
+      'PHONE_INVALID_OR_MISSING', 'POSSIBLE_PHONE_DUPLICATE', 'MULTIPLE_ACTIVE_WA_LINKS',
+      'PENDING_IDENTITY', 'AWAITING_MANUAL_RECLASSIFICATION', 'READY_FOR_FIRST_LINK',
+      'ROUTING_PENDING', 'MQL_ALREADY_VALID',
+    ].includes(query.review) ? query.review : '',
     dateFrom: dateFrom.raw,
     dateTo: dateTo.raw,
     createdAfter: dateFrom.date || operationStartAt(),
@@ -457,8 +463,8 @@ function dashboardFiltersFromQuery(query = {}) {
       ? query.sort
       : 'recent',
     page,
-    limit: 101,
-    offset: (page - 1) * 100,
+    limit: LEADS_PAGE_SIZE + 1,
+    offset: (page - 1) * LEADS_PAGE_SIZE,
   };
   if (!Object.hasOwn(STAGE_LABELS, filters.stage)) filters.stage = '';
   if (!Object.hasOwn(LOST_REASON_LABELS, filters.lostReason)) filters.lostReason = '';
@@ -479,7 +485,7 @@ app.get('/api/leads/changes', async (req, res) => {
   try { page = await listLeadChangesSince(rawCursor || null, limit); } catch { return res.status(400).json({ error: 'INVALID_CURSOR' }); }
   const filters = dashboardFiltersFromQuery(req.query);
   const currentPage = await listLeads(filters);
-  const currentPageIds = new Set(currentPage.slice(0, 100).map((lead) => lead.id));
+  const currentPageById = new Map(currentPage.slice(0, LEADS_PAGE_SIZE).map((lead) => [lead.id, lead]));
   const csrfToken = issueCsrfToken(req, res);
   const whatsappMessage = await getTenantWhatsAppMessage();
   const returnQuery = new URLSearchParams();
@@ -490,8 +496,8 @@ app.get('/api/leads/changes', async (req, res) => {
   const { changes } = page;
   const leads = [];
   for (const change of changes) {
-    const lead = await getLeadById(change.leadId);
-    if (lead && currentPageIds.has(lead.id)) {
+    const lead = currentPageById.get(change.leadId);
+    if (lead) {
       const renderOptions = { csrfToken, returnPath, whatsappMessage };
       leads.push({
         leadId: lead.id,
@@ -505,7 +511,7 @@ app.get('/api/leads/changes', async (req, res) => {
         updatedAt: change.changedAt,
         removed: false,
       });
-    } else if (!lead || !currentPageIds.has(change.leadId)) {
+    } else {
       leads.push({ leadId: change.leadId, removed: true, updatedAt: change.changedAt });
     }
   }
@@ -628,14 +634,12 @@ const metaHistoricalIdsSchema = z.object({
 
 app.get('/operations', async (req, res) => {
   try {
-    const [operations, instances, metaForms] = await Promise.all([
+    const [operations, metaForms] = await Promise.all([
       listHistoricalOperations(),
-      listWa2InstancesLocal(),
       listMetaImportForms(),
     ]);
     return res.send(historicalOperationsView({
       operations,
-      instances,
       metaForms,
       message: req.query.message || '',
       error: req.query.error || '',
@@ -716,46 +720,11 @@ app.post('/operations/file-imports/:id/cancel', async (req, res) => {
 });
 
 app.post('/operations/reconciliations', async (req, res) => {
-  const localInstanceId = z.string().uuid().safeParse(req.body.instanceId);
-  if (!localInstanceId.success) {
-    return redirectWith(res, '/operations', 'error', 'Instância inválida.');
-  }
-  try {
-    const localInstance = await getWa2InstanceLocalById(localInstanceId.data);
-    const ids = wa2ReconciliationInstanceIds(localInstance);
-    const candidatePhones = await listWa2ReconciliationCandidatePhones();
-    await prepareWa2Reconciliation({
-      ids,
-      candidatePhones,
-      health: getWa2Health,
-      getStatus: getWa2InstanceStatus,
-      connect: connectWa2Instance,
-      quickSync: syncWa2Instance,
-      rebuild: rebuildWa2Identities,
-      getRebuildStatus: getWa2IdentityRebuildStatus,
-    });
-    await createWa2Reconciliation({
-      instanceId: ids.localInstanceId,
-      actor: req.user.sub,
-    });
-    return redirectWith(res, '/operations', 'message', 'Reconciliação enfileirada.');
-  } catch (error) {
-    return redirectWith(res, '/operations', 'error', wa2LinkErrorMessage(error));
-  }
+  return res.status(410).json({ error: 'WA2_RECONCILIATION_DISABLED' });
 });
 
 app.post('/operations/reconciliations/:id/retry', async (req, res) => {
-  const id = z.string().uuid().safeParse(req.params.id);
-  if (!id.success) {
-    return redirectWith(res, '/operations', 'error', 'Reconciliação inválida.');
-  }
-  const count = await retryWa2ReconciliationFailures(id.data);
-  return redirectWith(
-    res,
-    '/operations',
-    count ? 'message' : 'error',
-    count ? `${count} item(ns) reenfileirado(s).` : 'Nenhuma falha disponível para retry.',
-  );
+  return res.status(410).json({ error: 'WA2_RECONCILIATION_DISABLED' });
 });
 
 app.post('/operations/confirmations/:id/:decision', async (req, res) => {
@@ -842,75 +811,16 @@ app.get('/wa2', async (req, res) => {
   }));
 });
 
-app.get('/chat', async (req, res) => {
-  let instances = [];
-  let chats = [];
-  let selectedChat = null;
-  let messages = [];
-  let labels = [];
-  let selectedInstanceId = String(req.query.instanceId || '').trim();
-  const search = String(req.query.search || '').slice(0, 120);
-  let error = '';
-  try {
-    instances = await listWa2Instances();
-    selectedInstanceId = selectedInstanceId && instances.some((item) => item.id === selectedInstanceId)
-      ? selectedInstanceId
-      : instances.find((item) => item.isDefault)?.id || instances[0]?.id || '';
-    if (selectedInstanceId) {
-      const page = await listWa2Chats(selectedInstanceId, { search, limit: 50 });
-      chats = page.chats;
-      labels = await listWa2Labels(selectedInstanceId);
-      const selectedChatId = String(req.query.chatId || '').trim();
-      selectedChat = chats.find((chat) => chat.id === selectedChatId) || chats[0] || null;
-      if (selectedChat) {
-        messages = (await listWa2ChatMessages(selectedInstanceId, selectedChat.id, { limit: 100 })).messages;
-      }
-    }
-  } catch (remoteError) {
-    error = wa2UnavailableMessage(remoteError);
-  }
-  if (req.query.format === 'json') {
-    noStore(res);
-    return res.json({ instances, selectedInstanceId, chats, selectedChat, messages, labels, error });
-  }
-  return res.send(chatView({
-    instances,
-    selectedInstanceId,
-    chats,
-    selectedChat,
-    messages,
-    labels,
-    search,
-    error,
-    message: req.query.message || '',
-    csrfToken: issueCsrfToken(req, res),
-  }));
+app.get('/chat', (_req, res) => {
+  return res.redirect(302, '/');
 });
 
 app.post('/chat/send', async (req, res) => {
-  try {
-    const instanceId = validateWa2InstanceId(req.body.instanceId);
-    const chatId = validateWa2InstanceId(req.body.chatId);
-    const text = z.string().trim().min(1).max(4000).parse(req.body.text);
-    await sendWa2ChatMessage(instanceId, chatId, text);
-    return redirectWith(res, `/chat?instanceId=${encodeURIComponent(instanceId)}&chatId=${encodeURIComponent(chatId)}`, 'message', 'Mensagem enfileirada.');
-  } catch (error) {
-    return redirectWith(res, '/chat', 'error', wa2UnavailableMessage(error));
-  }
+  return res.status(410).json({ error: 'CHAT_DISABLED' });
 });
 
 app.post('/chat/label', async (req, res) => {
-  try {
-    const instanceId = validateWa2InstanceId(req.body.instanceId);
-    const chatId = validateWa2InstanceId(req.body.chatId);
-    const labelId = validateWa2InstanceId(req.body.labelId);
-    const operation = z.enum(['apply', 'remove']).parse(req.body.operation);
-    if (operation === 'apply') await applyWa2ChatLabel(instanceId, chatId, labelId);
-    else await removeWa2ChatLabel(instanceId, chatId, labelId);
-    return redirectWith(res, `/chat?instanceId=${encodeURIComponent(instanceId)}&chatId=${encodeURIComponent(chatId)}`, 'message', 'Etiqueta enfileirada para sincronização.');
-  } catch (error) {
-    return redirectWith(res, '/chat', 'error', wa2UnavailableMessage(error));
-  }
+  return res.status(410).json({ error: 'CHAT_DISABLED' });
 });
 
 app.post('/wa2/instances/create', async (req, res) => {
@@ -1684,6 +1594,11 @@ app.get('/', async (req, res) => {
     attributed: ['yes', 'no'].includes(req.query.attributed) ? req.query.attributed : '',
     validPhone: ['yes', 'no'].includes(req.query.validPhone) ? req.query.validPhone : '',
     unattended: req.query.unattended === 'yes' ? 'yes' : '',
+    review: [
+      'PHONE_INVALID_OR_MISSING', 'POSSIBLE_PHONE_DUPLICATE', 'MULTIPLE_ACTIVE_WA_LINKS',
+      'PENDING_IDENTITY', 'AWAITING_MANUAL_RECLASSIFICATION', 'READY_FOR_FIRST_LINK',
+      'ROUTING_PENDING', 'MQL_ALREADY_VALID',
+    ].includes(req.query.review) ? req.query.review : '',
     dateFrom: dateFrom.raw,
     dateTo: dateTo.raw,
     createdAfter: dateFrom.date || operationStartAt(),
@@ -1692,8 +1607,8 @@ app.get('/', async (req, res) => {
       ? req.query.sort
       : 'recent',
     page,
-    limit: 101,
-    offset: (page - 1) * 100,
+    limit: LEADS_PAGE_SIZE + 1,
+    offset: (page - 1) * LEADS_PAGE_SIZE,
   };
   if (!Object.hasOwn(STAGE_LABELS, filters.stage)) filters.stage = '';
   if (!Object.hasOwn(LOST_REASON_LABELS, filters.lostReason)) filters.lostReason = '';
@@ -1705,15 +1620,16 @@ app.get('/', async (req, res) => {
   if (!z.string().uuid().safeParse(filters.metaConnectionId).success) {
     filters.metaConnectionId = '';
   }
-  const [leadRows, counts, wa2Instances, metaConnections, whatsappMessage, wa2LabelCatalog] = await Promise.all([
+  const [leadRows, counts, firstLinkDiagnostic, wa2Instances, metaConnections, whatsappMessage, wa2LabelCatalog] = await Promise.all([
     listLeads(filters),
     getDashboardCounts(),
+    getFirstLinkDiagnostic(),
     listWa2InstancesLocal({ enabledOnly: true }),
     listMetaConnections(),
     getTenantWhatsAppMessage(),
     listWa2LabelCatalog(),
   ]);
-  const leads = leadRows.slice(0, 100);
+  const leads = leadRows.slice(0, LEADS_PAGE_SIZE);
   const baseMetaStatus = metaConfigStatus();
   const hasValidMetaConnection = metaConnections.some(
     (connection) => connection.active && connection.status === 'VALID',
@@ -1730,8 +1646,9 @@ app.get('/', async (req, res) => {
     filters,
     pagination: {
       page,
-      hasNext: leadRows.length > 100,
+      hasNext: leadRows.length > LEADS_PAGE_SIZE,
     },
+    firstLinkDiagnostic,
     wa2Instances,
     wa2LabelCatalog,
     metaConnections,
@@ -2403,6 +2320,12 @@ app.get('/leads/export.csv', async (req, res) => {
     course: String(req.query.course || '').slice(0, 200),
     city: String(req.query.city || '').slice(0, 200),
     stage: Object.hasOwn(STAGE_LABELS, req.query.stage) ? req.query.stage : '',
+    commercial: req.query.commercial === 'mql' ? 'mql' : '',
+    review: [
+      'PHONE_INVALID_OR_MISSING', 'POSSIBLE_PHONE_DUPLICATE', 'MULTIPLE_ACTIVE_WA_LINKS',
+      'PENDING_IDENTITY', 'AWAITING_MANUAL_RECLASSIFICATION', 'READY_FOR_FIRST_LINK',
+      'ROUTING_PENDING', 'MQL_ALREADY_VALID',
+    ].includes(req.query.review) ? req.query.review : '',
     lostReason: Object.hasOwn(LOST_REASON_LABELS, req.query.lostReason)
       ? req.query.lostReason
       : '',

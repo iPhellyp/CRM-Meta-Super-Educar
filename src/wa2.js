@@ -372,7 +372,7 @@ function sanitizeChatMessageMutation(payload) {
   return { queued: true, jobId: sanitizeJobId(value.jobId) };
 }
 
-function sanitizeLabelEvent(value) {
+export function sanitizeLabelEvent(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Wa2Error('Evento de etiqueta WA2 incompatível', {
       code: 'WA2_LABEL_EVENT_INVALID',
@@ -393,9 +393,15 @@ function sanitizeLabelEvent(value) {
   );
   const jid = requiredRemoteText(value.jid, 255, 'WA2_LABEL_EVENT_INVALID').toLowerCase();
   const jidType = classifyWa2Jid(jid);
-  const phoneNormalized = value.phoneNormalized == null
-    ? null
-    : validateNormalizedPhone(value.phoneNormalized);
+  let phoneNormalized = null;
+  let technicalReason = null;
+  if (value.phoneNormalized != null) {
+    try {
+      phoneNormalized = validateNormalizedPhone(value.phoneNormalized);
+    } catch {
+      technicalReason = 'INVALID_PHONE_FORMAT';
+    }
+  }
   if (
     !LABEL_EVENT_OPERATIONS.has(value.operation) ||
     !LABEL_EVENT_SOURCES.has(value.source) ||
@@ -411,21 +417,23 @@ function sanitizeLabelEvent(value) {
       code: 'WA2_LABEL_EVENT_INVALID',
     });
   }
-  if (
-    value.eligibleForCrm &&
-    (
-      !phoneNormalized ||
-      !['individual_phone', 'lid'].includes(jidType) ||
-      (
-        jidType === 'individual_phone' &&
-        individualJidPhone(jid).phoneNormalized !== phoneNormalized
-      )
-    )
-  ) {
-    throw new Wa2Error('Elegibilidade WA2 divergente do contato', {
-      code: 'WA2_LABEL_EVENT_INVALID',
-    });
+  if (!technicalReason && ['group', 'newsletter', 'broadcast', 'status', 'unsupported'].includes(jidType)) {
+    technicalReason = 'NON_INDIVIDUAL_JID';
   }
+  if (!technicalReason && jidType === 'lid' && !phoneNormalized) {
+    technicalReason = 'LID_WITHOUT_PN';
+  }
+  if (!technicalReason && jidType === 'individual_phone' && phoneNormalized) {
+    if (individualJidPhone(jid).phoneNormalized !== phoneNormalized) {
+      technicalReason = 'IDENTITY_CONFLICT';
+    }
+  }
+  if (!technicalReason && value.source === 'UNKNOWN') technicalReason = 'IGNORED_TECHNICAL_EVENT';
+  if (!technicalReason && value.eligibleForCrm && !phoneNormalized) technicalReason = 'INVALID_PHONE_FORMAT';
+  if (!technicalReason && !value.eligibleForCrm && value.ineligibleReason === 'LID_UNRESOLVED') {
+    technicalReason = 'LID_WITHOUT_PN';
+  }
+  const eligibleForCrm = value.eligibleForCrm && !technicalReason;
   return {
     eventId,
     instanceId,
@@ -436,19 +444,16 @@ function sanitizeLabelEvent(value) {
       requiredRemoteText(value.waLabelId, 128, 'WA2_LABEL_EVENT_INVALID'),
       'etiqueta',
     ),
+    waLabelName: optionalRemoteText(value.waLabelName, 200, 'WA2_LABEL_EVENT_INVALID'),
     operation: value.operation,
     source: value.source,
     observedAt: observedAt.toISOString(),
-    eligibleForCrm: value.eligibleForCrm,
-    ineligibleReason: optionalRemoteText(
-      value.ineligibleReason,
-      80,
-      'WA2_LABEL_EVENT_INVALID',
-    ),
+    eligibleForCrm,
+    ineligibleReason: technicalReason || optionalRemoteText(value.ineligibleReason, 80, 'WA2_LABEL_EVENT_INVALID') || (!eligibleForCrm ? 'IGNORED_TECHNICAL_EVENT' : null),
   };
 }
 
-function sanitizeLabelEvents(payload) {
+export function sanitizeLabelEvents(payload) {
   const value = objectPayload(payload);
   if (!Array.isArray(value.events) || typeof value.hasMore !== 'boolean') {
     throw new Wa2Error('Feed de etiquetas WA2 incompatível', {
@@ -459,7 +464,13 @@ function sanitizeLabelEvents(payload) {
     ? null
     : requiredRemoteText(value.nextCursor, 500, 'WA2_LABEL_EVENTS_INVALID');
   return {
-    events: value.events.map(sanitizeLabelEvent),
+    events: value.events.map((event) => {
+      try {
+        return sanitizeLabelEvent(event);
+      } catch {
+        return { technicalOnly: true, technicalReason: 'MALFORMED_HISTORICAL_RECORD' };
+      }
+    }),
     nextCursor,
     hasMore: value.hasMore,
   };

@@ -66,15 +66,16 @@ test('instância desabilitada ou sem ID remoto é rejeitada localmente', () => {
   );
 });
 
-test('rota usa ID remoto no preparo e UUID local ao criar o run', async () => {
+test('rota manual de reconciliação fica bloqueada sem iniciar run', async () => {
   const source = await readFile(new URL('../src/server.js', import.meta.url), 'utf8');
   const route = source.slice(
     source.indexOf("app.post('/operations/reconciliations'"),
     source.indexOf("app.post('/operations/reconciliations/:id/retry'"),
   );
-  assert.match(route, /prepareWa2Reconciliation\(\{[\s\S]*ids,/);
-  assert.match(route, /createWa2Reconciliation\(\{\s*instanceId: ids\.localInstanceId/);
-  assert.doesNotMatch(route, /rebuildWa2Identities\(localInstanceId/);
+  assert.match(route, /status\(410\)/);
+  assert.match(route, /WA2_RECONCILIATION_DISABLED/);
+  assert.doesNotMatch(route, /prepareWa2Reconciliation/);
+  assert.doesNotMatch(route, /createWa2Reconciliation/);
 });
 
 test('agenda automática filtra somente instâncias que concluíram o preparo', async () => {

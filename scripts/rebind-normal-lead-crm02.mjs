@@ -62,7 +62,14 @@ async function loadSnapshot({ allowAligned = false } = {}) {
   const labeledIdentities = await listWa2LabeledIdentities(instance.remote_instance_id);
   const labeledMatches = labeledIdentities.filter((item) => (
     item.chatId === EXPECTED_CURRENT_CHAT_ID &&
-    item.phoneNormalized === identity.canonicalE164 &&
+    (() => {
+      try {
+        return getBrazilianPhoneIdentity(item.phoneNormalized, { confirmedMobile: true }).canonicalE164
+          === identity.canonicalE164;
+      } catch {
+        return false;
+      }
+    })() &&
     String(item.jid).toLowerCase().endsWith('@lid')
   ));
   if (labeledMatches.length !== 1) fail('CURRENT_CHAT_IDENTITY_NOT_UNIQUE');
@@ -70,7 +77,12 @@ async function loadSnapshot({ allowAligned = false } = {}) {
   const phoneJid = String(activeLink.jid || '').trim();
   if (!/^\d+@(s\.whatsapp\.net|c\.us)$/.test(phoneJid)) fail('CURRENT_PHONE_JID_INVALID');
   const phoneJidNumber = phoneJid.replace(/@(s\.whatsapp\.net|c\.us)$/, '');
-  if (phoneJidNumber !== identity.canonicalE164) fail('CURRENT_PHONE_JID_MISMATCH');
+  try {
+    if (getBrazilianPhoneIdentity(phoneJidNumber, { confirmedMobile: true }).canonicalE164
+      !== identity.canonicalE164) fail('CURRENT_PHONE_JID_MISMATCH');
+  } catch {
+    fail('CURRENT_PHONE_JID_MISMATCH');
+  }
   const resolved = {
     contact: {
       id: EXPECTED_CURRENT_CONTACT_ID,

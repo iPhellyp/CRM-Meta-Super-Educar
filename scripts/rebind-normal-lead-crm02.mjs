@@ -5,14 +5,13 @@ import {
   getActiveWa2ContactLinkForLead,
   getLeadById,
   listWa2InstancesLocal,
-  listVerifiedWhatsAppIdentitiesForLead,
   rebindNormalLeadToCurrentWa2Chat,
   verifyExistingWa2Identity,
 } from '../src/db.js';
 import {
-  getWa2ContactByPhone,
   listWa2ChatLabels,
   listWa2LabelEvents,
+  listWa2LabeledIdentities,
 } from '../src/wa2.js';
 import { getBrazilianPhoneIdentity } from '../src/phone.js';
 import { WA2_NORMAL_CHAT_REBIND_REASON } from '../src/wa2-rebind.js';
@@ -60,16 +59,27 @@ async function loadSnapshot({ allowAligned = false } = {}) {
   if (!identity.canonicalE164 || !identity.aliases.includes(identity.canonicalE164)) {
     fail('LEAD_PHONE_INVALID');
   }
-  const resolved = await getWa2ContactByPhone(instance.remote_instance_id, identity.canonicalE164);
-  if (
-    resolved?.contact?.id !== EXPECTED_CURRENT_CONTACT_ID ||
-    resolved?.chat?.id !== EXPECTED_CURRENT_CHAT_ID ||
-    !resolved.contact.jid ||
-    !resolved.chat.jid
-  ) {
-    fail('CURRENT_CHAT_CONTACT_CHANGED');
-  }
-  if (!String(resolved.chat.jid).toLowerCase().endsWith('@lid')) fail('CURRENT_CHAT_LID_MISSING');
+  const labeledIdentities = await listWa2LabeledIdentities(instance.remote_instance_id);
+  const labeledMatches = labeledIdentities.filter((item) => (
+    item.chatId === EXPECTED_CURRENT_CHAT_ID &&
+    item.phoneNormalized === identity.canonicalE164 &&
+    String(item.jid).toLowerCase().endsWith('@lid')
+  ));
+  if (labeledMatches.length !== 1) fail('CURRENT_CHAT_IDENTITY_NOT_UNIQUE');
+  const labeledIdentity = labeledMatches[0];
+  const phoneJid = String(activeLink.jid || '').trim();
+  if (!/^\d+@(s\.whatsapp\.net|c\.us)$/.test(phoneJid)) fail('CURRENT_PHONE_JID_INVALID');
+  const phoneJidNumber = phoneJid.replace(/@(s\.whatsapp\.net|c\.us)$/, '');
+  if (phoneJidNumber !== identity.canonicalE164) fail('CURRENT_PHONE_JID_MISMATCH');
+  const resolved = {
+    contact: {
+      id: EXPECTED_CURRENT_CONTACT_ID,
+      phoneNormalized: identity.canonicalE164,
+      jid: phoneJid,
+    },
+    chat: { id: labeledIdentity.chatId, jid: labeledIdentity.jid },
+    resolution: labeledIdentity.resolution,
+  };
 
   const labels = await listWa2ChatLabels(instance.remote_instance_id, EXPECTED_CURRENT_CHAT_ID);
   const officialStageLabels = labels.filter((label) => ['57', '36', '63', '68', '67', '35'].includes(label.id));

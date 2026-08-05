@@ -12,6 +12,7 @@ COPY --chown=node:node scripts/backfill-meta-phones.js ./scripts/backfill-meta-p
 COPY --chown=node:node scripts/backfill-meta-qualified.js ./scripts/backfill-meta-qualified.js
 COPY --chown=node:node scripts/rebind-wa2-chat-b1.mjs ./scripts/rebind-wa2-chat-b1.mjs
 COPY --chown=node:node scripts/rebind-normal-lead-crm02.mjs ./scripts/rebind-normal-lead-crm02.mjs
+COPY --chown=node:node scripts/meta-clean-canary.mjs ./scripts/meta-clean-canary.mjs
 USER node
 EXPOSE 3000
 CMD ["node", "src/server.js"]

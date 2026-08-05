@@ -58,6 +58,10 @@ import {
   isMetaOutboundEligibleByStageTruth,
   MQL_AUDIT_CLASSES,
 } from './stage-truth.js';
+import {
+  META_CLEAN_DATASET_ID,
+  META_LEGACY_DATASET_ID,
+} from './meta-clean-config.js';
 
 const { Pool } = pg;
 const DEFAULT_TENANT_ID = 'super-educar';
@@ -1994,6 +1998,125 @@ export async function getWa2ContactLinkById(id) {
   return result.rows[0] || null;
 }
 
+export async function setMetaDatasetActive(id, active) {
+  const result = await pool.query(
+    `UPDATE meta_datasets
+     SET active = $3, updated_at = now()
+     WHERE tenant_id = $1 AND id = $2
+     RETURNING *`,
+    [tenantId(), id, active === true],
+  );
+  return result.rows[0] || null;
+}
+
+export async function getMetaCleanCanarySnapshot({
+  leadId,
+  datasetId = META_CLEAN_DATASET_ID,
+} = {}) {
+  const tenant = tenantId();
+  const safeLeadId = String(leadId || '').trim();
+  const safeDatasetId = String(datasetId || '').trim();
+  if (!safeLeadId) throw new Error('META_CLEAN_LEAD_ID_REQUIRED');
+  if (safeDatasetId !== META_CLEAN_DATASET_ID || safeDatasetId === META_LEGACY_DATASET_ID) {
+    throw new Error('META_CLEAN_DATASET_INVALID');
+  }
+  const [leadResult, linksResult, identitiesResult, confirmationResult,
+    datasetResult, eventsResult, jobsResult, legacyResult] = await Promise.all([
+    pool.query(
+      `SELECT * FROM leads WHERE tenant_id = $1 AND id = $2`,
+      [tenant, safeLeadId],
+    ),
+    pool.query(
+      `SELECT link.*, instance.name AS instance_name,
+              instance.remote_instance_id, instance.enabled AS instance_enabled
+       FROM wa2_contact_links link
+       JOIN wa2_instances instance
+         ON instance.tenant_id = link.tenant_id AND instance.id = link.wa2_instance_id
+       WHERE link.tenant_id = $1 AND link.lead_id = $2 AND link.unlinked_at IS NULL
+       ORDER BY link.created_at DESC`,
+      [tenant, safeLeadId],
+    ),
+    pool.query(
+      `SELECT identity.*
+       FROM lead_verified_whatsapp_identities identity
+       WHERE identity.tenant_id = $1 AND identity.lead_id = $2
+         AND identity.verified = true
+       ORDER BY identity.verified_at DESC`,
+      [tenant, safeLeadId],
+    ),
+    pool.query(
+      `SELECT confirmation.*
+       FROM wa2_current_label_confirmations confirmation
+       WHERE confirmation.tenant_id = $1 AND confirmation.lead_id = $2
+         AND confirmation.result = 'STAGE_ALIGNED'
+         AND confirmation.resulting_stage = 'QUALIFIED'
+       ORDER BY confirmation.confirmed_at DESC, confirmation.created_at DESC
+       LIMIT 1`,
+      [tenant, safeLeadId],
+    ),
+    pool.query(
+      `SELECT dataset.*, connection.name AS connection_name,
+              connection.status AS connection_status,
+              connection.active AS connection_active
+       FROM meta_datasets dataset
+       JOIN meta_connections connection
+         ON connection.tenant_id = dataset.tenant_id
+        AND connection.id = dataset.meta_connection_id
+       WHERE dataset.tenant_id = $1 AND dataset.dataset_id = $2
+       LIMIT 1`,
+      [tenant, safeDatasetId],
+    ),
+    pool.query(
+      `SELECT event.id, event.event_id, event.event_name, event.event_time,
+              event.status, event.validity_status, event.attempts,
+              event.meta_connection_id, event.meta_dataset_id,
+              event.sent_at, event.created_at, event.updated_at,
+              event.meta_response->>'events_received' AS events_received,
+              event.meta_response->>'fbtrace_id' AS fbtrace_id
+       FROM meta_conversion_events event
+       WHERE event.tenant_id = $1 AND event.lead_id = $2
+         AND event.event_name = 'Marketing Qualified Lead'
+       ORDER BY event.updated_at DESC, event.created_at DESC`,
+      [tenant, safeLeadId],
+    ),
+    pool.query(
+      `SELECT job.id, job.status, job.attempts, job.last_error,
+              job.completed_at, job.created_at, job.updated_at,
+              job.dedupe_key, job.payload
+       FROM meta_jobs job
+       JOIN meta_conversion_events event
+         ON event.tenant_id = job.tenant_id
+        AND job.job_type = 'CONVERSION'
+        AND job.payload->>'eventId' = event.id::text
+       WHERE job.tenant_id = $1 AND event.lead_id = $2
+       ORDER BY job.created_at DESC`,
+      [tenant, safeLeadId],
+    ),
+    pool.query(
+      `SELECT dataset.id, dataset.dataset_id, dataset.active,
+              dataset.meta_connection_id, connection.name AS connection_name
+       FROM meta_datasets dataset
+       JOIN meta_connections connection
+         ON connection.tenant_id = dataset.tenant_id
+        AND connection.id = dataset.meta_connection_id
+       WHERE dataset.tenant_id = $1 AND dataset.dataset_id = $2
+       ORDER BY dataset.created_at`,
+      [tenant, META_LEGACY_DATASET_ID],
+    ),
+  ]);
+  return {
+    tenantId: tenant,
+    lead: leadResult.rows[0] || null,
+    activeLinks: linksResult.rows,
+    verifiedIdentities: identitiesResult.rows,
+    currentConfirmation: confirmationResult.rows[0] || null,
+    dataset: datasetResult.rows[0] || null,
+    events: eventsResult.rows,
+    jobs: jobsResult.rows,
+    legacyDatasets: legacyResult.rows,
+  };
+}
+
 export const VERIFIED_WHATSAPP_SOURCE = 'USER_CONFIRMED_CONTACT_MATHEUS_PH_2026_08_04';
 export const VERIFIED_WHATSAPP_REASON = 'BRAZIL_NINTH_DIGIT_LEGACY_ALIAS';
 
@@ -3764,7 +3887,10 @@ export async function confirmCurrentWa2LabelStateAndAlignLead({
   }
 }
 
-async function createOrGetMetaEvent(client, { lead, eventName, eventTime, mode }) {
+async function createOrGetMetaEvent(
+  client,
+  { lead, eventName, eventTime, mode, occurrenceKey = null },
+) {
   const destination = lead.meta_connection_id
     ? await client.query(
       `SELECT connection.id AS meta_connection_id, dataset.id AS meta_dataset_id,
@@ -3796,7 +3922,11 @@ async function createOrGetMetaEvent(client, { lead, eventName, eventTime, mode }
     return existingBase.rows[0];
   }
   const occurrence = crypto.createHash('sha256')
-    .update(`${lead.id}:${eventName}:${datasetKey}:${mode}:${new Date(eventTime || Date.now()).toISOString()}`)
+    .update(
+      occurrenceKey
+        ? String(occurrenceKey)
+        : `${lead.id}:${eventName}:${datasetKey}:${mode}:${new Date(eventTime || Date.now()).toISOString()}`,
+    )
     .digest('hex')
     .slice(0, 24);
   const eventId = `${baseEventId}:occ:${occurrence}`;
@@ -3869,6 +3999,138 @@ async function enqueueConversionJob(client, event) {
     [event.id, event.tenant_id],
   );
   return true;
+}
+
+export async function createMetaCleanCanaryEvent({
+  leadId,
+  datasetId = META_CLEAN_DATASET_ID,
+  eventTime,
+  confirmationId,
+  dryRun = false,
+} = {}) {
+  const safeLeadId = String(leadId || '').trim();
+  const safeDatasetId = String(datasetId || '').trim();
+  const safeConfirmationId = String(confirmationId || '').trim();
+  const observedAt = new Date(eventTime);
+  if (!safeLeadId) throw new Error('META_CLEAN_LEAD_ID_REQUIRED');
+  if (safeDatasetId !== META_CLEAN_DATASET_ID || safeDatasetId === META_LEGACY_DATASET_ID) {
+    throw new Error('META_CLEAN_DATASET_INVALID');
+  }
+  if (!safeConfirmationId) throw new Error('META_CLEAN_CONFIRMATION_REQUIRED');
+  if (!Number.isFinite(observedAt.getTime())) throw new Error('META_CLEAN_EVENT_TIME_INVALID');
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const selected = await client.query(
+      `SELECT * FROM leads
+       WHERE tenant_id = $1 AND id = $2
+       FOR UPDATE`,
+      [tenantId(), safeLeadId],
+    );
+    const lead = selected.rows[0];
+    if (!lead) throw new Error('META_CLEAN_LEAD_NOT_FOUND');
+    if (lead.is_internal_test === true) throw new Error('META_CLEAN_INTERNAL_TEST_BLOCKED');
+    if (lead.meta_outbound_eligible !== true) throw new Error('META_CLEAN_LEAD_NOT_ELIGIBLE');
+    if (!lead.meta_lead_id) throw new Error('META_CLEAN_META_LEAD_ID_MISSING');
+    if (lead.stage !== 'QUALIFIED') throw new Error('META_CLEAN_STAGE_INVALID');
+    if (lead.stage_source !== 'WHATSAPP_LABEL') throw new Error('META_CLEAN_STAGE_SOURCE_INVALID');
+    if (lead.stage_verification_status !== 'VERIFIED') throw new Error('META_CLEAN_STAGE_NOT_VERIFIED');
+    const datasetResult = await client.query(
+      `SELECT dataset.id AS clean_meta_dataset_id,
+              dataset.dataset_id AS clean_dataset_value,
+              dataset.meta_connection_id AS clean_meta_connection_id,
+              dataset.active AS clean_dataset_active,
+              connection.status AS clean_connection_status,
+              connection.active AS clean_connection_active
+       FROM meta_datasets dataset
+       JOIN meta_connections connection
+         ON connection.tenant_id = dataset.tenant_id
+        AND connection.id = dataset.meta_connection_id
+       WHERE dataset.tenant_id = $1 AND dataset.dataset_id = $2
+       LIMIT 1`,
+      [tenantId(), safeDatasetId],
+    );
+    const dataset = datasetResult.rows[0];
+    if (
+      !dataset?.clean_meta_dataset_id ||
+      dataset.clean_dataset_value !== safeDatasetId ||
+      dataset.clean_dataset_active !== true ||
+      dataset.clean_connection_active !== true ||
+      dataset.clean_connection_status !== 'VALID' ||
+      lead.meta_connection_id !== dataset.clean_meta_connection_id
+    ) {
+      throw new Error('META_CLEAN_DATASET_NOT_ACTIVE_FOR_LEAD');
+    }
+
+    const confirmation = await client.query(
+      `SELECT * FROM wa2_current_label_confirmations
+       WHERE tenant_id = $1 AND id = $2 AND lead_id = $3
+         AND result = 'STAGE_ALIGNED'
+         AND resulting_stage = 'QUALIFIED'
+       FOR SHARE`,
+      [tenantId(), safeConfirmationId, safeLeadId],
+    );
+    if (!confirmation.rows[0]) throw new Error('META_CLEAN_CONFIRMATION_NOT_FOUND');
+    if (new Date(confirmation.rows[0].observed_at).getTime() !== observedAt.getTime()) {
+      throw new Error('META_CLEAN_CONFIRMATION_TIME_MISMATCH');
+    }
+
+    const validMql = await client.query(
+      `SELECT id FROM meta_conversion_events
+       WHERE tenant_id = $1 AND lead_id = $2
+         AND event_name = 'Marketing Qualified Lead'
+         AND validity_status = 'VALID'
+       LIMIT 1`,
+      [tenantId(), safeLeadId],
+    );
+    if (validMql.rows[0]) throw new Error('META_CLEAN_VALID_MQL_ALREADY_EXISTS');
+
+    if (dryRun) {
+      await client.query('ROLLBACK');
+      return {
+        dryRun: true,
+        writes: 0,
+        event: null,
+        job: null,
+        confirmation,
+      };
+    }
+
+    const event = await createOrGetMetaEvent(client, {
+      lead: {
+        ...lead,
+        meta_connection_id: dataset.clean_meta_connection_id,
+        dataset_id: safeDatasetId,
+      },
+      eventName: 'Marketing Qualified Lead',
+      eventTime: observedAt,
+      mode: 'live',
+      occurrenceKey: `meta-clean-canary:${safeConfirmationId}:${safeDatasetId}:${safeLeadId}:mql:v1`,
+    });
+    if (!event) throw new Error('META_CLEAN_EVENT_NOT_CREATED');
+    const jobCreated = await enqueueConversionJob(client, event);
+    const jobResult = await client.query(
+      `SELECT * FROM meta_jobs
+       WHERE tenant_id = $1 AND dedupe_key = $2
+       LIMIT 1`,
+      [tenantId(), `conversion:${event.event_id}`],
+    );
+    await client.query('COMMIT');
+    return {
+      dryRun: false,
+      writes: (event.status === 'PENDING' ? 1 : 0) + (jobCreated ? 1 : 0),
+      event,
+      job: jobResult.rows[0] || null,
+      jobCreated,
+      confirmation: confirmation.rows[0],
+    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function ensureMetaEventForStage(

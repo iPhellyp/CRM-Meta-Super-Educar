@@ -2,6 +2,12 @@ import crypto from 'node:crypto';
 import { upsertLead } from './db.js';
 import { normalizeBrazilianPhone } from './phone.js';
 import { decryptSecret } from './secret-crypto.js';
+import {
+  assertMetaCleanConfig,
+  META_CLEAN_DATASET_ID,
+  META_LEGACY_DATASET_ID,
+  readMetaCleanConfig,
+} from './meta-clean-config.js';
 
 const TEMPORARY_META_CODES = new Set([1, 2, 4, 17, 32, 341, 613]);
 
@@ -402,10 +408,13 @@ export async function sendMetaConversion(event) {
   ) {
     throw new MetaGraphError('Conexão ou dataset de origem do lead está indisponível');
   }
-  const datasetId = event.dataset_id || process.env.META_DATASET_ID;
-  const accessToken = event.encrypted_access_token
-    ? decryptSecret(event.encrypted_access_token)
-    : process.env.META_CAPI_ACCESS_TOKEN;
+  const eventDatasetId = String(event.dataset_id || '').trim();
+  if (!eventDatasetId || eventDatasetId === META_LEGACY_DATASET_ID || eventDatasetId !== META_CLEAN_DATASET_ID) {
+    throw new MetaGraphError('Dataset Meta não permitido para realtime');
+  }
+  const cleanConfig = assertMetaCleanConfig(readMetaCleanConfig(), { requireOutbound: true });
+  const datasetId = cleanConfig.datasetId;
+  const accessToken = cleanConfig.accessToken;
   if (!datasetId || !accessToken) {
     throw new MetaGraphError('META_DATASET_ID ou META_CAPI_ACCESS_TOKEN não configurado');
   }
@@ -452,6 +461,32 @@ export async function sendMetaConversion(event) {
     method: 'POST',
     body,
     token: accessToken,
+  });
+}
+
+export async function sendMetaCleanCanary(event) {
+  if (event?.event_name !== 'Marketing Qualified Lead') {
+    throw new MetaGraphError('Canário Meta permite somente Marketing Qualified Lead');
+  }
+  if (String(event?.dataset_id || '') !== META_CLEAN_DATASET_ID) {
+    throw new MetaGraphError('Canário Meta exige dataset limpo');
+  }
+  const cleanConfig = assertMetaCleanConfig(readMetaCleanConfig());
+  const metaEvent = {
+    event_name: event.event_name,
+    event_time: Math.floor(new Date(event.event_time).getTime() / 1000),
+    event_id: event.event_id,
+    action_source: 'system_generated',
+    custom_data: {
+      event_source: 'crm',
+      lead_event_source: process.env.META_LEAD_EVENT_SOURCE || 'CRM Super Educar',
+    },
+    user_data: { lead_id: String(event.meta_lead_id) },
+  };
+  return graphRequest(`${META_CLEAN_DATASET_ID}/events`, {
+    method: 'POST',
+    body: { data: [metaEvent] },
+    token: cleanConfig.accessToken,
   });
 }
 

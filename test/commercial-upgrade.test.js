@@ -156,8 +156,10 @@ test('evento Meta usa conexão e dataset da origem, sem cruzar BM', async () => 
   assert.match(database, /connection\.id = \$2/);
   assert.match(database, /l\.meta_connection_id AS lead_meta_connection_id/);
   assert.match(meta, /event\.lead_meta_connection_id[\s\S]*!event\.meta_connection_id[\s\S]*!event\.meta_dataset_id/);
-  assert.match(meta, /event\.dataset_id \|\| process\.env\.META_DATASET_ID/);
-  assert.match(meta, /decryptSecret\(event\.encrypted_access_token\)/);
+  assert.match(meta, /eventDatasetId !== META_CLEAN_DATASET_ID/);
+  assert.match(meta, /assertMetaCleanConfig\(readMetaCleanConfig\(\), \{ requireOutbound: true \}\)/);
+  assert.doesNotMatch(meta, /event\.dataset_id \|\| process\.env\.META_DATASET_ID/);
+  assert.doesNotMatch(meta, /decryptSecret\(event\.encrypted_access_token\)/);
   assert.match(database, /WHERE e\.id = \$1 AND e\.tenant_id = \$2 AND l\.tenant_id = \$2/);
 });
 

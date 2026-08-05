@@ -99,18 +99,7 @@ async function loadSnapshot({ allowAligned = false } = {}) {
     fail('CURRENT_OFFICIAL_LABEL_NOT_EXCLUSIVE');
   }
 
-  const feed = await listWa2LabelEvents({ limit: 200 });
-  const matches = feed.events.filter((event) => (
-    event.eventId === EXPECTED_APPLY_EVENT_ID &&
-    event.instanceId === instance.remote_instance_id &&
-    event.chatId === EXPECTED_CURRENT_CHAT_ID &&
-    event.waLabelId === REMOTE_LABEL_ID &&
-    event.operation === 'APPLY' &&
-    event.source === 'WHATSAPP' &&
-    event.eligibleForCrm === true
-  ));
-  if (matches.length !== 1) fail('APPLY_EVENT_NOT_UNIQUE');
-  const event = matches[0];
+  const event = await findExpectedApplyEvent(instance.remote_instance_id);
   if (resolved.contact.phoneNormalized !== identity.canonicalE164) fail('PN_CANONICAL_MISMATCH');
 
   return {
@@ -154,6 +143,30 @@ function identityEvidence(snapshot) {
     observedAt: snapshot.event.observedAt,
     lidJid: snapshot.resolved.chat.jid,
   };
+}
+
+async function findExpectedApplyEvent(instanceRemoteId) {
+  let after = null;
+  let pages = 0;
+  const matches = [];
+  while (pages < 100) {
+    const page = await listWa2LabelEvents({ after, limit: 200 });
+    matches.push(...page.events.filter((event) => (
+      event.eventId === EXPECTED_APPLY_EVENT_ID &&
+      event.instanceId === instanceRemoteId &&
+      event.chatId === EXPECTED_CURRENT_CHAT_ID &&
+      event.waLabelId === REMOTE_LABEL_ID &&
+      event.operation === 'APPLY' &&
+      event.source === 'WHATSAPP' &&
+      event.eligibleForCrm === true
+    )));
+    if (matches.length > 1) fail('APPLY_EVENT_NOT_UNIQUE');
+    if (!page.hasMore || !page.nextCursor) break;
+    after = page.nextCursor;
+    pages += 1;
+  }
+  if (matches.length !== 1) fail('APPLY_EVENT_NOT_UNIQUE');
+  return matches[0];
 }
 
 async function execute(mode) {

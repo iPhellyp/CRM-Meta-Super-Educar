@@ -531,3 +531,170 @@ export function publicLeadFileImportError(error) {
     details: {},
   };
 }
+
+const UNIVC_HEADER_ALIASES = Object.freeze({
+  id: 'id',
+  created_time: 'created_time',
+  ad_id: 'ad_id',
+  ad_name: 'ad_name',
+  adset_id: 'adset_id',
+  adset_name: 'adset_name',
+  campaign_id: 'campaign_id',
+  campaign_name: 'campaign_name',
+  form_id: 'form_id',
+  form_name: 'form_name',
+  is_organic: 'is_organic',
+  platform: 'platform',
+  lead_status: 'lead_status',
+  nome: 'nome',
+  nome_completo: 'nome',
+  full_name: 'nome',
+  whatsapp: 'whatsapp',
+  whatsapp_number: 'whatsapp',
+  numero_do_whatsapp: 'whatsapp',
+  telefone: 'whatsapp',
+  phone_number: 'whatsapp',
+  email: 'email',
+  cidade: 'city',
+  city: 'city',
+  curso: 'course',
+  course: 'course',
+});
+
+function univcHeaderKey(value) {
+  return normalizedHeader(value)
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .replace(/[:?]+$/u, '')
+    .replace(/[^\p{L}\p{N}]+/gu, '_')
+    .replace(/^_+|_+$/gu, '');
+}
+
+function univcSafeValue(cell, header) {
+  const value = cellText(cell);
+  if (value === '' || value === null || value === undefined) return '';
+  if (cell?.f || (cell?.l && !/^mailto:[^\s<>{}]+$/iu.test(String(cell.l.Target || '')))) {
+    throw new LeadFileImportError('UNSAFE_WORKBOOK', 'Fórmulas e hyperlinks externos não são aceitos.');
+  }
+  const text = String(value).normalize('NFKC').trim();
+  if (INVISIBLE.test(text) || text.length > 2000) {
+    throw new LeadFileImportError('INVALID_VALUE', `Valor inválido na coluna ${header}.`);
+  }
+  return text;
+}
+
+function univcId(value) {
+  const normalized = String(value || '').trim().replace(/^[A-Za-z]{1,16}:/u, '');
+  return /^[A-Za-z0-9_-]{1,128}$/.test(normalized) ? normalized : '';
+}
+
+function univcColumns(sheet, dimensions) {
+  const columns = new Map();
+  const priorities = new Map();
+  for (let column = dimensions.range.s.c; column <= dimensions.range.e.c; column += 1) {
+    const original = String(cellText(cellAt(sheet, dimensions.range.s.r, column)) || '').trim();
+    const key = UNIVC_HEADER_ALIASES[univcHeaderKey(original)];
+    if (!key) continue;
+    const priority = univcHeaderKey(original) === key ? 0 : 1;
+    if (!columns.has(key) || priority < priorities.get(key)) {
+      columns.set(key, column);
+      priorities.set(key, priority);
+    }
+  }
+  if (!columns.has('id')) {
+    throw new LeadFileImportError('MISSING_REQUIRED_HEADERS', 'O cabeçalho id é obrigatório.');
+  }
+  return columns;
+}
+
+function parseUnivcSheet(sheet, sheetName) {
+  const dimensions = sheetDimensions(sheet);
+  if (!dimensions || dimensions.rows < 2) return [];
+  if (dimensions.columns > LEAD_FILE_LIMITS.columns || dimensions.rows - 1 > LEAD_FILE_LIMITS.rows) {
+    throw new LeadFileImportError('WORKBOOK_LIMIT_EXCEEDED', 'A planilha excede os limites seguros de importação.');
+  }
+  const columns = univcColumns(sheet, dimensions);
+  const rows = [];
+  for (let rowNumber = dimensions.range.s.r + 1; rowNumber <= dimensions.range.e.r; rowNumber += 1) {
+    const rawMeta = {};
+    for (let column = dimensions.range.s.c; column <= dimensions.range.e.c; column += 1) {
+      const original = String(cellText(cellAt(sheet, dimensions.range.s.r, column)) || '').trim();
+      if (!original) continue;
+      rawMeta[original.slice(0, 200)] = univcSafeValue(cellAt(sheet, rowNumber, column), original);
+    }
+    const read = (key) => (columns.has(key)
+      ? univcSafeValue(cellAt(sheet, rowNumber, columns.get(key)), key)
+      : '');
+    const metaLeadId = univcId(read('id'));
+    const sourceName = read('nome');
+    const name = sourceName || 'Lead Meta';
+    if (!metaLeadId && !name && Object.keys(rawMeta).length === 0) continue;
+    const errors = [];
+    if (!metaLeadId) errors.push('ID_INVALID');
+    if (!sourceName) errors.push('NAME_MISSING');
+    const createdText = read('created_time');
+    const metaCreatedAt = parseLeadCreatedTime(createdText);
+    if (createdText && !metaCreatedAt) errors.push('CREATED_TIME_INVALID');
+    const phone = read('whatsapp');
+    const phoneIdentity = classifyBrazilianPhone(phone);
+    if (phoneIdentity.status === PHONE_CLASSIFICATIONS.PHONE_EMPTY) errors.push('PHONE_MISSING');
+    else if (phoneIdentity.status !== PHONE_CLASSIFICATIONS.VALID) errors.push('PHONE_INVALID');
+    const formId = univcId(read('form_id'));
+    if (!formId) errors.push('FORM_ID_INVALID');
+    rows.push({
+      rowNumber: rowNumber + 1,
+      sheetName,
+      metaLeadId,
+      name,
+      email: read('email') || null,
+      phone,
+      phoneNormalized: phoneIdentity.phoneNormalized,
+      metaCreatedAt,
+      metaAdId: univcId(read('ad_id')) || null,
+      metaAdsetId: univcId(read('adset_id')) || null,
+      metaCampaignId: univcId(read('campaign_id')) || null,
+      metaFormId: formId || null,
+      course: read('course') || null,
+      city: read('city') || null,
+      rawMeta,
+      errors: [...new Set(errors)],
+    });
+  }
+  return rows;
+}
+
+function assertUnivcWorkbookSafe(workbook) {
+  for (const sheetName of workbook.SheetNames) {
+    for (const [address, cell] of Object.entries(workbook.Sheets[sheetName] || {})) {
+      if (address.startsWith('!')) continue;
+      if (cell?.f) throw new LeadFileImportError('UNSAFE_WORKBOOK', 'Fórmulas não são aceitas.');
+      if (cell?.l && !/^mailto:[^\s<>{}]+$/iu.test(String(cell.l.Target || ''))) {
+        throw new LeadFileImportError('UNSAFE_WORKBOOK', 'Hyperlinks externos não são aceitos.');
+      }
+    }
+  }
+  if (workbook.Workbook?.Names?.some((item) => /\[[^\]]+\]/.test(String(item.Ref || '')))) {
+    throw new LeadFileImportError('UNSAFE_WORKBOOK', 'Vínculos externos não são aceitos.');
+  }
+}
+
+export function parseUnivcSpreadsheet(buffer, originalName) {
+  const filename = sanitizeLeadImportFilename(originalName);
+  const declaredFormat = fileFormat(filename);
+  validateSignature(buffer, declaredFormat);
+  const detection = detectLeadFileContent(buffer);
+  validateDetectedFileSafety(buffer, detection);
+  const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+  const workbook = readWorkbook(buffer, detection);
+  assertUnivcWorkbookSafe(workbook);
+  const rows = relevantSheets(workbook)
+    .flatMap((sheetName) => parseUnivcSheet(workbook.Sheets[sheetName], sheetName));
+  if (!rows.length) throw new LeadFileImportError('EMPTY_FILE', 'O arquivo não possui leads.');
+  return {
+    filename,
+    format: declaredFormat,
+    sha256,
+    rows,
+    sheets: relevantSheets(workbook),
+  };
+}

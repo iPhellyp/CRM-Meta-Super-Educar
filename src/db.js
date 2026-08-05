@@ -682,13 +682,10 @@ export async function upsertLead(input, { client = pool } = {}) {
         END,
         email = COALESCE(NULLIF(EXCLUDED.email, ''), leads.email),
         phone = CASE
-          WHEN EXCLUDED.phone_normalized IS NOT NULL THEN EXCLUDED.phone
+          WHEN NULLIF(BTRIM(leads.phone), '') IS NULL THEN EXCLUDED.phone
           ELSE leads.phone
         END,
-        phone_normalized = CASE
-          WHEN EXCLUDED.phone_normalized IS NOT NULL THEN EXCLUDED.phone_normalized
-          ELSE leads.phone_normalized
-        END,
+        phone_normalized = COALESCE(leads.phone_normalized, EXCLUDED.phone_normalized),
         course = COALESCE(NULLIF(EXCLUDED.course, ''), leads.course),
         city = COALESCE(NULLIF(EXCLUDED.city, ''), leads.city),
         meta_page_id = COALESCE(NULLIF(EXCLUDED.meta_page_id, ''), leads.meta_page_id),
@@ -703,7 +700,7 @@ export async function upsertLead(input, { client = pool } = {}) {
         source_created_at = COALESCE(EXCLUDED.source_created_at, leads.source_created_at),
         meta_created_at = COALESCE(EXCLUDED.meta_created_at, leads.meta_created_at),
         received_at = COALESCE(leads.received_at, EXCLUDED.received_at),
-        raw_meta = COALESCE(EXCLUDED.raw_meta, leads.raw_meta),
+        raw_meta = COALESCE(leads.raw_meta, '{}'::jsonb) || COALESCE(EXCLUDED.raw_meta, '{}'::jsonb),
         updated_at = now()
       RETURNING *, (xmax = 0) AS was_inserted`,
       [
@@ -1053,6 +1050,247 @@ export async function confirmLeadFileImport(importId, actor) {
       ...completed.rows[0],
       counts: leadFileImportSummary(completed.rows[0]),
       idempotent: false,
+    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+const OWNER_CONFIRMED_SPREADSHEET_SOURCE = 'SPREADSHEET_IMPORT_2026';
+
+export async function importSpreadsheetLeads({
+  parsedFile,
+  actor = 'admin:spreadsheet-import',
+  businessId,
+  datasetId,
+  connectionName,
+  allowlist,
+}) {
+  if (!parsedFile?.rows?.length) throw new Error('SPREADSHEET_EMPTY');
+  const currentTenantId = tenantId();
+  const safeActorValue = safeActor(actor) || 'admin:spreadsheet-import';
+  const rows = parsedFile.rows;
+  const metaLeadIds = rows.map((row) => row.metaLeadId).filter(Boolean);
+  if (new Set(metaLeadIds).size !== rows.length) throw new Error('DUPLICATE_META_LEAD_ID');
+  const routing = allowlist || {};
+  for (const row of rows) {
+    const route = routing[String(row.metaFormId || '')];
+    if (!route) throw new Error(`FORM_NOT_ALLOWLISTED:${row.metaFormId || 'missing'}`);
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existingImport = await client.query(
+      `SELECT * FROM lead_file_imports
+       WHERE tenant_id = $1 AND sha256 = $2 AND sheet_name = 'ALL_SHEETS'
+         AND status IN ('PREVIEW', 'PROCESSING', 'COMPLETED')
+       FOR UPDATE`,
+      [currentTenantId, parsedFile.sha256],
+    );
+    if (existingImport.rows[0]) {
+      await client.query('COMMIT');
+      return { idempotent: true, import: existingImport.rows[0] };
+    }
+
+    const connectionResult = await client.query(
+      `SELECT connection.id
+       FROM meta_connections connection
+       JOIN meta_datasets dataset
+         ON dataset.tenant_id = connection.tenant_id
+        AND dataset.meta_connection_id = connection.id
+       WHERE connection.tenant_id = $1
+         AND connection.name = $2
+         AND connection.business_id = $3
+         AND connection.active = true
+         AND connection.status = 'VALID'
+         AND dataset.dataset_id = $4
+         AND dataset.active = true
+       ORDER BY connection.created_at
+       LIMIT 2`,
+      [currentTenantId, connectionName, String(businessId), String(datasetId)],
+    );
+    if (connectionResult.rowCount !== 1) throw new Error('ROUTING_CONNECTION_NOT_UNIQUE');
+    const connectionId = connectionResult.rows[0].id;
+
+    const existingResult = await client.query(
+      `SELECT id, meta_lead_id, phone_normalized, whatsapp_normalized
+       FROM leads
+       WHERE tenant_id = $1 AND meta_lead_id = ANY($2::text[])
+       FOR UPDATE`,
+      [currentTenantId, metaLeadIds],
+    );
+    const existingByMeta = new Map(existingResult.rows.map((row) => [row.meta_lead_id, row]));
+    const validPhones = rows.map((row) => row.phoneNormalized).filter(Boolean);
+    const existingPhoneResult = validPhones.length
+      ? await client.query(
+        `SELECT id, meta_lead_id, phone_normalized, whatsapp_normalized
+         FROM leads
+         WHERE tenant_id = $1
+           AND (phone_normalized = ANY($2::text[]) OR whatsapp_normalized = ANY($2::text[]))
+         FOR UPDATE`,
+        [currentTenantId, [...new Set(validPhones)]],
+      )
+      : { rows: [] };
+    const phoneGroups = new Map();
+    for (const row of rows) {
+      if (row.phoneNormalized) phoneGroups.set(
+        row.phoneNormalized,
+        (phoneGroups.get(row.phoneNormalized) || 0) + 1,
+      );
+    }
+    const existingByPhone = new Map();
+    for (const row of existingPhoneResult.rows) {
+      const phone = row.phone_normalized || row.whatsapp_normalized;
+      if (phone) {
+        const bucket = existingByPhone.get(phone) || [];
+        bucket.push(row);
+        existingByPhone.set(phone, bucket);
+      }
+    }
+    const classifications = rows.map((row) => {
+      const existing = existingByMeta.get(row.metaLeadId) || null;
+      const otherExistingPhone = (existingByPhone.get(row.phoneNormalized) || [])
+        .some((candidate) => candidate.meta_lead_id !== row.metaLeadId);
+      const possibleDuplicate = Boolean(
+        row.phoneNormalized && ((phoneGroups.get(row.phoneNormalized) || 0) > 1 || otherExistingPhone),
+      );
+      const phoneStatus = row.errors.includes('PHONE_MISSING')
+        ? 'PHONE_MISSING'
+        : row.errors.includes('PHONE_INVALID')
+          ? 'PHONE_INVALID'
+          : possibleDuplicate ? 'POSSIBLE_PHONE_DUPLICATE' : null;
+      return { row, existing, decision: existing ? 'UPDATE' : 'NEW', possibleDuplicate, phoneStatus };
+    });
+    const counts = classifications.reduce((summary, item) => {
+      summary.total += 1;
+      summary[item.decision === 'NEW' ? 'new' : 'update'] += 1;
+      if (item.possibleDuplicate) summary.possibleDuplicate += 1;
+      if (item.phoneStatus === 'PHONE_MISSING' || item.phoneStatus === 'PHONE_INVALID') summary.invalid += 1;
+      return summary;
+    }, { total: 0, new: 0, update: 0, possibleDuplicate: 0, invalid: 0 });
+    const importResult = await client.query(
+      `INSERT INTO lead_file_imports (
+         tenant_id, status, original_filename, sha256, format, sheet_name,
+         total_count, new_count, update_count, possible_duplicate_count,
+         invalid_count, created_by, summary, confirmed_at
+       ) VALUES ($1,'PROCESSING',$2,$3,$4,'ALL_SHEETS',$5,$6,$7,$8,$9,$10,$11,now())
+       RETURNING *`,
+      [
+        currentTenantId, parsedFile.filename, parsedFile.sha256, parsedFile.format,
+        counts.total, counts.new, counts.update, counts.possibleDuplicate, counts.invalid,
+        safeActorValue, serializeJsonb({ ...counts, source: OWNER_CONFIRMED_SPREADSHEET_SOURCE }, {}),
+      ],
+    );
+    const importId = importResult.rows[0].id;
+    const appliedLeads = [];
+    for (let index = 0; index < classifications.length; index += 1) {
+      const { row, decision, phoneStatus } = classifications[index];
+      const route = routing[String(row.metaFormId)];
+      const rawMeta = { ...(row.rawMeta || {}), _sheet_name: row.sheetName || '' };
+      const itemResult = await client.query(
+        `INSERT INTO lead_file_import_items (
+           tenant_id, import_id, row_number, meta_lead_id, name, phone,
+           phone_normalized, meta_created_at, meta_ad_id, meta_adset_id,
+           meta_campaign_id, meta_form_id, raw_meta, decision, errors,
+           existing_lead_id
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+         RETURNING id`,
+        [
+          currentTenantId, importId, index + 2, row.metaLeadId, row.name || null,
+          row.phone || null, row.phoneNormalized || null, row.metaCreatedAt || null,
+          row.metaAdId, row.metaAdsetId, row.metaCampaignId, row.metaFormId,
+          serializeJsonb(rawMeta, {}), decision,
+          serializeJsonb([...new Set([...(row.errors || []), ...(phoneStatus ? [phoneStatus] : []),
+            ...(classifications[index].possibleDuplicate ? ['POSSIBLE_PHONE_DUPLICATE'] : [])])], []),
+          classifications[index].existing?.id || null,
+        ],
+      );
+      const lead = await upsertLead({
+        tenantId: currentTenantId,
+        name: row.name || 'Lead Meta',
+        email: row.email,
+        phone: row.phone || null,
+        phoneNormalized: row.phoneNormalized,
+        course: row.course,
+        city: row.city,
+        source: 'META_INSTANT_FORM',
+        stage: 'NEW',
+        metaLeadId: row.metaLeadId,
+        metaPageId: route.pageId || null,
+        metaFormId: row.metaFormId,
+        metaAdId: row.metaAdId,
+        metaAdsetId: row.metaAdsetId,
+        metaCampaignId: row.metaCampaignId,
+        metaCreatedAt: row.metaCreatedAt,
+        sourceCreatedAt: row.metaCreatedAt,
+        rawMeta,
+        metaConnectionId: connectionId,
+        businessId: String(businessId),
+        datasetId: String(datasetId),
+      }, { client });
+      appliedLeads.push(lead.id);
+      await client.query(
+        `UPDATE lead_file_import_items
+         SET applied_lead_id = $3, applied_at = now()
+         WHERE tenant_id = $1 AND id = $2`,
+        [currentTenantId, itemResult.rows[0].id, lead.id],
+      );
+    }
+
+    const armedAt = new Date();
+    for (let index = 0; index < classifications.length; index += 1) {
+      const { row, phoneStatus } = classifications[index];
+      const route = routing[String(row.metaFormId)];
+      const leadId = appliedLeads[index];
+      await client.query(
+        `UPDATE leads
+         SET awaiting_manual_reclassification = true,
+             reclassification_armed_at = $3,
+             reclassification_source = $4,
+             routing_source = $5,
+             import_phone_status = $6,
+             updated_at = now()
+         WHERE tenant_id = $1 AND id = $2`,
+        [currentTenantId, leadId, armedAt, OWNER_CONFIRMED_SPREADSHEET_SOURCE,
+          route.routingSource || 'OWNER_CONFIRMED_FORM_MAPPING', phoneStatus],
+      );
+      await client.query(
+        `INSERT INTO lead_reclassification_audits (
+           tenant_id, lead_id, import_id, armed_at, source, marked_by, metadata
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (tenant_id, lead_id, import_id) DO NOTHING`,
+        [currentTenantId, leadId, importId, armedAt, OWNER_CONFIRMED_SPREADSHEET_SOURCE,
+          safeActorValue, { metaLeadId: classifications[index].row.metaLeadId }],
+      );
+    }
+    const summary = {
+      ...counts,
+      applied: appliedLeads.length,
+      armedAt: armedAt.toISOString(),
+      routingSource: 'OWNER_CONFIRMED_FORM_MAPPING',
+      graphPosts: 0,
+      metaEvents: 0,
+      metaJobs: 0,
+    };
+    const completed = await client.query(
+      `UPDATE lead_file_imports
+       SET status = 'COMPLETED', applied_count = $3, completed_at = $4,
+           summary = $5
+       WHERE tenant_id = $1 AND id = $2
+       RETURNING *`,
+      [currentTenantId, importId, appliedLeads.length, armedAt, serializeJsonb(summary, {})],
+    );
+    await client.query('COMMIT');
+    return {
+      idempotent: false,
+      import: completed.rows[0],
+      counts: summary,
+      armedAt,
+      appliedLeadIds: appliedLeads,
     };
   } catch (error) {
     await client.query('ROLLBACK');
@@ -5899,6 +6137,171 @@ export async function claimWa2LabelEventCursor() {
   return result.rows[0] || null;
 }
 
+async function resolveSpreadsheetReclassification(client, { instance, event }) {
+  if (
+    !instance || event.source !== 'WHATSAPP' || event.operation !== 'APPLY' ||
+    event.eligibleForCrm !== true || !event.phoneNormalized
+  ) return { lead: null, pending: null, conflictCode: null };
+  const identity = getBrazilianPhoneIdentity(event.phoneNormalized, { confirmedMobile: true });
+  if (!identity.canonicalE164 || !['BR_MOBILE_CANONICAL', 'BR_MOBILE_LEGACY'].includes(identity.classification)) {
+    return { lead: null, pending: null, conflictCode: 'PHONE_IDENTITY_UNRESOLVED' };
+  }
+  const observedAt = new Date(event.observedAt);
+  if (!Number.isFinite(observedAt.getTime())) return { lead: null, pending: null, conflictCode: 'OBSERVED_AT_INVALID' };
+  const candidatesResult = await client.query(
+    `SELECT lead.*
+     FROM leads lead
+     WHERE lead.tenant_id = $1
+       AND lead.awaiting_manual_reclassification = true
+       AND lead.reclassification_armed_at IS NOT NULL
+       AND lead.reclassification_armed_at < $2
+       AND lead.meta_lead_id IS NOT NULL
+       AND lead.meta_connection_id IS NOT NULL
+       AND lead.dataset_id = $3
+       AND lead.is_internal_test = false
+       AND lead.meta_outbound_eligible = true
+       AND COALESCE(lead.import_phone_status, '') NOT IN ('PHONE_INVALID', 'PHONE_MISSING')
+       AND (lead.phone_normalized = ANY($4::text[]) OR lead.whatsapp_normalized = ANY($4::text[]))
+     FOR UPDATE` ,
+    [tenantId(), observedAt, String(META_CLEAN_DATASET_ID), identity.aliases],
+  );
+  if (candidatesResult.rowCount === 0) return { lead: null, pending: null, conflictCode: 'NO_MATCH' };
+  if (candidatesResult.rowCount !== 1) return { lead: null, pending: null, conflictCode: 'MULTIPLE_LEAD_MATCHES' };
+  const lead = candidatesResult.rows[0];
+  const otherLeadResult = await client.query(
+    `SELECT id FROM leads
+     WHERE tenant_id = $1 AND id <> $2
+       AND (phone_normalized = ANY($3::text[]) OR whatsapp_normalized = ANY($3::text[]))
+     FOR UPDATE`,
+    [tenantId(), lead.id, identity.aliases],
+  );
+  if (otherLeadResult.rowCount > 0) {
+    return { lead: null, pending: null, conflictCode: 'MULTIPLE_LEAD_MATCHES' };
+  }
+  const activeLinks = await client.query(
+    `SELECT id FROM wa2_contact_links
+     WHERE tenant_id = $1 AND lead_id = $2 AND unlinked_at IS NULL
+     FOR UPDATE`,
+    [tenantId(), lead.id],
+  );
+  if (activeLinks.rowCount > 0) return { lead: null, pending: null, conflictCode: 'LEAD_ALREADY_LINKED' };
+  const phoneJid = String(event.phoneJid || '').trim().toLowerCase() ||
+    (/^\d+@(s\.whatsapp\.net|c\.us)$/i.test(String(event.jid || ''))
+      ? String(event.jid).toLowerCase()
+      : `${identity.canonicalE164}@s.whatsapp.net`);
+  const lidJid = event.lidJid || (/^[a-z0-9._:-]+@lid$/i.test(String(event.jid || '')) ? String(event.jid).toLowerCase() : null);
+  const identityConflict = await client.query(
+    `SELECT lead_id FROM lead_verified_whatsapp_identities
+     WHERE tenant_id = $1 AND wa2_instance_id = $2
+       AND (canonical_phone = $3 OR phone_jid = $4 OR ($5::text IS NOT NULL AND lid_jid = $5))
+       AND lead_id <> $6
+     FOR UPDATE`,
+    [tenantId(), instance.id, identity.canonicalE164, phoneJid, lidJid, lead.id],
+  );
+  if (identityConflict.rowCount > 0) return { lead: null, pending: null, conflictCode: 'WA_IDENTITY_CONFLICT' };
+  return {
+    lead: { id: lead.id, stage: lead.stage, meta_lead_id: lead.meta_lead_id, awaiting_manual_reclassification: true },
+    pending: {
+      leadId: lead.id,
+      canonicalPhone: identity.canonicalE164,
+      sourcePhone: String(event.phoneNormalized),
+      observedAt: event.observedAt,
+      eventId: event.eventId,
+      remoteContactId: event.remoteContactId || phoneJid,
+      remoteChatId: event.chatId,
+      phoneJid,
+      lidJid,
+      chatJid: event.chatJid || lidJid || event.jid || null,
+    },
+    conflictCode: null,
+  };
+}
+
+async function createSpreadsheetReclassificationLink(client, { instance, pending }) {
+  const resolved = {
+    contact: { id: pending.remoteContactId, jid: pending.phoneJid, phoneNormalized: pending.canonicalPhone },
+    chat: { id: pending.remoteChatId, jid: pending.chatJid },
+  };
+  await ensureNoActiveWa2LinkConflict(client, {
+    leadId: pending.leadId,
+    instanceId: instance.id,
+    remoteChatId: pending.remoteChatId,
+  });
+  const link = await insertWa2ContactLink(client, {
+    leadId: pending.leadId,
+    instanceId: instance.id,
+    expectedPhoneNormalized: pending.canonicalPhone,
+    resolved,
+    actor: 'system:spreadsheet-reclassification',
+  });
+  const identityReference = deterministicEvidenceReference({
+    evidenceType: 'WA2_CONTACT_STATE',
+    tenantIdValue: tenantId(),
+    instanceId: instance.id,
+    chatId: pending.remoteChatId,
+    contactId: pending.remoteContactId,
+    phoneJid: pending.phoneJid,
+    lidJid: pending.lidJid,
+    observedAt: new Date(pending.observedAt),
+    evidenceReference: pending.eventId,
+  });
+  const existingIdentity = await client.query(
+    `SELECT * FROM lead_verified_whatsapp_identities
+     WHERE tenant_id = $1 AND lead_id = $2 AND wa2_instance_id = $3
+       AND canonical_phone = $4
+     FOR UPDATE`,
+    [tenantId(), pending.leadId, instance.id, pending.canonicalPhone],
+  );
+  if (existingIdentity.rowCount > 0) {
+    const current = existingIdentity.rows[0];
+    if (
+      current.remote_chat_id !== pending.remoteChatId ||
+      current.remote_contact_id !== pending.remoteContactId ||
+      current.phone_jid !== pending.phoneJid ||
+      current.lid_jid !== pending.lidJid
+    ) throw new Wa2DataError('Identidade WA2 divergente', 'WA2_IDENTITY_CONFLICT');
+  } else {
+    await client.query(
+      `INSERT INTO lead_verified_whatsapp_identities (
+         tenant_id, lead_id, wa2_instance_id, canonical_phone, aliases,
+         source_phone, phone_jid, lid_jid, verification_source,
+         verification_reason, remote_contact_id, remote_chat_id,
+         evidence_wa_message_id, evidence_observed_at, verified_by,
+         evidence_type, evidence_reference
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NULL,$13,$14,'WA2_CONTACT_STATE',$15)`,
+      [
+        tenantId(), pending.leadId, instance.id, pending.canonicalPhone,
+        JSON.stringify(getBrazilianPhoneIdentity(pending.canonicalPhone, { confirmedMobile: true }).aliases),
+        pending.sourcePhone, pending.phoneJid, pending.lidJid,
+        DETERMINISTIC_IDENTITY_SOURCE, 'LABEL_AFTER_SPREADSHEET_ARMING',
+        pending.remoteContactId, pending.remoteChatId, new Date(pending.observedAt),
+        'system:spreadsheet-reclassification', identityReference,
+      ],
+    );
+    await client.query(
+      `INSERT INTO lead_stage_history (
+         tenant_id, lead_id, previous_stage, new_stage, origin,
+         observation, activity_type, metadata
+       ) SELECT tenant_id, id, stage, stage, 'SYSTEM',
+         'Identidade WA2 verificada por etiqueta após armamento da importação.',
+         'WHATSAPP_IDENTITY_VERIFIED', $3
+       FROM leads WHERE tenant_id = $1 AND id = $2`,
+      [tenantId(), pending.leadId, {
+        evidenceType: 'WA2_CONTACT_STATE',
+        evidenceReference: identityReference,
+        remoteChatId: pending.remoteChatId,
+        remoteContactId: pending.remoteContactId,
+      }],
+    );
+  }
+  await client.query(
+    `UPDATE leads SET whatsapp_normalized = $3, updated_at = now()
+     WHERE tenant_id = $1 AND id = $2`,
+    [tenantId(), pending.leadId, pending.canonicalPhone],
+  );
+  return { link, identity: existingIdentity.rows[0] || null };
+}
+
 async function completeManualStageRequestForReceipt(client, {
   leadId,
   targetStage,
@@ -5981,12 +6384,22 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
       }
     }
 
+    let pendingReclassification = null;
+    let pendingResolutionConflict = null;
+    if (!lead && instance && event.source === 'WHATSAPP' && event.operation === 'APPLY' && event.eligibleForCrm) {
+      const resolved = await resolveSpreadsheetReclassification(client, { instance, event });
+      pendingReclassification = resolved.pending;
+      pendingResolutionConflict = resolved.conflictCode;
+      if (resolved.lead) lead = resolved.lead;
+    }
     let decision;
     let eventBindingStages = [];
     let currentCrmLabelStages = [];
     let previousLabelObservedAt = null;
     if (event.source === 'WHATSAPP' && event.operation === 'APPLY' && event.eligibleForCrm) {
-      if (!instance) {
+      if (pendingResolutionConflict) {
+        decision = { action: 'CONFLICT', code: pendingResolutionConflict };
+      } else if (!instance) {
         decision = { action: 'CONFLICT', code: 'INSTANCE_NOT_CONFIGURED' };
       } else if (!lead) {
         const linkResolution = await client.query(
@@ -6054,16 +6467,24 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
         }
       }
     }
-    decision ||= decideInboundLabelAction({
-      event,
-      currentStage: lead?.stage,
-      eventBindingStages,
-      currentCrmLabelStages,
-      previousLabelObservedAt,
-      eventObservedAt: event.observedAt,
-      identityMatch: Boolean(link && instance),
-      linkMatch: Boolean(link && instance),
-    });
+    decision ||= pendingResolutionConflict
+      ? { action: 'CONFLICT', code: pendingResolutionConflict }
+      : decideInboundLabelAction({
+        event,
+        currentStage: lead?.stage,
+        eventBindingStages,
+        currentCrmLabelStages,
+        previousLabelObservedAt,
+        eventObservedAt: event.observedAt,
+        identityMatch: Boolean((link || pendingReclassification) && instance),
+        linkMatch: Boolean((link || pendingReclassification) && instance),
+      });
+    if (pendingReclassification && ['STAGE_CHANGED', 'NOOP'].includes(decision.action)) {
+      link = await createSpreadsheetReclassificationLink(client, {
+        instance,
+        pending: pendingReclassification,
+      });
+    }
     const actionResult = await client.query(
       `INSERT INTO wa2_inbound_label_actions (
          tenant_id, receipt_id, wa2_instance_id, wa2_contact_link_id,
@@ -6075,6 +6496,18 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
       ],
     );
     const action = actionResult.rows[0];
+    if (pendingReclassification && ['STAGE_CHANGED', 'NOOP'].includes(decision.action)) {
+      await client.query(
+        `UPDATE wa2_inbound_label_actions SET wa2_contact_link_id = $3
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantId(), action.id, link.id],
+      );
+      await client.query(
+        `UPDATE leads SET awaiting_manual_reclassification = false, updated_at = now()
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantId(), lead.id],
+      );
+    }
     if (decision.action === 'CONFLICT') {
       await client.query(
         `INSERT INTO wa2_label_conflicts (

@@ -81,7 +81,8 @@ test('importação reutiliza parser e upsert, preservando stage e identidade Met
     db.slice(db.indexOf('ON CONFLICT (tenant_id, meta_lead_id)'), db.indexOf('RETURNING *, (xmax')),
     /\bstage\s*=/,
   );
-  assert.match(db, /WHEN EXCLUDED\.phone_normalized IS NOT NULL THEN EXCLUDED\.phone/);
+  assert.match(db, /NULLIF\(BTRIM\(leads\.phone\), ''\) IS NULL THEN EXCLUDED\.phone/);
+  assert.match(db, /phone_normalized = COALESCE\(leads\.phone_normalized, EXCLUDED\.phone_normalized\)/);
   assert.match(db, /EXCLUDED\.name <> 'Lead Meta'/);
   assert.match(db, /meta_historical_import_items[\s\S]*ON CONFLICT \(tenant_id, import_id, meta_lead_id\)/);
 });

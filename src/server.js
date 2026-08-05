@@ -403,6 +403,10 @@ app.post('/internal/wa2/label-events', async (req, res) => {
   const schema = z.object({
     eventId: z.string().uuid(), instanceId: z.string().min(1).max(200),
     chatId: z.string().min(1).max(200), jid: z.string().min(1).max(200),
+    remoteContactId: z.string().min(1).max(200).nullable().optional(),
+    phoneJid: z.string().min(1).max(200).nullable().optional(),
+    lidJid: z.string().min(1).max(200).nullable().optional(),
+    chatJid: z.string().min(1).max(200).nullable().optional(),
     phoneNormalized: z.string().nullable().optional(), waLabelId: z.string().min(1).max(200),
     waLabelName: z.string().min(1).max(200).nullable().optional(),
     operation: z.enum(['APPLY', 'REMOVE']), source: z.enum(['WHATSAPP', 'INTERNAL_API', 'UNKNOWN']),

@@ -4804,7 +4804,7 @@ export async function auditMqlEvents({
                 AND removed.observed_at > receipt.observed_at
                 AND removed.observed_at <= event.event_time
             ) THEN receipt.remote_label_id END
-          ) FILTER (WHERE binding.stage IN ('QUALIFIED','NEGOTIATING','OPPORTUNITY','AWAITING_ENROLLMENT','AWAITING_PAYMENT')))::int
+          ) FILTER (WHERE binding.stage IN ('QUALIFIED','NEGOTIATING','OPPORTUNITY','AWAITING_ENROLLMENT','AWAITING_PAYMENT'))::int
            AS active_qualifying_label_count,
          count(receipt.id) > 0 AS any_wa_evidence,
          count(DISTINCT CASE WHEN receipt.operation = 'APPLY'

@@ -48,7 +48,9 @@ function metaStatusMarkup(lead) {
     return '<div class="meta-statuses"><span class="meta-status meta-failed">Eventos Meta bloqueados — teste interno</span></div>';
   }
   const attributable = Boolean(lead.meta_lead_id);
-  const mql = metaEventBadge('MQL', lead.mql_status, attributable);
+  const mql = lead.mql_validity === 'INVALIDATED'
+    ? '<span class="meta-status meta-failed">MQL invalidado localmente</span>'
+    : metaEventBadge('MQL', lead.mql_status, attributable);
   const opportunity = ['NEGOTIATING', 'OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT'].includes(lead.stage)
     ? metaEventBadge('Sales Opportunity', lead.opportunity_status, attributable) : '';
   return `<div class="meta-statuses">${mql}${opportunity}</div>`;
@@ -693,15 +695,39 @@ function stageActions(lead, csrfToken, returnPath = '/') {
       ${icon('stage')}<span>Sem transição disponível</span>
     </button>`;
   }
-  return `<div class="inline-stage-actions" aria-label="Ações de etapa">
+  return `<div class="inline-stage-actions" aria-label="Solicitações de etapa">
       ${actions.map(({ stage, label }) => `
-      <form method="post" action="/leads/${esc(lead.id)}/stage">
+      <form method="post" action="/leads/${esc(lead.id)}/stage-request">
       ${csrfField(csrfToken)}
       <input type="hidden" name="returnTo" value="${esc(returnPath)}">
       <input type="hidden" name="stage" value="${stage}">
-      <button class="action-button action-secondary">${esc(label)}</button>
+      <label class="sr-only" for="stage-reason-${esc(lead.id)}-${esc(stage)}">Motivo de ${esc(label)}</label>
+      <input id="stage-reason-${esc(lead.id)}-${esc(stage)}" name="reason" required minlength="5" maxlength="1000" placeholder="Motivo" class="stage-request-reason">
+      <button class="action-button action-secondary" title="Solicitar ${esc(label)}; a etapa só muda após aprovação e receipt WA2">${esc(label)}</button>
       </form>`).join('')}
     </div>`;
+}
+
+function stageTruthMarkup(lead) {
+  const sourceLabels = {
+    WHATSAPP_LABEL: 'WhatsApp',
+    MANUAL_TWO_STEP_PENDING: 'Solicitação manual pendente',
+    MANUAL_TWO_STEP_APPROVED: 'Aguardando etiqueta WhatsApp',
+    SYSTEM_PROTECTED: 'Sistema protegido',
+    LEGACY_UNVERIFIED: 'Legado não verificado',
+  };
+  const statusLabels = {
+    VERIFIED: 'verificada',
+    UNVERIFIED_LEGACY: 'não verificada',
+    UNVERIFIED_NO_LABEL: 'sem etiqueta de etapa no WhatsApp',
+    CONFLICT: 'conflito',
+    PENDING_WA_LABEL: 'aguardando confirmação WhatsApp',
+    PROTECTED: 'protegida',
+  };
+  const source = sourceLabels[lead.stage_source] || 'Legado não verificado';
+  const status = statusLabels[lead.stage_verification_status] || 'não verificada';
+  const label = lead.source_label_name || 'Sem etiqueta de etapa no WhatsApp';
+  return `<div class="stage-truth"><small>Fonte: ${esc(source)} · ${esc(status)}</small><small>Etiqueta atual: ${esc(label)}</small></div>`;
 }
 
 function moreLeadActions(lead) {
@@ -754,7 +780,7 @@ export function renderLeadRow(lead, { csrfToken = '', returnPath = '/', whatsapp
     <td data-label="Lead"><strong><a href="/leads/${esc(lead.id)}">${esc(lead.name)}</a></strong><small>${esc(lead.phone || 'Sem telefone')}${lead.email ? `<br>${esc(lead.email)}` : ''}</small></td>
     <td data-label="Curso e cidade"><strong>${esc(lead.course || 'Curso não informado')}</strong><small>${esc(lead.city || 'Cidade não informada')}</small></td>
     <td data-label="Origem e chegada"><strong>${esc(sourceLabel(lead.source))}</strong><small>${esc(arrival.date)}${arrival.time ? ` · ${esc(arrival.time)}` : ''}</small>${leadOriginDetails(lead)}</td>
-    <td data-label="Etapa"><span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span>${lead.lost_reason ? `<small>Motivo: ${esc(LOST_REASON_LABELS[lead.lost_reason] || lead.lost_reason)}</small>` : ''}</td>
+    <td data-label="Etapa"><span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span>${stageTruthMarkup(lead)}${lead.lost_reason ? `<small>Motivo: ${esc(LOST_REASON_LABELS[lead.lost_reason] || lead.lost_reason)}</small>` : ''}</td>
     <td data-label="Etiquetas"><div class="wa2-tags">${wa2Labels(lead, { compact: true })}</div>${metaStatusMarkup(lead)}</td>
     <td data-label="Ações" class="actions-cell">${leadActions(lead, csrfToken, returnPath, whatsappMessage)}</td>
   </tr>`;
@@ -763,7 +789,7 @@ export function renderLeadRow(lead, { csrfToken = '', returnPath = '/', whatsapp
 export function renderLeadCard(lead, { csrfToken = '', returnPath = '/', whatsappMessage = '' } = {}) {
   const arrival = formatArrival(lead.received_at || lead.created_at);
   return `<article class="lead-card" data-lead-id="${esc(lead.id)}" aria-labelledby="lead-card-${esc(lead.id)}">
-    <div class="lead-card-heading"><div><h3 id="lead-card-${esc(lead.id)}"><a href="/leads/${esc(lead.id)}">${esc(lead.name)}</a></h3></div><span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span></div>
+    <div class="lead-card-heading"><div><h3 id="lead-card-${esc(lead.id)}"><a href="/leads/${esc(lead.id)}">${esc(lead.name)}</a></h3>${stageTruthMarkup(lead)}</div><span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span></div>
     <dl class="lead-card-summary"><div><dt>Curso</dt><dd>${esc(lead.course || 'Não informado')}</dd></div><div><dt>Cidade</dt><dd>${esc(lead.city || 'Não informada')}</dd></div><div><dt>Origem e chegada</dt><dd>${esc(sourceLabel(lead.source))} · ${esc(arrival.date)}${arrival.time ? ` às ${esc(arrival.time)}` : ''}</dd></div><div><dt>Telefone</dt><dd>${esc(lead.phone || 'Sem telefone')}</dd></div></dl>
     <div class="wa2-tags">${wa2Labels(lead, { compact: true })}</div>${metaStatusMarkup(lead)}${leadOriginDetails(lead)}${leadActions(lead, csrfToken, returnPath, whatsappMessage)}
   </article>`;
@@ -918,6 +944,7 @@ export function dashboardView({
 export function leadDetailView({
   lead,
   history = [],
+  manualStageRequests = [],
   csrfToken = '',
 }) {
   const activityLabels = {
@@ -934,6 +961,15 @@ export function leadDetailView({
     META_EVENT_BLOCKED_INTERNAL_TEST: 'Meta bloqueado — teste interno',
     SYNC_CONFLICT: 'Conflito de sincronização',
     LOST: 'Lead perdido',
+    STAGE_SOURCE_ALIGNED: 'Etapa alinhada à etiqueta WhatsApp',
+    STAGE_SOURCE_NEUTRALIZED: 'Etapa neutralizada sem etiqueta WhatsApp',
+    STAGE_VERIFICATION_CONFLICT: 'Conflito de verificação de etapa',
+    MQL_INVALIDATED: 'MQL invalidado localmente',
+    MANUAL_STAGE_REQUESTED: 'Solicitação manual de etapa',
+    MANUAL_STAGE_APPROVED: 'Solicitação manual aprovada',
+    MANUAL_STAGE_REJECTED: 'Solicitação manual rejeitada',
+    MANUAL_STAGE_APPLIED_PENDING_WA: 'Aguardando etiqueta WhatsApp',
+    MANUAL_STAGE_COMPLETED: 'Mudança manual confirmada pelo WhatsApp',
   };
   const timeline = history.map((item) => `
     <li>
@@ -944,11 +980,18 @@ export function leadDetailView({
       ${item.observation ? `<div>${esc(item.observation)}</div>` : ''}
       ${item.meta_event_id ? `<small>Evento Meta: ${esc(item.meta_event_id)}</small>` : ''}
     </li>`).join('');
+  const requests = Array.isArray(manualStageRequests) ? manualStageRequests : [];
+  const requestMarkup = requests.length ? `<section class="panel"><div class="panel-title"><h2>Mudanças manuais em duas etapas</h2><span>${requests.length} registro(s)</span></div><div class="admin-card-list">${requests.map((request) => `
+    <article class="admin-card"><header><div><strong>${esc(STAGE_LABELS[request.current_stage] || request.current_stage)} → ${esc(STAGE_LABELS[request.requested_stage] || request.requested_stage)}</strong><small>${esc(request.requested_by)}</small></div><span class="badge ${request.status === 'COMPLETED' ? 'paid' : request.status === 'REJECTED' ? 'lost' : 'opportunity'}">${esc(request.status)}</span></header>
+      <p>${esc(request.mandatory_reason)}</p>
+      ${request.status === 'PENDING_APPROVAL' ? `<div class="actions"><form method="post" action="/stage-requests/${esc(request.id)}/approve">${csrfField(csrfToken)}<input type="hidden" name="returnTo" value="/leads/${esc(lead.id)}"><button class="success">Aprovar e aplicar etiqueta WA2</button></form><form method="post" action="/stage-requests/${esc(request.id)}/reject">${csrfField(csrfToken)}<input type="hidden" name="returnTo" value="/leads/${esc(lead.id)}"><input name="reason" required minlength="5" maxlength="1000" placeholder="Motivo da rejeição"><button class="danger">Rejeitar</button></form></div>` : ''}
+      ${request.status === 'APPROVED_PENDING_WA' || request.status === 'PENDING_WA_LINK' ? '<small>A etapa permanece inalterada até receipt oficial da etiqueta WhatsApp.</small>' : ''}
+    </article>`).join('')}</div></section>` : '';
   return layout(`Lead ${lead.name}`, `
     ${lead.is_internal_test ? `<div class="alert warning"><strong>TESTE INTERNO — EVENTOS META BLOQUEADOS</strong><br>Este lead permanece visível para validação técnica, mas não participa de MQL, Sales Opportunity, Converted, backfill ou métricas comerciais.${lead.internal_test_reason ? `<br>Motivo: ${esc(lead.internal_test_reason)}` : ''}${lead.internal_test_marked_at ? `<br>Marcado em: ${esc(formatDateTime(lead.internal_test_marked_at))}${lead.internal_test_marked_by ? ` · ${esc(lead.internal_test_marked_by)}` : ''}` : ''}</div>` : ''}
     <section class="hero">
       <div><h1>${esc(lead.name)}</h1><p>Detalhes administrativos e histórico auditável.</p></div>
-      <span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span>
+      <div><span class="badge ${esc(getStageBadgeClass(lead.stage))}">${esc(STAGE_LABELS[lead.stage] || lead.stage)}</span>${stageTruthMarkup(lead)}</div>
     </section>
     <section class="panel detail-grid">
       <div><strong>Telefone recebido</strong><span>${detailValue(lead.phone)}</span></div>
@@ -968,7 +1011,8 @@ export function leadDetailView({
       <div><strong>Instância WhatsApp</strong><span>${detailValue(lead.wa2_instance_name)}</span></div>
       <div><strong>Última sincronização WA2</strong><span>${detailValue(lead.wa2_labels_synced_at ? formatDateTime(lead.wa2_labels_synced_at) : null)}</span></div>
     </section>
-    <section class="panel"><div class="panel-title"><h2>Etiquetas WhatsApp</h2><div class="wa2-tags">${wa2Labels(lead)}</div></div>${metaStatusMarkup(lead)}</section>
+    <section class="panel"><div class="panel-title"><h2>Etiquetas WhatsApp</h2><div class="wa2-tags">${wa2Labels(lead)}</div></div>${stageTruthMarkup(lead)}${metaStatusMarkup(lead)}</section>
+    ${requestMarkup}
     ${lead.is_internal_test ? '' : `<section class="panel"><h2>Marcar como teste interno</h2><p class="muted">Use somente após a importação oficial. A confirmação exige o Meta Lead ID exato e deixa o bloqueio permanente.</p><form method="post" action="/leads/${esc(lead.id)}/internal-test" class="compact-form stack">${csrfField(csrfToken)}<label>Meta Lead ID<input name="metaLeadId" value="${esc(lead.meta_lead_id || '')}" required maxlength="100" inputmode="numeric"></label><label>Motivo<input name="reason" value="WA2_END_TO_END_INTERNAL_TEST_2026_08_03" required maxlength="200"></label><label>Confirmação<input name="confirmation" placeholder="MARK_INTERNAL_TEST" required maxlength="32"></label><button class="danger">Bloquear eventos Meta</button></form></section>`}
     <section class="panel">
       <div class="panel-title"><h2>Linha do tempo</h2><span>${history.length} evento(s)</span></div>

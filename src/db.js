@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import {
@@ -8,6 +9,7 @@ import {
   isLossStage,
   isProtectedCommercialStage,
   isValidHistoryOrigin,
+  isKnownStage,
   originMayConfirmProtectedStage,
 } from './funnel.js';
 import {
@@ -41,6 +43,16 @@ import {
   sameAliasSet,
   validateRebindAdapterEvidence,
 } from './wa2-rebind.js';
+import {
+  MANUAL_STAGE_REQUEST_STATUSES,
+  MQL_VALIDITY,
+  STAGE_SOURCES,
+  STAGE_VERIFICATION_STATUSES,
+  classifyMqlEvidence,
+  canonicalStageForBindingStages,
+  isMetaOutboundEligibleByStageTruth,
+  MQL_AUDIT_CLASSES,
+} from './stage-truth.js';
 
 const { Pool } = pg;
 const DEFAULT_TENANT_ID = 'super-educar';
@@ -71,6 +83,7 @@ function currentWa2LabelsCte() {
       instance.name AS instance_name,
       instance.remote_instance_id,
       receipt.remote_chat_id,
+      receipt.id AS receipt_id,
       receipt.remote_label_id,
       receipt.operation,
       COALESCE(receipt.remote_label_name, binding.remote_label_name, receipt.remote_label_id) AS remote_label_name,
@@ -362,7 +375,7 @@ export async function listLeads({
        ) AS wa2_instance_name
        , wa2_labels.labels AS wa2_labels
        , wa2_labels.last_sync_at AS wa2_labels_synced_at
-       , meta_status.mql_status, meta_status.opportunity_status
+       , meta_status.mql_status, meta_status.mql_validity, meta_status.opportunity_status
      FROM leads
      LEFT JOIN meta_connections connection
        ON connection.tenant_id = leads.tenant_id
@@ -385,10 +398,16 @@ export async function listLeads({
        SELECT
          (SELECT event.status FROM meta_conversion_events event
           WHERE event.tenant_id = leads.tenant_id AND event.lead_id = leads.id
+            AND event.validity_status = 'VALID'
             AND event.event_id = concat('crm:', leads.id, ':marketing_qualified_lead:', '${currentMetaMode}')
           ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS mql_status,
+         (SELECT event.validity_status FROM meta_conversion_events event
+          WHERE event.tenant_id = leads.tenant_id AND event.lead_id = leads.id
+            AND event.event_name = 'Marketing Qualified Lead'
+          ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS mql_validity,
          (SELECT event.status FROM meta_conversion_events event
           WHERE event.tenant_id = leads.tenant_id AND event.lead_id = leads.id
+            AND event.validity_status = 'VALID'
             AND event.event_id = concat('crm:', leads.id, ':sales_opportunity:', '${currentMetaMode}')
           ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS opportunity_status
      ) meta_status ON true
@@ -410,7 +429,7 @@ export async function getLeadById(id) {
        internal_test.marked_by AS internal_test_marked_by,
        instance.name AS wa2_instance_name,
        labels.labels AS wa2_labels, labels.last_sync_at AS wa2_labels_synced_at,
-       meta_status.mql_status, meta_status.opportunity_status
+       meta_status.mql_status, meta_status.mql_validity, meta_status.opportunity_status
      FROM leads
      LEFT JOIN lead_internal_test_flags internal_test
        ON internal_test.tenant_id = leads.tenant_id AND internal_test.lead_id = leads.id
@@ -431,10 +450,16 @@ export async function getLeadById(id) {
        SELECT
          (SELECT event.status FROM meta_conversion_events event
           WHERE event.tenant_id=leads.tenant_id AND event.lead_id=leads.id
+            AND event.validity_status = 'VALID'
             AND event.event_id = concat('crm:', leads.id, ':marketing_qualified_lead:', '${currentMetaMode}')
           ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS mql_status,
+         (SELECT event.validity_status FROM meta_conversion_events event
+          WHERE event.tenant_id=leads.tenant_id AND event.lead_id=leads.id
+            AND event.event_name = 'Marketing Qualified Lead'
+          ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS mql_validity,
          (SELECT event.status FROM meta_conversion_events event
           WHERE event.tenant_id=leads.tenant_id AND event.lead_id=leads.id
+            AND event.validity_status = 'VALID'
             AND event.event_id = concat('crm:', leads.id, ':sales_opportunity:', '${currentMetaMode}')
           ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS opportunity_status
      ) meta_status ON true
@@ -2885,7 +2910,19 @@ async function createOrGetMetaEvent(client, { lead, eventName, eventTime, mode }
   const target = destination.rows[0] || null;
   if (!target) return null;
   const datasetKey = target?.meta_dataset_value || process.env.META_DATASET_ID || 'unset';
-  const eventId = `crm:${lead.id}:${eventName.replaceAll(' ', '_').toLowerCase()}:${datasetKey}:${mode}`;
+  const baseEventId = `crm:${lead.id}:${eventName.replaceAll(' ', '_').toLowerCase()}:${datasetKey}:${mode}`;
+  const existingBase = await client.query(
+    'SELECT * FROM meta_conversion_events WHERE event_id = $1 AND tenant_id = $2',
+    [baseEventId, lead.tenant_id],
+  );
+  if (existingBase.rows[0] && existingBase.rows[0].validity_status !== 'INVALIDATED') {
+    return existingBase.rows[0];
+  }
+  const occurrence = crypto.createHash('sha256')
+    .update(`${lead.id}:${eventName}:${datasetKey}:${mode}:${new Date(eventTime || Date.now()).toISOString()}`)
+    .digest('hex')
+    .slice(0, 24);
+  const eventId = `${baseEventId}:occ:${occurrence}`;
   const inserted = await client.query(
     `INSERT INTO meta_conversion_events (
        tenant_id, lead_id, event_name, event_id, event_time,
@@ -2976,6 +3013,14 @@ async function ensureMetaEventForStage(
   }
   if (process.env.META_CAPI_OUTBOUND_ENABLED !== 'true') {
     return { event: null, jobCreated: false, reason: 'META_OUTBOUND_DISABLED', sequenceSkipped };
+  }
+  if (!isMetaOutboundEligibleByStageTruth(lead)) {
+    return {
+      event: null,
+      jobCreated: false,
+      reason: 'STAGE_NOT_WHATSAPP_VERIFIED',
+      sequenceSkipped,
+    };
   }
   if (!lead.meta_lead_id) return { event: null, jobCreated: false, reason: 'META_LEAD_ID_MISSING', sequenceSkipped };
   if (!canCreateMetaForStage(stage, officialLabelEvidence)) {
@@ -3237,6 +3282,246 @@ export async function moveLeadStage(id, stage, {
   }
 }
 
+function assertManualStageTarget(stage) {
+  if (!isKnownStage(stage) || isProtectedCommercialStage(stage)) {
+    throw new Error('MANUAL_STAGE_TARGET_INVALID');
+  }
+}
+
+export async function createManualStageChangeRequest({
+  leadId,
+  requestedStage,
+  requestedBy,
+  mandatoryReason,
+  metadata = {},
+}) {
+  assertManualStageTarget(requestedStage);
+  const actor = safeActor(requestedBy);
+  const reason = String(mandatoryReason || '').trim().slice(0, 1000);
+  if (!actor) throw new Error('MANUAL_STAGE_ACTOR_REQUIRED');
+  if (reason.length < 5) throw new Error('MANUAL_STAGE_REASON_REQUIRED');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const selected = await client.query(
+      `SELECT * FROM leads WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+      [tenantId(), leadId],
+    );
+    const lead = selected.rows[0];
+    if (!lead) throw new Error('LEAD_NOT_FOUND');
+    if (lead.stage === requestedStage) throw new Error('MANUAL_STAGE_ALREADY_CURRENT');
+    const pending = await client.query(
+      `SELECT id FROM manual_stage_change_requests
+       WHERE tenant_id = $1 AND lead_id = $2
+         AND status IN ('PENDING_APPROVAL', 'APPROVED_PENDING_WA', 'PENDING_WA_LINK')
+       LIMIT 1`,
+      [tenantId(), leadId],
+    );
+    if (pending.rows[0]) throw new Error('MANUAL_STAGE_REQUEST_PENDING');
+    const inserted = await client.query(
+      `INSERT INTO manual_stage_change_requests (
+         tenant_id, lead_id, current_stage, requested_stage,
+         requested_by, mandatory_reason, metadata
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+       RETURNING *`,
+      [tenantId(), leadId, lead.stage, requestedStage, actor, reason, {
+        ...metadata,
+        source: 'CRM_MANUAL_STAGE_REQUEST',
+      }],
+    );
+    const request = inserted.rows[0];
+    await client.query(
+      `INSERT INTO lead_stage_history (
+         tenant_id, lead_id, previous_stage, new_stage, origin,
+         changed_by, observation, activity_type, metadata
+       ) VALUES ($1,$2,$3,$3,'MANUAL',$4,$5,'MANUAL_STAGE_REQUESTED',$6)`,
+      [
+        tenantId(), leadId, lead.stage, actor,
+        'Solicitação de mudança criada; aguardando aprovação e confirmação WA2.',
+        { requestId: request.id, requestedStage, reason },
+      ],
+    );
+    await client.query('COMMIT');
+    return request;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function listManualStageRequestsForLead(leadId) {
+  const result = await pool.query(
+    `SELECT * FROM manual_stage_change_requests
+     WHERE tenant_id = $1 AND lead_id = $2
+     ORDER BY created_at DESC`,
+    [tenantId(), leadId],
+  );
+  return result.rows;
+}
+
+export async function approveManualStageChangeRequest({
+  requestId,
+  actor,
+  emergencyOverride = false,
+  confirmation = '',
+  emergencyReason = '',
+}) {
+  const safeApprover = safeActor(actor);
+  if (!safeApprover) throw new Error('MANUAL_STAGE_APPROVER_REQUIRED');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const selected = await client.query(
+      `SELECT request.*, lead.*,
+              request.id AS request_id, request.status AS request_status,
+              request.current_stage AS request_current_stage,
+              request.requested_stage AS request_requested_stage
+       FROM manual_stage_change_requests request
+       JOIN leads lead ON lead.tenant_id = request.tenant_id AND lead.id = request.lead_id
+       WHERE request.tenant_id = $1 AND request.id = $2
+       FOR UPDATE OF request, lead`,
+      [tenantId(), requestId],
+    );
+    const row = selected.rows[0];
+    if (!row) throw new Error('MANUAL_STAGE_REQUEST_NOT_FOUND');
+    if (row.request_status !== MANUAL_STAGE_REQUEST_STATUSES.PENDING_APPROVAL) {
+      throw new Error('MANUAL_STAGE_REQUEST_NOT_PENDING');
+    }
+    if (new Date(row.expires_at).getTime() <= Date.now()) {
+      await client.query(
+        `UPDATE manual_stage_change_requests SET status = 'EXPIRED', updated_at = now()
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantId(), requestId],
+      );
+      throw new Error('MANUAL_STAGE_REQUEST_EXPIRED');
+    }
+    const sameActor = row.requested_by === safeApprover;
+    if (sameActor && !emergencyOverride) throw new Error('MANUAL_STAGE_SELF_APPROVAL');
+    if (sameActor && emergencyOverride && confirmation !== 'APPROVE_EMERGENCY_STAGE_CHANGE') {
+      throw new Error('MANUAL_STAGE_EMERGENCY_CONFIRMATION_REQUIRED');
+    }
+    if (sameActor && emergencyOverride && String(emergencyReason || '').trim().length < 20) {
+      throw new Error('MANUAL_STAGE_EMERGENCY_REASON_REQUIRED');
+    }
+    assertManualStageTarget(row.request_requested_stage);
+    const history = await client.query(
+      `INSERT INTO lead_stage_history (
+         tenant_id, lead_id, previous_stage, new_stage, origin,
+         changed_by, observation, activity_type, metadata
+       ) VALUES ($1,$2,$3,$3,'MANUAL',$4,$5,'MANUAL_STAGE_APPROVED',$6)
+       RETURNING id`,
+      [
+        tenantId(), row.lead_id, row.request_current_stage, safeApprover,
+        'Solicitação aprovada; aguardando receipt oficial da etiqueta WA2.',
+        {
+          requestId, requestedStage: row.request_requested_stage,
+          emergencyOverride: Boolean(emergencyOverride),
+          emergencyReason: sameActor ? String(emergencyReason).trim().slice(0, 1000) : null,
+        },
+      ],
+    );
+    const link = await client.query(
+      `SELECT link.* FROM wa2_contact_links link
+       JOIN wa2_instances instance
+         ON instance.tenant_id = link.tenant_id AND instance.id = link.wa2_instance_id
+       WHERE link.tenant_id = $1 AND link.lead_id = $2
+         AND link.unlinked_at IS NULL AND instance.enabled = true
+       ORDER BY instance.is_default DESC, link.created_at DESC
+       FOR UPDATE`,
+      [tenantId(), row.lead_id],
+    );
+    if (link.rowCount !== 1) {
+      await client.query(
+        `UPDATE manual_stage_change_requests
+         SET status = 'PENDING_WA_LINK', approved_by = $3, approved_at = now(),
+             emergency_override = $4, updated_at = now(),
+             metadata = metadata || $5::jsonb
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantId(), requestId, safeApprover, Boolean(emergencyOverride), JSON.stringify({ approvalHistoryId: history.rows[0].id })],
+      );
+      await client.query(
+        `UPDATE leads SET stage_source = 'MANUAL_TWO_STEP_APPROVED',
+           stage_verification_status = 'PENDING_WA_LABEL', updated_at = now()
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantId(), row.lead_id],
+      );
+      await client.query('COMMIT');
+      return { requestId, status: 'PENDING_WA_LINK', scheduled: 0 };
+    }
+    const clonedLead = { ...row, id: row.lead_id, stage: row.request_requested_stage };
+    const sync = await enqueueWa2LabelJobs(client, {
+      lead: clonedLead,
+      previousStage: row.request_current_stage,
+      stageHistoryId: history.rows[0].id,
+    });
+    await client.query(
+      `UPDATE manual_stage_change_requests
+       SET status = 'APPROVED_PENDING_WA', approved_by = $3, approved_at = now(),
+           emergency_override = $4, updated_at = now(),
+           metadata = metadata || $5::jsonb
+       WHERE tenant_id = $1 AND id = $2`,
+      [tenantId(), requestId, safeApprover, Boolean(emergencyOverride), JSON.stringify({ approvalHistoryId: history.rows[0].id, wa2Scheduled: sync.scheduled })],
+    );
+    await client.query(
+      `UPDATE leads SET stage_source = 'MANUAL_TWO_STEP_APPROVED',
+         stage_verification_status = 'PENDING_WA_LABEL', updated_at = now()
+       WHERE tenant_id = $1 AND id = $2`,
+      [tenantId(), row.lead_id],
+    );
+    await client.query('COMMIT');
+    return { requestId, status: 'APPROVED_PENDING_WA', scheduled: sync.scheduled, syncReason: sync.reason };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function rejectManualStageChangeRequest({ requestId, actor, reason }) {
+  const safeApprover = safeActor(actor);
+  const safeReason = String(reason || '').trim().slice(0, 1000);
+  if (!safeApprover) throw new Error('MANUAL_STAGE_APPROVER_REQUIRED');
+  if (safeReason.length < 5) throw new Error('MANUAL_STAGE_REJECTION_REASON_REQUIRED');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const selected = await client.query(
+      `SELECT * FROM manual_stage_change_requests
+       WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+      [tenantId(), requestId],
+    );
+    const request = selected.rows[0];
+    if (!request) throw new Error('MANUAL_STAGE_REQUEST_NOT_FOUND');
+    if (request.status !== MANUAL_STAGE_REQUEST_STATUSES.PENDING_APPROVAL) {
+      throw new Error('MANUAL_STAGE_REQUEST_NOT_PENDING');
+    }
+    await client.query(
+      `UPDATE manual_stage_change_requests
+       SET status = 'REJECTED', rejected_by = $3, rejected_at = now(), updated_at = now(),
+           metadata = metadata || $4::jsonb
+       WHERE tenant_id = $1 AND id = $2`,
+      [tenantId(), requestId, safeApprover, JSON.stringify({ rejectionReason: safeReason })],
+    );
+    await client.query(
+      `INSERT INTO lead_stage_history (
+         tenant_id, lead_id, previous_stage, new_stage, origin,
+         changed_by, observation, activity_type, metadata
+       ) VALUES ($1,$2,$3,$3,'MANUAL',$4,$5,'MANUAL_STAGE_REJECTED',$6)`,
+      [tenantId(), request.lead_id, request.current_stage, safeApprover, safeReason, { requestId }],
+    );
+    await client.query('COMMIT');
+    return { requestId, status: 'REJECTED' };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function enqueueLeadWa2Resync(id, actor = null) {
   const client = await pool.connect();
   try {
@@ -3339,6 +3624,15 @@ export async function enqueueLeadgenJobs(payload) {
 }
 
 export async function backfillMetaQualifiedEvents({ batchSize = 50, execute = false } = {}) {
+  if (execute || process.env.META_CLEAN_HISTORICAL_BACKFILL !== 'true') {
+    return {
+      selected: 0,
+      created: 0,
+      queued: 0,
+      leads: [],
+      blocked: 'META_HISTORICAL_BACKFILL_DISABLED',
+    };
+  }
   const limit = Math.max(1, Math.min(Number(batchSize) || 50, 500));
   const candidates = await pool.query(
     `SELECT lead.*
@@ -3539,6 +3833,9 @@ export async function claimNextJob() {
                   WHEN meta_jobs.job_type = 'CONVERSION' THEN (meta_jobs.payload->>'eventId')::uuid
                   ELSE NULL
                 END
+                AND blocked_event.validity_status = 'VALID'
+                AND blocked_lead.stage_source = 'WHATSAPP_LABEL'
+                AND blocked_lead.stage_verification_status = 'VERIFIED'
                 AND (blocked_lead.is_internal_test = true OR blocked_lead.meta_outbound_eligible = false)
             )
           )
@@ -4165,6 +4462,41 @@ export async function claimWa2LabelEventCursor() {
   return result.rows[0] || null;
 }
 
+async function completeManualStageRequestForReceipt(client, {
+  leadId,
+  targetStage,
+  actionId,
+  receiptId,
+}) {
+  const completed = await client.query(
+    `UPDATE manual_stage_change_requests
+     SET status = 'COMPLETED', updated_at = now(),
+         metadata = metadata || jsonb_build_object(
+           'completionActionId', $4::text,
+           'completionReceiptId', $5::text
+         )
+     WHERE tenant_id = $1 AND lead_id = $2
+       AND requested_stage = $3
+       AND status IN ('APPROVED_PENDING_WA', 'PENDING_WA_LINK')
+     RETURNING *`,
+    [tenantId(), leadId, targetStage, actionId, receiptId],
+  );
+  for (const request of completed.rows) {
+    await client.query(
+      `INSERT INTO lead_stage_history (
+         tenant_id, lead_id, previous_stage, new_stage, origin,
+         changed_by, observation, activity_type, metadata
+       ) VALUES ($1,$2,$3,$3,'WHATSAPP',NULL,$4,'MANUAL_STAGE_COMPLETED',$5)`,
+      [
+        tenantId(), leadId, request.current_stage,
+        'Solicitação manual concluída após receipt oficial WA2.',
+        { requestId: request.id, actionId, receiptId, requestedStage: targetStage },
+      ],
+    );
+  }
+  return completed.rowCount;
+}
+
 export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
   const client = await pool.connect();
   try {
@@ -4341,11 +4673,19 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
       if (timestampColumn) updateValues.push(new Date(event.observedAt));
       const updated = await client.query(
         `UPDATE leads SET stage = $3, updated_at = now() ${timestampUpdate},
+           stage_source = 'WHATSAPP_LABEL',
+           source_label_id = $6,
+           source_label_name = $7,
+           source_action_id = $8,
+           source_receipt_id = $9,
+           source_observed_at = $10,
+           stage_verified_at = now(),
+           stage_verification_status = 'VERIFIED',
            lost_reason = CASE WHEN $3 = 'LOST' THEN 'OTHER' ELSE NULL END,
            lost_notes = CASE WHEN $3 = 'LOST'
              THEN 'Perda recebida por etiqueta WA2.' ELSE NULL END
          WHERE tenant_id = $1 AND id = $2 AND stage = $4 RETURNING *`,
-        updateValues,
+        [...updateValues, event.waLabelId, event.waLabelName || null, action.id, receipt.id, event.observedAt],
       );
       if (updated.rowCount !== 1) throw new Error('Etapa do lead mudou durante o evento WA2');
       const history = await client.query(
@@ -4379,10 +4719,412 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
           (currentCrmLabelStages.length <= 1 || decision.exclusiveTransition === true),
         ),
       });
+      await completeManualStageRequestForReceipt(client, {
+        leadId: lead.id,
+        targetStage: decision.targetStage,
+        actionId: action.id,
+        receiptId: receipt.id,
+      });
       void history;
+    } else if (decision.action === 'NOOP' && decision.targetStage) {
+      await client.query(
+        `UPDATE leads SET
+           stage_source = 'WHATSAPP_LABEL',
+           source_label_id = $3,
+           source_label_name = $4,
+           source_action_id = $5,
+           source_receipt_id = $6,
+           source_observed_at = $7,
+           stage_verified_at = now(),
+           stage_verification_status = 'VERIFIED',
+           updated_at = now()
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantId(), lead.id, event.waLabelId, event.waLabelName || null, action.id, receipt.id, event.observedAt],
+      );
+      await completeManualStageRequestForReceipt(client, {
+        leadId: lead.id,
+        targetStage: decision.targetStage,
+        actionId: action.id,
+        receiptId: receipt.id,
+      });
     }
     await client.query('COMMIT');
     return { duplicate: false, action: decision.action, code: decision.code };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function auditMqlEvents({
+  auditRunId = crypto.randomUUID(),
+  dryRun = true,
+} = {}) {
+  const result = await pool.query(
+    `SELECT event.id, event.lead_id, event.event_time, event.status,
+            event.validity_status, lead.stage, lead.is_internal_test,
+            lead.meta_outbound_eligible,
+            COALESCE(evidence.qualifying_label_count, 0)::int AS qualifying_label_count,
+            COALESCE(evidence.active_qualifying_label_count, 0)::int AS active_qualifying_label_count,
+            COALESCE(evidence.any_wa_evidence, false) AS any_wa_evidence,
+            COALESCE(evidence.multiple_active_labels, false) AS multiple_active_labels,
+            COALESCE(evidence.qualifying_label_removed, false) AS qualifying_label_removed,
+            EXISTS (
+              SELECT 1 FROM lead_stage_history history
+              WHERE history.tenant_id = event.tenant_id AND history.lead_id = event.lead_id
+                AND history.changed_at <= event.event_time
+                AND history.activity_type = 'MANUAL_STAGE_APPROVED'
+            ) AS manual_two_step,
+            EXISTS (
+              SELECT 1 FROM lead_stage_history history
+              WHERE history.tenant_id = event.tenant_id AND history.lead_id = event.lead_id
+                AND history.changed_at <= event.event_time
+                AND (history.observation ILIKE '%reconciliação%'
+                  OR history.observation ILIKE '%backfill%'
+                  OR history.activity_type = 'HISTORICAL_IMPORT')
+            ) AS reconciliation_evidence
+     FROM meta_conversion_events event
+     JOIN leads lead ON lead.tenant_id = event.tenant_id AND lead.id = event.lead_id
+     LEFT JOIN LATERAL (
+       SELECT
+          (count(DISTINCT CASE WHEN receipt.operation = 'APPLY' THEN receipt.remote_label_id END)
+            FILTER (WHERE binding.stage IN ('QUALIFIED','NEGOTIATING','OPPORTUNITY','AWAITING_ENROLLMENT','AWAITING_PAYMENT')))::int
+           AS qualifying_label_count,
+         count(DISTINCT CASE
+           WHEN receipt.operation = 'APPLY'
+            AND NOT EXISTS (
+              SELECT 1 FROM wa2_label_event_receipts removed
+              WHERE removed.tenant_id = receipt.tenant_id
+                AND removed.remote_instance_id = receipt.remote_instance_id
+                AND removed.remote_chat_id = receipt.remote_chat_id
+                AND removed.remote_label_id = receipt.remote_label_id
+                AND removed.operation = 'REMOVE'
+                AND removed.observed_at > receipt.observed_at
+                AND removed.observed_at <= event.event_time
+            ) THEN receipt.remote_label_id END
+          ) FILTER (WHERE binding.stage IN ('QUALIFIED','NEGOTIATING','OPPORTUNITY','AWAITING_ENROLLMENT','AWAITING_PAYMENT')))::int
+           AS active_qualifying_label_count,
+         count(receipt.id) > 0 AS any_wa_evidence,
+         count(DISTINCT CASE WHEN receipt.operation = 'APPLY'
+           AND NOT EXISTS (
+             SELECT 1 FROM wa2_label_event_receipts removed
+             WHERE removed.tenant_id = receipt.tenant_id
+               AND removed.remote_instance_id = receipt.remote_instance_id
+               AND removed.remote_chat_id = receipt.remote_chat_id
+               AND removed.remote_label_id = receipt.remote_label_id
+               AND removed.operation = 'REMOVE'
+               AND removed.observed_at > receipt.observed_at
+               AND removed.observed_at <= event.event_time
+           ) THEN binding.stage END) > 1 AS multiple_active_labels,
+         bool_or(binding.stage IN ('QUALIFIED','NEGOTIATING','OPPORTUNITY','AWAITING_ENROLLMENT','AWAITING_PAYMENT')
+           AND receipt.operation = 'APPLY'
+           AND EXISTS (
+             SELECT 1 FROM wa2_label_event_receipts removed
+             WHERE removed.tenant_id = receipt.tenant_id
+               AND removed.remote_instance_id = receipt.remote_instance_id
+               AND removed.remote_chat_id = receipt.remote_chat_id
+               AND removed.remote_label_id = receipt.remote_label_id
+               AND removed.operation = 'REMOVE'
+               AND removed.observed_at > receipt.observed_at
+               AND removed.observed_at <= event.event_time
+           )) AS qualifying_label_removed
+       FROM wa2_label_event_receipts receipt
+       JOIN wa2_instances instance
+         ON instance.tenant_id = receipt.tenant_id
+        AND instance.remote_instance_id = receipt.remote_instance_id
+       JOIN wa2_label_bindings binding
+         ON binding.tenant_id = receipt.tenant_id
+        AND binding.wa2_instance_id = instance.id
+        AND binding.remote_label_id = receipt.remote_label_id
+        AND binding.enabled = true
+       JOIN wa2_contact_links link
+         ON link.tenant_id = receipt.tenant_id
+        AND link.lead_id = event.lead_id
+        AND link.wa2_instance_id = instance.id
+        AND link.remote_chat_id = receipt.remote_chat_id
+        AND link.created_at <= event.event_time
+        AND (link.unlinked_at IS NULL OR link.unlinked_at >= event.event_time)
+       WHERE receipt.tenant_id = event.tenant_id
+         AND receipt.observed_at <= event.event_time
+     ) evidence ON true
+     WHERE event.tenant_id = $1 AND event.event_name = 'Marketing Qualified Lead'
+     ORDER BY event.event_time, event.created_at, event.id`,
+    [tenantId()],
+  );
+  const audited = result.rows.map((row) => ({
+    ...row,
+    classification: classifyMqlEvidence({
+      internalTest: row.is_internal_test === true,
+      qualifyingLabelCount: Number(row.qualifying_label_count || 0),
+      activeQualifyingLabelCount: Number(row.active_qualifying_label_count || 0),
+      qualifyingLabelRemovedBeforeEvent: row.qualifying_label_removed === true,
+      anyWaEvidence: row.any_wa_evidence === true,
+      stageOnly: ['QUALIFIED', 'NEGOTIATING', 'OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT']
+        .includes(row.stage) && row.any_wa_evidence !== true,
+      reconciliationEvidence: row.reconciliation_evidence === true,
+      multipleLabels: row.multiple_active_labels === true,
+      manualTwoStep: row.manual_two_step === true,
+    }),
+  }));
+  const counts = Object.fromEntries(MQL_AUDIT_CLASSES.map((classification) => [classification, 0]));
+  for (const row of audited) counts[row.classification] = (counts[row.classification] || 0) + 1;
+  if (!dryRun) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const row of audited) {
+        if (row.classification === 'VALID_LABEL_CONFIRMED' || row.classification === 'VALID_MANUAL_TWO_STEP') continue;
+        const updated = await client.query(
+          `UPDATE meta_conversion_events
+           SET validity_status = 'INVALIDATED', invalidated_at = COALESCE(invalidated_at, now()),
+               invalidated_reason = $3, audit_run_id = $4, updated_at = now()
+           WHERE tenant_id = $1 AND id = $2 AND validity_status <> 'INVALIDATED'
+           RETURNING id`,
+          [tenantId(), row.id, row.classification, auditRunId],
+        );
+        if (updated.rowCount === 1) {
+          await client.query(
+            `INSERT INTO lead_stage_history (
+               tenant_id, lead_id, previous_stage, new_stage, origin,
+               observation, activity_type, metadata, meta_event_id
+             ) VALUES ($1,$2,$3,$3,'SYSTEM',$4,'MQL_INVALIDATED',$5,$6)`,
+            [
+              tenantId(), row.lead_id, row.stage,
+              'Evento MQL invalidado localmente após auditoria WA2; resposta Meta preservada.',
+              { auditRunId, classification: row.classification }, row.id,
+            ],
+          );
+        }
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  return { auditRunId, dryRun, total: audited.length, counts, rows: audited };
+}
+
+async function loadStageTruthRows() {
+  const result = await pool.query(
+    `${currentWa2LabelsCte()}
+     SELECT lead.id, lead.stage, lead.is_internal_test, lead.meta_lead_id,
+            lead.stage_source, lead.stage_verification_status,
+            COALESCE(link_counts.active_link_count, 0)::int AS active_link_count,
+            COALESCE(official.official_label_count, 0)::int AS official_label_count,
+            official.target_stage, official.source_label_id,
+            official.source_label_name, official.source_action_id,
+            official.source_receipt_id, official.source_observed_at,
+            EXISTS (
+              SELECT 1 FROM meta_conversion_events event
+              WHERE event.tenant_id = lead.tenant_id AND event.lead_id = lead.id
+                AND event.event_name = 'Marketing Qualified Lead'
+                AND event.validity_status = 'VALID'
+            ) AS valid_mql,
+            EXISTS (
+              SELECT 1 FROM meta_conversion_events event
+              WHERE event.tenant_id = lead.tenant_id AND event.lead_id = lead.id
+                AND event.event_name = 'Marketing Qualified Lead'
+                AND event.status = 'SENT'
+                AND event.validity_status = 'INVALIDATED'
+            ) AS invalid_mql
+     FROM leads lead
+     LEFT JOIN LATERAL (
+       SELECT count(*)::int AS active_link_count
+       FROM wa2_contact_links link
+       JOIN wa2_instances instance
+         ON instance.tenant_id = link.tenant_id AND instance.id = link.wa2_instance_id
+        AND instance.enabled = true
+       WHERE link.tenant_id = lead.tenant_id AND link.lead_id = lead.id
+         AND link.unlinked_at IS NULL
+     ) link_counts ON true
+          LEFT JOIN LATERAL (
+       SELECT count(DISTINCT current.remote_label_id)::int AS official_label_count,
+               CASE WHEN count(DISTINCT current.remote_label_id) = 1
+                 THEN array_agg(DISTINCT binding.stage) END AS binding_stages,
+              CASE WHEN count(DISTINCT current.remote_label_id) = 1
+                THEN min(current.remote_label_id) END AS source_label_id,
+              CASE WHEN count(DISTINCT current.remote_label_id) = 1
+                THEN min(current.remote_label_name) END AS source_label_name,
+              CASE WHEN count(DISTINCT current.remote_label_id) = 1
+                THEN (array_agg(action.id ORDER BY current.received_at DESC NULLS LAST))[1] END AS source_action_id,
+              CASE WHEN count(DISTINCT current.remote_label_id) = 1
+                THEN max(current.received_at) END AS source_observed_at,
+              CASE WHEN count(DISTINCT current.remote_label_id) = 1
+                THEN (array_agg(current.receipt_id ORDER BY current.received_at DESC NULLS LAST))[1] END AS source_receipt_id
+       FROM current_wa2_labels current
+       LEFT JOIN wa2_label_bindings binding
+         ON binding.tenant_id = current.tenant_id
+        AND binding.wa2_instance_id = current.wa2_instance_id
+        AND binding.remote_label_id = current.remote_label_id
+        AND binding.enabled = true
+       LEFT JOIN wa2_inbound_label_actions action
+         ON action.tenant_id = current.tenant_id
+        AND action.receipt_id = current.receipt_id
+       WHERE current.tenant_id = lead.tenant_id
+         AND current.lead_id = lead.id
+         AND current.operation = 'APPLY'
+          AND binding.id IS NOT NULL
+      ) official ON true
+     WHERE lead.tenant_id = $1
+     ORDER BY lead.created_at, lead.id`,
+    [tenantId()],
+  );
+  return result.rows.map((row) => ({
+    ...row,
+    target_stage: canonicalStageForBindingStages(row.binding_stages),
+  }));
+}
+
+function classifyLeadStageTruth(row) {
+  if (row.is_internal_test === true || ['ENROLLED', 'PAID'].includes(row.stage)) {
+    return 'PROTECTED_TERMINAL_STAGE';
+  }
+  if (Number(row.active_link_count) === 0) return 'NO_WA_LINK';
+  if (Number(row.active_link_count) !== 1) return 'PENDING_IDENTITY';
+  if (Number(row.official_label_count) > 1) return 'MULTIPLE_STAGE_LABELS';
+  if (Number(row.official_label_count) === 0) {
+    return ['QUALIFIED', 'OPPORTUNITY', 'NEGOTIATING', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT']
+      .includes(row.stage) ? 'CRM_QUALIFIED_WITHOUT_LABEL' : 'NO_OFFICIAL_STAGE_LABEL';
+  }
+  if (!row.target_stage || ['ENROLLED', 'PAID'].includes(row.target_stage)) {
+    return 'PROTECTED_TERMINAL_STAGE';
+  }
+  if (!row.source_action_id || !row.source_receipt_id) return 'PENDING_IDENTITY';
+  if (row.stage === row.target_stage) return 'ALIGNED_WITH_WHATSAPP';
+  return 'SAFE_ALIGN_TO_WHATSAPP';
+}
+
+export async function auditLeadStageTruth({ dryRun = true, batchSize = 25 } = {}) {
+  const rows = await loadStageTruthRows();
+  const safeBatchSize = Math.max(1, Math.min(25, Number(batchSize) || 25));
+  const counts = {
+    ALIGNED_WITH_WHATSAPP: 0,
+    SAFE_ALIGN_TO_WHATSAPP: 0,
+    NO_OFFICIAL_STAGE_LABEL: 0,
+    MULTIPLE_STAGE_LABELS: 0,
+    NO_WA_LINK: 0,
+    PENDING_IDENTITY: 0,
+    CRM_QUALIFIED_WITHOUT_LABEL: 0,
+    MQL_SENT_WITHOUT_LABEL: 0,
+    PROTECTED_TERMINAL_STAGE: 0,
+    MANUAL_LEGACY_UNVERIFIED: 0,
+  };
+  const audited = rows.map((row) => {
+    const classification = classifyLeadStageTruth(row);
+    counts[classification] += 1;
+    if (classification === 'MQL_SENT_WITHOUT_LABEL') counts.MQL_SENT_WITHOUT_LABEL += 1;
+    if (classification === 'ALIGNED_WITH_WHATSAPP' && row.stage_source === STAGE_SOURCES.LEGACY_UNVERIFIED) {
+      counts.MANUAL_LEGACY_UNVERIFIED += 1;
+    }
+    if (row.invalid_mql && ['NO_OFFICIAL_STAGE_LABEL', 'CRM_QUALIFIED_WITHOUT_LABEL'].includes(classification)) {
+      counts.MQL_SENT_WITHOUT_LABEL += 1;
+    }
+    return { ...row, classification };
+  });
+  if (!dryRun) {
+    for (let offset = 0; offset < audited.length; offset += safeBatchSize) {
+      const batch = audited.slice(offset, offset + safeBatchSize);
+      for (const row of batch) {
+        if (row.classification === 'SAFE_ALIGN_TO_WHATSAPP' && row.is_internal_test !== true) {
+          await alignLeadStageToWhatsApp(row);
+        } else if (row.classification === 'CRM_QUALIFIED_WITHOUT_LABEL' && row.is_internal_test !== true) {
+          await neutralizeLeadWithoutWaStage(row);
+        } else if (row.classification === 'ALIGNED_WITH_WHATSAPP' && row.stage_source !== STAGE_SOURCES.WHATSAPP_LABEL) {
+          await alignLeadStageToWhatsApp(row, { forceHistory: true });
+        }
+      }
+    }
+  }
+  return { dryRun, total: audited.length, counts, rows: audited };
+}
+
+async function alignLeadStageToWhatsApp(row, { forceHistory = false } = {}) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const current = await client.query(
+      `SELECT * FROM leads WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+      [tenantId(), row.id],
+    );
+    if (!current.rows[0]) throw new Error('LEAD_NOT_FOUND');
+    const lead = current.rows[0];
+    if (lead.is_internal_test === true || !row.target_stage) {
+      await client.query('ROLLBACK');
+      return { changed: false, reason: 'PROTECTED' };
+    }
+    const updated = await client.query(
+      `UPDATE leads SET stage = $3, stage_source = 'WHATSAPP_LABEL',
+         source_label_id = $4, source_label_name = $5,
+         source_action_id = $6, source_receipt_id = $7,
+         source_observed_at = $8, stage_verified_at = now(),
+         stage_verification_status = 'VERIFIED', updated_at = now()
+       WHERE tenant_id = $1 AND id = $2 RETURNING *`,
+      [tenantId(), row.id, row.target_stage, row.source_label_id, row.source_label_name,
+        row.source_action_id, row.source_receipt_id, row.source_observed_at],
+    );
+    if (forceHistory || lead.stage !== row.target_stage) {
+      await client.query(
+        `INSERT INTO lead_stage_history (
+           tenant_id, lead_id, previous_stage, new_stage, origin,
+           observation, activity_type, metadata
+         ) VALUES ($1,$2,$3,$4,'WHATSAPP',$5,'STAGE_SOURCE_ALIGNED',$6)`,
+        [
+          tenantId(), row.id, lead.stage, row.target_stage,
+          'Etapa alinhada à etiqueta oficial atual do WhatsApp.',
+          { labelId: row.source_label_id, receiptId: row.source_receipt_id, actionId: row.source_action_id },
+        ],
+      );
+    }
+    await client.query('COMMIT');
+    return { changed: lead.stage !== row.target_stage, lead: updated.rows[0] };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function neutralizeLeadWithoutWaStage(row) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const current = await client.query(
+      `SELECT * FROM leads WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+      [tenantId(), row.id],
+    );
+    const lead = current.rows[0];
+    if (!lead || lead.is_internal_test === true || ['ENROLLED', 'PAID'].includes(lead.stage)) {
+      await client.query('ROLLBACK');
+      return { changed: false, reason: 'PROTECTED' };
+    }
+    await client.query(
+      `UPDATE leads SET stage = 'NEW', stage_source = 'LEGACY_UNVERIFIED',
+         source_label_id = NULL, source_label_name = NULL,
+         source_action_id = NULL, source_receipt_id = NULL,
+         source_observed_at = NULL, stage_verified_at = NULL,
+         stage_verification_status = 'UNVERIFIED_NO_LABEL', updated_at = now()
+       WHERE tenant_id = $1 AND id = $2`,
+      [tenantId(), row.id],
+    );
+    await client.query(
+      `INSERT INTO lead_stage_history (
+         tenant_id, lead_id, previous_stage, new_stage, origin,
+         observation, activity_type, metadata
+       ) VALUES ($1,$2,$3,'NEW','SYSTEM',$4,'STAGE_SOURCE_NEUTRALIZED',$5)`,
+      [
+        tenantId(), row.id, lead.stage,
+        'Etapa neutralizada porque não há etiqueta oficial atual do WhatsApp.',
+        { previousSource: lead.stage_source, verificationStatus: 'UNVERIFIED_NO_LABEL' },
+      ],
+    );
+    await client.query('COMMIT');
+    return { changed: lead.stage !== 'NEW' };
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
@@ -4511,6 +5253,7 @@ export async function createMetaHistoricalImport({
 }
 
 export async function claimMetaHistoricalImport() {
+  if (process.env.META_CLEAN_HISTORICAL_BACKFILL !== 'true') return null;
   const result = await pool.query(
     `WITH candidate AS (
        SELECT id FROM meta_historical_imports
@@ -4640,6 +5383,9 @@ export async function setMetaHistoricalImportStatus(id, action) {
 }
 
 export async function createWa2Reconciliation({ instanceId, actor }) {
+  if (process.env.WA2_DAILY_RECONCILIATION_ENABLED !== 'true') {
+    throw new Wa2DataError('Reconciliação WA2 desabilitada', 'WA2_RECONCILIATION_DISABLED');
+  }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -4729,6 +5475,9 @@ export async function hasWa2ReconciliationRunToday() {
 
 export async function withWa2DailyReconciliationLock(callback) {
   if (typeof callback !== 'function') throw new TypeError('Callback do lock diário é obrigatório');
+  if (process.env.WA2_DAILY_RECONCILIATION_ENABLED !== 'true') {
+    return { locked: false, disabled: true };
+  }
   const client = await pool.connect();
   let localRunDate;
   let locked = false;
@@ -4788,6 +5537,7 @@ export async function enqueueDailyWa2Reconciliations(
   readyLocalInstanceIds,
   { decisionClaimed = false, localRunDate = null } = {},
 ) {
+  if (process.env.WA2_DAILY_RECONCILIATION_ENABLED !== 'true') return 0;
   if (!Array.isArray(readyLocalInstanceIds) || readyLocalInstanceIds.length === 0) return 0;
   const client = await pool.connect();
   try {
@@ -4858,6 +5608,7 @@ export async function enqueueDailyWa2Reconciliations(
 }
 
 export async function claimWa2ReconciliationItem() {
+  if (process.env.WA2_DAILY_RECONCILIATION_ENABLED !== 'true') return null;
   const result = await pool.query(
     `WITH candidate AS (
        SELECT item.id

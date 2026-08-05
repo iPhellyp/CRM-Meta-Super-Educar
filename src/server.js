@@ -9,6 +9,9 @@ import { z } from 'zod';
 import {
   Wa2DataError,
   createMetaConnection,
+  createManualStageChangeRequest,
+  approveManualStageChangeRequest,
+  rejectManualStageChangeRequest,
   createMetaHistoricalImport,
   createLeadFileImportPreview,
   cancelLeadFileImport,
@@ -44,6 +47,7 @@ import {
   WA2_ANY_COMPLEMENTARY_LABEL_FILTER,
   WA2_NO_COMPLEMENTARY_LABEL_FILTER,
   listLeadHistory,
+  listManualStageRequestsForLead,
   markLeadInternalTest,
   listMetaConnections,
   listMetaImportForms,
@@ -1782,7 +1786,7 @@ function wa2LabelResultSuffix(result) {
   return messages[sync.reason] || '';
 }
 
-app.post('/leads/:id/stage', async (req, res) => {
+async function createStageRequestResponse(req, res, { allowLoss = false } = {}) {
   const returnPath = safeDashboardReturnPath(req.body.returnTo);
   const parsedId = z.string().uuid().safeParse(req.params.id);
   if (!parsedId.success) return redirectWith(res, returnPath, 'error', 'Lead inválido.');
@@ -1790,30 +1794,75 @@ app.post('/leads/:id/stage', async (req, res) => {
   if (!isDirectStageTarget(stage)) {
     return redirectWith(res, returnPath, 'error', 'Etapa inválida.');
   }
-  if (['LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED'].includes(stage)) {
+  if (!allowLoss && ['LOST', 'NO_INTEREST', 'INVALID_PHONE', 'DUPLICATED'].includes(stage)) {
     return redirectWith(res, returnPath, 'error', 'Use a ação Perder e informe o motivo obrigatório.');
   }
+  const reason = String(req.body.reason || '').trim().slice(0, 1000);
+  if (reason.length < 5) {
+    return redirectWith(res, returnPath, 'error', 'Informe o motivo obrigatório da solicitação.');
+  }
   try {
-    const eventName = getStageEventName(stage);
-    const result = await moveLeadStage(parsedId.data, stage, {
-      origin: 'MANUAL',
-      changedBy: req.user.sub,
-      mode: currentMetaMode(),
+    const request = await createManualStageChangeRequest({
+      leadId: parsedId.data,
+      requestedStage: stage,
+      requestedBy: req.user.sub,
+      mandatoryReason: reason,
     });
-    if (!result) return redirectWith(res, returnPath, 'error', 'Lead não encontrado.');
-    if (result.invalidTransition) {
-      return redirectWith(res, returnPath, 'error', 'Transição de etapa não permitida.');
-    }
-    const suffix = metaResultSuffix(eventName, result);
-    const wa2Suffix = wa2LabelResultSuffix(result);
-    redirectWith(
-      res,
-      returnPath,
-      'message',
-      `Lead movido para ${STAGE_LABELS[stage]}.${suffix}${wa2Suffix}`,
-    );
-  } catch {
-    redirectWith(res, returnPath, 'error', 'Não foi possível mover o lead.');
+    return redirectWith(res, returnPath, 'message', `Solicitação criada para ${STAGE_LABELS[stage]}. A etapa só mudará após aprovação e receipt WA2.`);
+  } catch (error) {
+    const messages = {
+      LEAD_NOT_FOUND: 'Lead não encontrado.',
+      MANUAL_STAGE_REQUEST_PENDING: 'Já existe uma solicitação de etapa pendente para este lead.',
+      MANUAL_STAGE_ALREADY_CURRENT: 'A etapa solicitada já é a etapa atual.',
+      MANUAL_STAGE_TARGET_INVALID: 'Etapa protegida ou inválida para solicitação manual.',
+    };
+    return redirectWith(res, returnPath, 'error', messages[error?.message] || 'Não foi possível criar a solicitação de etapa.');
+  }
+}
+
+app.post('/leads/:id/stage', (req, res) => createStageRequestResponse(req, res));
+app.post('/leads/:id/stage-request', (req, res) => createStageRequestResponse(req, res));
+
+app.post('/stage-requests/:id/approve', async (req, res) => {
+  const requestId = z.string().uuid().safeParse(req.params.id);
+  const returnPath = safeDashboardReturnPath(req.body.returnTo);
+  if (!requestId.success) return redirectWith(res, returnPath, 'error', 'Solicitação inválida.');
+  try {
+    const result = await approveManualStageChangeRequest({
+      requestId: requestId.data,
+      actor: req.user.sub,
+      emergencyOverride: req.body.emergencyOverride === 'true',
+      confirmation: String(req.body.confirmation || ''),
+      emergencyReason: String(req.body.emergencyReason || ''),
+    });
+    const message = result.status === 'PENDING_WA_LINK'
+      ? 'Solicitação aprovada, mas aguardando vínculo WA2 seguro.'
+      : 'Solicitação aprovada; aguardando etiqueta e receipt WA2.';
+    return redirectWith(res, returnPath, 'message', message);
+  } catch (error) {
+    const messages = {
+      MANUAL_STAGE_SELF_APPROVAL: 'O solicitante não pode aprovar a própria solicitação sem emergency override.',
+      MANUAL_STAGE_EMERGENCY_CONFIRMATION_REQUIRED: 'Confirmação de emergência inválida.',
+      MANUAL_STAGE_EMERGENCY_REASON_REQUIRED: 'Motivo reforçado obrigatório para emergency override.',
+      MANUAL_STAGE_REQUEST_NOT_PENDING: 'A solicitação não está pendente.',
+      MANUAL_STAGE_REQUEST_EXPIRED: 'A solicitação expirou.',
+      MANUAL_STAGE_REQUEST_NOT_FOUND: 'Solicitação não encontrada.',
+    };
+    return redirectWith(res, returnPath, 'error', messages[error?.message] || 'Não foi possível aprovar a solicitação.');
+  }
+});
+
+app.post('/stage-requests/:id/reject', async (req, res) => {
+  const requestId = z.string().uuid().safeParse(req.params.id);
+  const returnPath = safeDashboardReturnPath(req.body.returnTo);
+  const reason = String(req.body.reason || '').trim();
+  if (!requestId.success || reason.length < 5) return redirectWith(res, returnPath, 'error', 'Solicitação ou motivo de rejeição inválido.');
+  try {
+    await rejectManualStageChangeRequest({ requestId: requestId.data, actor: req.user.sub, reason });
+    return redirectWith(res, returnPath, 'message', 'Solicitação rejeitada sem alterar a etapa.');
+  } catch (error) {
+    return redirectWith(res, returnPath, 'error', error?.message === 'MANUAL_STAGE_REQUEST_NOT_FOUND'
+      ? 'Solicitação não encontrada.' : 'Não foi possível rejeitar a solicitação.');
   }
 });
 
@@ -2191,20 +2240,21 @@ app.post('/leads/:id/lost', async (req, res) => {
       DUPLICATED: STAGES.DUPLICATED,
     };
     const stage = stageByReason[parsed.data.lostReason] || STAGES.LOST;
-    const result = await moveLeadStage(parsedId.data, stage, {
-      origin: 'MANUAL',
-      changedBy: req.user.sub,
-      lostReason: parsed.data.lostReason,
-      lostNotes: parsed.data.lostNotes || null,
-      observation: `Perda registrada: ${LOST_REASON_LABELS[parsed.data.lostReason]}.`,
-      mode: currentMetaMode(),
+    await createManualStageChangeRequest({
+      leadId: parsedId.data,
+      requestedStage: stage,
+      requestedBy: req.user.sub,
+      mandatoryReason: `Perda solicitada: ${LOST_REASON_LABELS[parsed.data.lostReason]}. ${parsed.data.lostNotes || ''}`,
+      metadata: {
+        lostReason: parsed.data.lostReason,
+        lostNotes: parsed.data.lostNotes || null,
+      },
     });
-    if (!result || result.invalidTransition) {
-      return redirectWith(res, returnPath, 'error', 'Transição para perda não permitida.');
-    }
-    return redirectWith(res, returnPath, 'message', 'Perda registrada com motivo e sem evento positivo.');
-  } catch {
-    return redirectWith(res, returnPath, 'error', 'Não foi possível registrar a perda.');
+    return redirectWith(res, returnPath, 'message', 'Solicitação de perda criada; aguardando aprovação e confirmação WA2.');
+  } catch (error) {
+    return redirectWith(res, returnPath, 'error', error?.message === 'MANUAL_STAGE_REQUEST_PENDING'
+      ? 'Já existe uma solicitação de etapa pendente para este lead.'
+      : 'Não foi possível criar a solicitação de perda.');
   }
 });
 
@@ -2265,14 +2315,16 @@ app.get('/leads/:id', async (req, res, next) => {
   if (req.params.id === 'export.csv') return next();
   const parsedId = z.string().uuid().safeParse(req.params.id);
   if (!parsedId.success) return redirectWith(res, '/', 'error', 'Lead inválido.');
-  const [lead, history] = await Promise.all([
+  const [lead, history, manualStageRequests] = await Promise.all([
     getLeadById(parsedId.data),
     listLeadHistory(parsedId.data),
+    listManualStageRequestsForLead(parsedId.data),
   ]);
   if (!lead) return redirectWith(res, '/', 'error', 'Lead não encontrado.');
   return res.send(leadDetailView({
     lead,
     history,
+    manualStageRequests,
     csrfToken: issueCsrfToken(req, res),
   }));
 });
@@ -2287,6 +2339,7 @@ app.post('/leads/bulk', async (req, res) => {
   const parsedIds = z.array(z.string().uuid()).min(1).max(100).safeParse(rawIds);
   const stage = String(req.body.stage || '');
   const bulkAction = String(req.body.bulkAction || 'stage');
+  const manualReason = String(req.body.reason || '').trim().slice(0, 1000);
   const lostReason = String(req.body.lostReason || '');
   const lostNotes = String(req.body.lostNotes || '').trim().slice(0, 1000);
   const lossStage = [
@@ -2296,6 +2349,7 @@ app.post('/leads/bulk', async (req, res) => {
     !parsedIds.success ||
     !['stage', 'sync'].includes(bulkAction) ||
     (bulkAction === 'stage' && !isDirectStageTarget(stage)) ||
+    (bulkAction === 'stage' && manualReason.length < 5) ||
     (lossStage && !Object.hasOwn(LOST_REASON_LABELS, lostReason)) ||
     (lossStage && lostReason === 'OTHER' && !lostNotes)
   ) {
@@ -2308,16 +2362,18 @@ app.post('/leads/bulk', async (req, res) => {
       if (sync?.scheduled > 0) changed += 1;
       continue;
     }
-    const result = await moveLeadStage(id, stage, {
-      origin: 'MANUAL',
-      changedBy: req.user.sub,
-      observation: 'Alteração comercial em lote.',
-      metadata: { bulk: true },
-      lostReason: lossStage ? lostReason : null,
-      lostNotes: lossStage ? lostNotes || null : null,
-      mode: currentMetaMode(),
-    });
-    if (result?.stageChanged) changed += 1;
+    try {
+      await createManualStageChangeRequest({
+        leadId: id,
+        requestedStage: stage,
+        requestedBy: req.user.sub,
+        mandatoryReason: manualReason,
+        metadata: { bulk: true, lostReason: lossStage ? lostReason : null, lostNotes: lossStage ? lostNotes || null : null },
+      });
+      changed += 1;
+    } catch {
+      // Um lead conflitante não impede que as demais solicitações sejam registradas.
+    }
   }
   return redirectWith(
     res,

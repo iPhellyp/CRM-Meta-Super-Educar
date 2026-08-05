@@ -2088,6 +2088,7 @@ export async function getMetaCleanCanarySnapshot({
          ON event.tenant_id = job.tenant_id
         AND job.job_type = 'CONVERSION'
         AND job.payload->>'eventId' = event.id::text
+        AND event.validity_status = 'VALID'
        WHERE job.tenant_id = $1 AND event.lead_id = $2
        ORDER BY job.created_at DESC`,
       [tenant, safeLeadId],

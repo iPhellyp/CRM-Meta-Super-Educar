@@ -26,6 +26,13 @@ export class Wa2Error extends Error {
     requestId = null,
     retryAfter = null,
     remoteCode = null,
+    method = null,
+    path = null,
+    contentType = null,
+    durationMs = null,
+    timeout = false,
+    networkCause = null,
+    safeResponse = null,
   } = {}) {
     super(message);
     this.name = 'Wa2Error';
@@ -34,6 +41,13 @@ export class Wa2Error extends Error {
     this.requestId = requestId;
     this.retryAfter = retryAfter;
     this.remoteCode = remoteCode;
+    this.method = method;
+    this.path = path;
+    this.contentType = contentType;
+    this.durationMs = durationMs;
+    this.timeout = timeout;
+    this.networkCause = networkCause;
+    this.safeResponse = safeResponse;
   }
 }
 
@@ -185,6 +199,42 @@ function individualJidPhone(value) {
 export function brazilianPhoneAliases(phoneNormalized, { confirmedMobile = false } = {}) {
   const identity = getBrazilianPhoneIdentity(phoneNormalized, { confirmedMobile });
   return new Set(identity.aliases.length ? identity.aliases : [phoneNormalized]);
+}
+
+function safeRequestPath(value) {
+  const raw = String(value || '').split('?')[0];
+  return raw
+    .split('/')
+    .map((segment) => {
+      if (!segment) return segment;
+      if (/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(segment)) return '<id>';
+      if (/^[A-Za-z0-9_-]{16,}$/.test(segment)) return '<id>';
+      return segment.slice(0, 80);
+    })
+    .join('/');
+}
+
+function safeContentType(value) {
+  const match = String(value || '').toLowerCase().match(/^[a-z0-9.+-]+\/[a-z0-9.+-]+/);
+  return match ? match[0] : null;
+}
+
+function safeResponseSummary(status, contentType, payload) {
+  return {
+    status: Number.isInteger(status) ? status : null,
+    code: safeRemoteCode(payload),
+    contentType: safeContentType(contentType),
+  };
+}
+
+function enrichWa2Error(error, details) {
+  if (!(error instanceof Wa2Error)) return error;
+  for (const [key, value] of Object.entries(details)) {
+    if (value !== null && value !== undefined && (error[key] === null || error[key] === undefined)) {
+      error[key] = value;
+    }
+  }
+  return error;
 }
 
 function sameResolvedPhone(requestedPhone, resolvedPhone) {
@@ -880,6 +930,9 @@ export function createWa2Client({
     idempotencyKey = null,
   } = {}) {
     const requestId = randomUUID();
+    const startedAt = Date.now();
+    const methodName = String(method).toUpperCase();
+    const safePath = safeRequestPath(path);
     const mutation = method !== 'GET';
     const mutationKey = mutation ? (idempotencyKey || randomUUID()) : null;
     if (mutation && !IDEMPOTENCY_KEY_PATTERN.test(mutationKey)) {
@@ -914,6 +967,11 @@ export function createWa2Client({
         {
           code: timedOut ? 'WA2_TIMEOUT' : 'WA2_UNAVAILABLE',
           requestId,
+          method: methodName,
+          path: safePath,
+          durationMs: Date.now() - startedAt,
+          timeout: timedOut,
+          networkCause: timedOut ? 'TIMEOUT' : 'CONNECTION_FAILED',
         },
       );
     }
@@ -927,27 +985,80 @@ export function createWa2Client({
           requestId,
           retryAfter: safeRetryAfter(response.headers.get('retry-after')),
           remoteCode: safeRemoteCode(payload),
+          method: methodName,
+          path: safePath,
+          contentType: safeContentType(response.headers.get('content-type')),
+          durationMs: Date.now() - startedAt,
+          safeResponse: safeResponseSummary(
+            response.status,
+            response.headers.get('content-type'),
+            payload,
+          ),
         });
       }
       try {
         return parse(payload);
       } catch (error) {
         if (error instanceof Wa2Error) {
-          if (!error.requestId) error.requestId = requestId;
+          enrichWa2Error(error, {
+            requestId,
+            method: methodName,
+            path: safePath,
+            contentType: safeContentType(response.headers.get('content-type')),
+            durationMs: Date.now() - startedAt,
+            safeResponse: safeResponseSummary(
+              response.status,
+              response.headers.get('content-type'),
+              payload,
+            ),
+          });
           throw error;
         }
         throw new Wa2Error('Resposta WA2 incompatível', {
           code: 'WA2_RESPONSE_INVALID',
           requestId,
+          method: methodName,
+          path: safePath,
+          contentType: safeContentType(response.headers.get('content-type')),
+          durationMs: Date.now() - startedAt,
+          safeResponse: safeResponseSummary(
+            response.status,
+            response.headers.get('content-type'),
+            payload,
+          ),
         });
       }
     } catch (error) {
-      if (error instanceof Wa2Error) throw error;
+      if (error instanceof Wa2Error) {
+        enrichWa2Error(error, {
+          method: methodName,
+          path: safePath,
+          durationMs: Date.now() - startedAt,
+          contentType: safeContentType(response.headers.get('content-type')),
+          safeResponse: safeResponseSummary(
+            response.status,
+            response.headers.get('content-type'),
+            null,
+          ),
+        });
+        throw error;
+      }
       throw new Wa2Error(
         controller.signal.aborted ? 'WA2 não respondeu dentro do prazo' : 'Resposta WA2 inválida',
         {
           code: controller.signal.aborted ? 'WA2_TIMEOUT' : 'WA2_RESPONSE_INVALID',
           requestId,
+          method: methodName,
+          path: safePath,
+          contentType: safeContentType(response.headers.get('content-type')),
+          durationMs: Date.now() - startedAt,
+          timeout: controller.signal.aborted,
+          networkCause: controller.signal.aborted ? 'TIMEOUT' : null,
+          safeResponse: safeResponseSummary(
+            response.status,
+            response.headers.get('content-type'),
+            null,
+          ),
         },
       );
     } finally {

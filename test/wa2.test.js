@@ -229,7 +229,16 @@ test('timeout aborta a requisição sem expor detalhe do transporte', async () =
   }), env);
   await assert.rejects(
     () => client.getHealth(),
-    (error) => error instanceof Wa2Error && error.code === 'WA2_TIMEOUT',
+    (error) => {
+      assert.equal(error instanceof Wa2Error, true);
+      assert.equal(error.code, 'WA2_TIMEOUT');
+      assert.equal(error.method, 'GET');
+      assert.equal(error.path, '/api/internal/v1/health');
+      assert.equal(error.timeout, true);
+      assert.equal(error.networkCause, 'TIMEOUT');
+      assert.equal(Number.isFinite(error.durationMs), true);
+      return true;
+    },
   );
 });
 
@@ -240,8 +249,16 @@ test('resposta 401 é sanitizada e não inclui segredo ou corpo remoto', async (
   await assert.rejects(() => client.getHealth(), (error) => {
     assert.equal(error.status, 401);
     assert.equal(error.remoteCode, 'AUTH_INVALID');
+    assert.equal(error.method, 'GET');
+    assert.equal(error.path, '/api/internal/v1/health');
+    assert.equal(error.contentType, 'application/json');
+    assert.equal(error.safeResponse.status, 401);
+    assert.equal(error.safeResponse.code, 'AUTH_INVALID');
+    assert.equal(Number.isFinite(error.durationMs), true);
+    assert.match(error.requestId, /^[0-9a-f-]{36}$/i);
     assert.equal(error.message.includes(PLACEHOLDER_SECRET), false);
     assert.equal(error.message.includes('leak'), false);
+    assert.equal(JSON.stringify(error.safeResponse).includes(PLACEHOLDER_SECRET), false);
     return true;
   });
 });

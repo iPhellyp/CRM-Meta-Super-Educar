@@ -9,6 +9,56 @@ export const WA2_CURRENT_LABEL_EVIDENCE_TYPES = new Set([
   'WA2_CONTACT_STATE',
   'WA2_LABEL_APPLY_EVENT',
 ]);
+export const NORMAL_REBIND_STATES = new Set([
+  'PENDING_REBIND',
+  'REBIND_COMPLETED_IDENTITY_PENDING',
+  'IDENTITY_VERIFIED_STAGE_PENDING',
+  'ALREADY_ALIGNED',
+  'CONFLICT',
+]);
+
+export function classifyNormalRebindState({
+  legacyActive,
+  activeLinkCurrent,
+  rebindHistoryPresent,
+  identityCurrent,
+  confirmationCurrent,
+  stage,
+  stageSource,
+  stageVerificationStatus,
+  officialLabelCurrent,
+  applyEvidencePresent,
+}) {
+  const stageAligned = stage === 'QUALIFIED' &&
+    stageSource === 'WHATSAPP_LABEL' &&
+    stageVerificationStatus === 'VERIFIED';
+  const inconsistent =
+    (!legacyActive && !activeLinkCurrent) ||
+    (rebindHistoryPresent && !activeLinkCurrent) ||
+    (activeLinkCurrent && !rebindHistoryPresent && !legacyActive) ||
+    (identityCurrent && !activeLinkCurrent) ||
+    (confirmationCurrent && !identityCurrent) ||
+    (stageAligned && (!activeLinkCurrent || !rebindHistoryPresent || !identityCurrent || !confirmationCurrent));
+
+  if (inconsistent) return 'CONFLICT';
+  if (
+    legacyActive && !activeLinkCurrent && !rebindHistoryPresent &&
+    !identityCurrent && !confirmationCurrent && stage === 'NEW'
+  ) return 'PENDING_REBIND';
+  if (
+    activeLinkCurrent && rebindHistoryPresent && !identityCurrent &&
+    !confirmationCurrent && stage === 'NEW'
+  ) return 'REBIND_COMPLETED_IDENTITY_PENDING';
+  if (
+    activeLinkCurrent && rebindHistoryPresent && identityCurrent &&
+    !confirmationCurrent && stage === 'NEW'
+  ) return 'IDENTITY_VERIFIED_STAGE_PENDING';
+  if (
+    activeLinkCurrent && rebindHistoryPresent && identityCurrent &&
+    confirmationCurrent && stageAligned && officialLabelCurrent && applyEvidencePresent
+  ) return 'ALREADY_ALIGNED';
+  return 'CONFLICT';
+}
 
 function text(value, field, { max = 255, required = true } = {}) {
   const result = String(value ?? '').trim();

@@ -1938,6 +1938,48 @@ export async function getActiveWa2ContactLinkForLead(leadId, instanceId = null) 
   return result.rows;
 }
 
+export async function getNormalWa2RebindState(
+  leadId,
+  instanceId,
+  rebindIdempotencyKey,
+  confirmationIdempotencyKey,
+) {
+  const tenant = tenantId();
+  const [activeLink, rebindHistory, verifiedIdentity, confirmation] = await Promise.all([
+    getActiveWa2ContactLinkForLead(leadId, instanceId),
+    pool.query(
+      `SELECT * FROM lead_stage_history
+       WHERE tenant_id = $1 AND lead_id = $2
+         AND activity_type = $3
+         AND metadata->>'idempotencyKey' = $4
+       ORDER BY changed_at DESC
+       LIMIT 1`,
+      [tenant, leadId, WA2_CHAT_REBIND_ACTIVITY, rebindIdempotencyKey],
+    ),
+    pool.query(
+      `SELECT * FROM lead_verified_whatsapp_identities
+       WHERE tenant_id = $1 AND lead_id = $2 AND wa2_instance_id = $3
+       ORDER BY verified_at DESC
+       LIMIT 1`,
+      [tenant, leadId, instanceId],
+    ),
+    pool.query(
+      `SELECT * FROM wa2_current_label_confirmations
+       WHERE tenant_id = $1 AND lead_id = $2 AND wa2_instance_id = $3
+         AND idempotency_key = $4
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [tenant, leadId, instanceId, confirmationIdempotencyKey],
+    ),
+  ]);
+  return {
+    activeLink,
+    rebindHistory: rebindHistory.rows[0] || null,
+    verifiedIdentity: verifiedIdentity.rows[0] || null,
+    confirmation: confirmation.rows[0] || null,
+  };
+}
+
 export async function getWa2ContactLinkById(id) {
   const result = await pool.query(
     `SELECT link.*, instance.name AS instance_name,

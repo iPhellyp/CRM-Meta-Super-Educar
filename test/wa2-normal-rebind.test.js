@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  classifyNormalRebindState,
   WA2_CURRENT_LABEL_EVIDENCE_TYPES,
   WA2_NORMAL_CHAT_REBIND_REASON,
   normalRebindPayloadHash,
@@ -142,4 +143,52 @@ test('script é exclusivo do lead CRM02 e não usa mensagem ou envio', () => {
   assert.match(script, /waMessageIdCreated: false/);
   assert.doesNotMatch(script, /sendWa2ChatMessage/);
   assert.doesNotMatch(script, /processWa2LabelEvent/);
+});
+
+test('máquina de estados distingue o estado pré-rebind do estado alinhado', () => {
+  const common = {
+    rebindHistoryPresent: false,
+    identityCurrent: false,
+    confirmationCurrent: false,
+    stage: 'NEW',
+    stageSource: 'LEGACY_UNVERIFIED',
+    stageVerificationStatus: 'UNVERIFIED_NO_LABEL',
+    officialLabelCurrent: true,
+    applyEvidencePresent: true,
+  };
+  assert.equal(classifyNormalRebindState({
+    ...common,
+    legacyActive: true,
+    activeLinkCurrent: false,
+  }), 'PENDING_REBIND');
+  assert.equal(classifyNormalRebindState({
+    legacyActive: false,
+    activeLinkCurrent: true,
+    rebindHistoryPresent: true,
+    identityCurrent: true,
+    confirmationCurrent: true,
+    stage: 'QUALIFIED',
+    stageSource: 'WHATSAPP_LABEL',
+    stageVerificationStatus: 'VERIFIED',
+    officialLabelCurrent: true,
+    applyEvidencePresent: true,
+  }), 'ALREADY_ALIGNED');
+});
+
+test('script possui carregadores distintos para pré e pós-rebind e não repete escrita na validação', () => {
+  assert.match(script, /loadCurrentStateSnapshot/);
+  assert.match(script, /ALREADY_ALIGNED/);
+  assert.match(script, /writes: 0/);
+  assert.match(script, /getNormalWa2RebindState/);
+  assert.doesNotMatch(script, /loadSnapshot\(\{ allowAligned/);
+  assert.doesNotMatch(script, /const repeatRebind/);
+  assert.doesNotMatch(script, /const repeatIdentity/);
+  assert.doesNotMatch(script, /const repeatConfirmation/);
+});
+
+test('feed WA2 inválido é marcado sem relaxar o parser global', () => {
+  assert.match(script, /invalidFeedPage/);
+  assert.match(script, /WA2_PHONE_INVALID/);
+  assert.match(script, /AUDITED_WA2_EVENT_SNAPSHOT/);
+  assert.match(script, /EXPECTED_APPLY_EVENT_ID/);
 });

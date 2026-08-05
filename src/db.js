@@ -4916,7 +4916,7 @@ async function loadStageTruthRows() {
             lead.stage_source, lead.stage_verification_status,
             COALESCE(link_counts.active_link_count, 0)::int AS active_link_count,
             COALESCE(official.official_label_count, 0)::int AS official_label_count,
-            official.target_stage, official.source_label_id,
+            official.binding_stages, official.source_label_id,
             official.source_label_name, official.source_action_id,
             official.source_receipt_id, official.source_observed_at,
             EXISTS (

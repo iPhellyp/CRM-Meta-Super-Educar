@@ -135,6 +135,7 @@ test('confirmação atual é separada do receipt e alinha somente NEW para QUALI
 test('script é exclusivo do lead CRM02 e não usa mensagem ou envio', () => {
   assert.match(script, /a1d7206f-4de2-4205-95d5-de3184904940/);
   assert.match(script, /fd402cac-8777-4c2a-a623-7f44775619e0/);
+  assert.match(script, /2026-08-04T18:01:36\.122Z/);
   assert.match(script, /listWa2LabeledIdentities/);
   assert.doesNotMatch(script, /getWa2ContactByPhone/);
   assert.match(script, /WA2_LABEL_APPLY_EVENT/);

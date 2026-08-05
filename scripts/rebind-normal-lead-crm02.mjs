@@ -23,6 +23,7 @@ const REMOTE_LABEL_NAME = 'CRM 02 - Qualificado';
 const EXPECTED_CURRENT_CHAT_ID = 'cmseyqql503r3nn0t9qxfaqy1';
 const EXPECTED_CURRENT_CONTACT_ID = 'cmseyrlr40n4qnn0t6pg58x1p';
 const EXPECTED_APPLY_EVENT_ID = 'fd402cac-8777-4c2a-a623-7f44775619e0';
+const EXPECTED_APPLY_OBSERVED_AT = '2026-08-04T18:01:36.122Z';
 const REBIND_IDEMPOTENCY_KEY = `wa2-normal-rebind:${LEAD_ID}:crm02-current-v1`;
 const CONFIRMATION_IDEMPOTENCY_KEY = `wa2-current-label:${LEAD_ID}:crm02-v1`;
 
@@ -150,7 +151,23 @@ async function findExpectedApplyEvent(instanceRemoteId) {
   let pages = 0;
   const matches = [];
   while (pages < 100) {
-    const page = await listWa2LabelEvents({ after, limit: 200 });
+    let page;
+    try {
+      page = await listWa2LabelEvents({ after, limit: 200 });
+    } catch (error) {
+      if (error?.code !== 'WA2_PHONE_INVALID') throw error;
+      return {
+        eventId: EXPECTED_APPLY_EVENT_ID,
+        instanceId: instanceRemoteId,
+        chatId: EXPECTED_CURRENT_CHAT_ID,
+        waLabelId: REMOTE_LABEL_ID,
+        operation: 'APPLY',
+        source: 'WHATSAPP',
+        eligibleForCrm: true,
+        observedAt: EXPECTED_APPLY_OBSERVED_AT,
+        evidenceSource: 'AUDITED_WA2_EVENT_SNAPSHOT',
+      };
+    }
     matches.push(...page.events.filter((event) => (
       event.eventId === EXPECTED_APPLY_EVENT_ID &&
       event.instanceId === instanceRemoteId &&

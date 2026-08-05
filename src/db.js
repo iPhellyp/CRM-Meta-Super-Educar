@@ -4134,6 +4134,303 @@ export async function createMetaCleanCanaryEvent({
   }
 }
 
+const HISTORICAL_MQL_STAGES = [
+  'QUALIFIED',
+  'NEGOTIATING',
+  'OPPORTUNITY',
+  'AWAITING_ENROLLMENT',
+  'AWAITING_PAYMENT',
+];
+
+function historicalMqlRouteSql(alias = 'lead', connectionAlias = 'connection') {
+  return `(
+    ${alias}.business_id = '4589264227835647'
+    OR (
+      ${alias}.meta_page_id = '1119504964569694'
+      AND ${alias}.meta_form_id = '1760211795329890'
+    )
+    OR ${connectionAlias}.business_id = '4589264227835647'
+  )`;
+}
+
+async function selectMetaCleanHistoricalCandidate(client, {
+  historicalEventId,
+  leadId,
+  datasetId,
+  cutoff,
+}) {
+  const result = await client.query(
+    `SELECT event.id AS historical_event_id,
+            event.event_id AS historical_event_key,
+            event.event_time AS historical_event_time,
+            lead.*,
+            connection.business_id AS connection_business_id,
+            (SELECT count(*)
+             FROM wa2_contact_links link
+             WHERE link.tenant_id = lead.tenant_id
+               AND link.lead_id = lead.id
+               AND link.unlinked_at IS NULL) AS active_link_count,
+            (SELECT count(*)
+             FROM lead_verified_whatsapp_identities identity
+             WHERE identity.tenant_id = lead.tenant_id
+               AND identity.lead_id = lead.id
+               AND identity.verified = true) AS verified_identity_count,
+            (SELECT count(DISTINCT receipt.remote_label_id)
+             FROM wa2_contact_links link
+             JOIN wa2_instances instance
+               ON instance.tenant_id = link.tenant_id
+              AND instance.id = link.wa2_instance_id
+              AND instance.enabled = true
+             JOIN wa2_label_event_receipts receipt
+               ON receipt.tenant_id = link.tenant_id
+              AND receipt.remote_instance_id = instance.remote_instance_id
+              AND receipt.remote_chat_id = link.remote_chat_id
+              AND receipt.operation = 'APPLY'
+             JOIN wa2_label_bindings binding
+               ON binding.tenant_id = receipt.tenant_id
+              AND binding.wa2_instance_id = link.wa2_instance_id
+              AND binding.remote_label_id = receipt.remote_label_id
+              AND binding.enabled = true
+             WHERE link.tenant_id = lead.tenant_id
+               AND link.lead_id = lead.id
+               AND link.unlinked_at IS NULL
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM wa2_label_event_receipts removed
+                 WHERE removed.tenant_id = receipt.tenant_id
+                   AND removed.remote_instance_id = receipt.remote_instance_id
+                   AND removed.remote_chat_id = receipt.remote_chat_id
+                   AND removed.remote_label_id = receipt.remote_label_id
+                   AND removed.operation = 'REMOVE'
+                   AND removed.observed_at >= receipt.observed_at
+               )) AS current_official_label_count
+     FROM meta_conversion_events event
+     JOIN leads lead
+       ON lead.tenant_id = event.tenant_id
+      AND lead.id = event.lead_id
+     LEFT JOIN meta_connections connection
+       ON connection.tenant_id = event.tenant_id
+      AND connection.id = event.meta_connection_id
+     WHERE event.tenant_id = $1
+       AND event.id = $2
+       AND event.lead_id = $3
+       AND event.event_name = 'Marketing Qualified Lead'
+       AND event.validity_status = 'VALID'
+       AND event.event_time >= $4
+       AND lead.stage = ANY($5::text[])
+       AND lead.stage_source = 'WHATSAPP_LABEL'
+       AND lead.stage_verification_status = 'VERIFIED'
+       AND lead.meta_lead_id IS NOT NULL
+       AND lead.meta_outbound_eligible = true
+       AND lead.is_internal_test = false
+       AND ${historicalMqlRouteSql()}
+     FOR UPDATE OF event, lead` ,
+    [tenantId(), historicalEventId, leadId, cutoff, HISTORICAL_MQL_STAGES],
+  );
+  const candidate = result.rows[0] || null;
+  if (!candidate) throw new Error('META_CLEAN_HISTORICAL_CANDIDATE_INVALID');
+  if (Number(candidate.active_link_count) !== 1) throw new Error('META_CLEAN_HISTORICAL_LINK_INVALID');
+  if (
+    Number(candidate.verified_identity_count) !== 1
+    && Number(candidate.current_official_label_count) !== 1
+  ) {
+    throw new Error('META_CLEAN_HISTORICAL_IDENTITY_INVALID');
+  }
+  if (Number(candidate.current_official_label_count) !== 1) {
+    throw new Error('META_CLEAN_HISTORICAL_LABEL_AMBIGUOUS');
+  }
+  const existing = await client.query(
+    `SELECT event.id
+     FROM meta_conversion_events event
+     JOIN meta_datasets dataset
+       ON dataset.tenant_id = event.tenant_id
+      AND dataset.id = event.meta_dataset_id
+     WHERE event.tenant_id = $1
+       AND event.lead_id = $2
+       AND event.event_name = 'Marketing Qualified Lead'
+       AND event.validity_status = 'VALID'
+       AND dataset.dataset_id = $3
+     LIMIT 1`,
+    [tenantId(), leadId, datasetId],
+  );
+  if (existing.rows[0]) throw new Error('META_CLEAN_HISTORICAL_ALREADY_SENT');
+  return candidate;
+}
+
+export async function listMetaCleanHistoricalCandidates({
+  datasetId = META_CLEAN_DATASET_ID,
+  cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+  limit = 25,
+} = {}) {
+  const safeDatasetId = String(datasetId || '').trim();
+  if (safeDatasetId !== META_CLEAN_DATASET_ID) throw new Error('META_CLEAN_DATASET_INVALID');
+  const safeLimit = Math.min(Math.max(Number(limit) || 25, 1), 25);
+  const client = await pool.connect();
+  try {
+    const candidates = await client.query(
+      `SELECT event.id AS historical_event_id,
+              event.event_id AS historical_event_key,
+              event.lead_id,
+              event.event_time,
+              lead.stage
+       FROM meta_conversion_events event
+       JOIN leads lead
+         ON lead.tenant_id = event.tenant_id
+        AND lead.id = event.lead_id
+       LEFT JOIN meta_connections connection
+         ON connection.tenant_id = event.tenant_id
+        AND connection.id = event.meta_connection_id
+       WHERE event.tenant_id = $1
+         AND event.event_name = 'Marketing Qualified Lead'
+         AND event.validity_status = 'VALID'
+         AND event.event_time >= $2
+         AND lead.stage = ANY($3::text[])
+         AND lead.stage_source = 'WHATSAPP_LABEL'
+         AND lead.stage_verification_status = 'VERIFIED'
+         AND lead.meta_lead_id IS NOT NULL
+         AND lead.meta_outbound_eligible = true
+         AND lead.is_internal_test = false
+         AND ${historicalMqlRouteSql()}
+         AND NOT EXISTS (
+           SELECT 1
+           FROM meta_conversion_events newer
+           JOIN meta_datasets dataset
+             ON dataset.tenant_id = newer.tenant_id
+            AND dataset.id = newer.meta_dataset_id
+           WHERE newer.tenant_id = event.tenant_id
+             AND newer.lead_id = event.lead_id
+             AND newer.event_name = 'Marketing Qualified Lead'
+             AND newer.validity_status = 'VALID'
+             AND dataset.dataset_id = $4
+         )
+         AND (
+           SELECT count(*)
+           FROM wa2_contact_links link
+           WHERE link.tenant_id = lead.tenant_id
+             AND link.lead_id = lead.id
+             AND link.unlinked_at IS NULL
+         ) = 1
+         AND (
+           SELECT count(DISTINCT receipt.remote_label_id)
+           FROM wa2_contact_links link
+           JOIN wa2_instances instance
+             ON instance.tenant_id = link.tenant_id
+            AND instance.id = link.wa2_instance_id
+            AND instance.enabled = true
+           JOIN wa2_label_event_receipts receipt
+             ON receipt.tenant_id = link.tenant_id
+            AND receipt.remote_instance_id = instance.remote_instance_id
+            AND receipt.remote_chat_id = link.remote_chat_id
+            AND receipt.operation = 'APPLY'
+           JOIN wa2_label_bindings binding
+             ON binding.tenant_id = receipt.tenant_id
+            AND binding.wa2_instance_id = link.wa2_instance_id
+            AND binding.remote_label_id = receipt.remote_label_id
+            AND binding.enabled = true
+           WHERE link.tenant_id = lead.tenant_id
+             AND link.lead_id = lead.id
+             AND link.unlinked_at IS NULL
+             AND NOT EXISTS (
+               SELECT 1
+               FROM wa2_label_event_receipts removed
+               WHERE removed.tenant_id = receipt.tenant_id
+                 AND removed.remote_instance_id = receipt.remote_instance_id
+                 AND removed.remote_chat_id = receipt.remote_chat_id
+                 AND removed.remote_label_id = receipt.remote_label_id
+                 AND removed.operation = 'REMOVE'
+                 AND removed.observed_at >= receipt.observed_at
+             )
+         ) = 1
+       ORDER BY event.event_time, event.lead_id
+       LIMIT $5`,
+      [tenantId(), cutoff, HISTORICAL_MQL_STAGES, safeDatasetId, safeLimit],
+    );
+    return candidates.rows;
+  } finally {
+    client.release();
+  }
+}
+
+export async function createMetaCleanHistoricalBatch({
+  candidates = [],
+  datasetId = META_CLEAN_DATASET_ID,
+  cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+  dryRun = true,
+} = {}) {
+  const safeDatasetId = String(datasetId || '').trim();
+  if (safeDatasetId !== META_CLEAN_DATASET_ID) throw new Error('META_CLEAN_DATASET_INVALID');
+  if (!Array.isArray(candidates) || candidates.length < 1 || candidates.length > 25) {
+    throw new Error('META_CLEAN_HISTORICAL_BATCH_INVALID');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const datasetResult = await client.query(
+      `SELECT dataset.id AS clean_meta_dataset_id,
+              dataset.dataset_id AS clean_dataset_value,
+              dataset.meta_connection_id AS clean_meta_connection_id,
+              dataset.active AS clean_dataset_active,
+              connection.status AS clean_connection_status,
+              connection.active AS clean_connection_active
+       FROM meta_datasets dataset
+       JOIN meta_connections connection
+         ON connection.tenant_id = dataset.tenant_id
+        AND connection.id = dataset.meta_connection_id
+       WHERE dataset.tenant_id = $1 AND dataset.dataset_id = $2
+       LIMIT 1`,
+      [tenantId(), safeDatasetId],
+    );
+    const dataset = datasetResult.rows[0];
+    if (
+      !dataset
+      || dataset.clean_dataset_value !== safeDatasetId
+      || dataset.clean_dataset_active !== true
+      || dataset.clean_connection_active !== true
+      || dataset.clean_connection_status !== 'VALID'
+    ) throw new Error('META_CLEAN_DATASET_NOT_ACTIVE');
+    const created = [];
+    for (const item of candidates) {
+      const candidate = await selectMetaCleanHistoricalCandidate(client, {
+        historicalEventId: item.historical_event_id,
+        leadId: item.lead_id,
+        datasetId: safeDatasetId,
+        cutoff,
+      });
+      const event = await createOrGetMetaEvent(client, {
+        lead: {
+          ...candidate,
+          meta_connection_id: dataset.clean_meta_connection_id,
+          dataset_id: safeDatasetId,
+        },
+        eventName: 'Marketing Qualified Lead',
+        eventTime: candidate.historical_event_time,
+        mode: 'live',
+        occurrenceKey: `meta-clean-historical:${candidate.historical_event_id}:${safeDatasetId}:mql:v1`,
+      });
+      if (!event) throw new Error('META_CLEAN_HISTORICAL_EVENT_NOT_CREATED');
+      const jobCreated = await enqueueConversionJob(client, event);
+      created.push({ event, jobCreated });
+    }
+    if (dryRun) {
+      await client.query('ROLLBACK');
+      return { dryRun: true, writes: 0, events: created.length, jobs: 0, created };
+    }
+    await client.query('COMMIT');
+    return {
+      dryRun: false,
+      writes: created.length,
+      events: created.length,
+      jobs: created.filter((item) => item.jobCreated).length,
+      created,
+    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function ensureMetaEventForStage(
   client,
   { lead, stage, eventTime, mode, officialLabelEvidence = false },

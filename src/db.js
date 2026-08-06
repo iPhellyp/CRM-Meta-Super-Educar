@@ -76,6 +76,12 @@ export const WA2_NO_COMPLEMENTARY_LABEL_FILTER = '__none_complementary__';
 
 const UUID_PATTERN = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}';
 
+function currentMetaEventIdFilter(eventAlias, leadAlias, eventSlug, mode) {
+  const baseEventId = `concat('crm:', ${leadAlias}.id, ':${eventSlug}:', dataset.dataset_id, ':${mode}')`;
+  return `(${eventAlias}.event_id = ${baseEventId}
+    OR ${eventAlias}.event_id LIKE concat(${baseEventId}, ':occ:%'))`;
+}
+
 export function parseWa2LabelKey(value) {
   const raw = String(value || '').trim();
   const match = raw.match(new RegExp(`^(${UUID_PATTERN}):([A-Za-z0-9_-]{1,128})$`));
@@ -436,19 +442,61 @@ export async function listLeads({
      LEFT JOIN LATERAL (
        SELECT
          (SELECT event.status FROM meta_conversion_events event
-          WHERE event.tenant_id = leads.tenant_id AND event.lead_id = leads.id
-            AND event.validity_status = 'VALID'
-            AND event.event_id = concat('crm:', leads.id, ':marketing_qualified_lead:', '${currentMetaMode}')
-          ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS mql_status,
-         (SELECT event.validity_status FROM meta_conversion_events event
+          JOIN meta_datasets dataset
+            ON dataset.tenant_id = event.tenant_id
+           AND dataset.id = event.meta_dataset_id
+           AND dataset.dataset_id = '${META_CLEAN_DATASET_ID}'
           WHERE event.tenant_id = leads.tenant_id AND event.lead_id = leads.id
             AND event.event_name = 'Marketing Qualified Lead'
-          ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS mql_validity,
-         (SELECT event.status FROM meta_conversion_events event
-          WHERE event.tenant_id = leads.tenant_id AND event.lead_id = leads.id
             AND event.validity_status = 'VALID'
-            AND event.event_id = concat('crm:', leads.id, ':sales_opportunity:', '${currentMetaMode}')
-          ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS opportunity_status
+            AND ${currentMetaEventIdFilter('event', 'leads', 'marketing_qualified_lead', currentMetaMode)}
+            ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS mql_status,
+         (SELECT event.validity_status FROM meta_conversion_events event
+          JOIN meta_datasets dataset
+            ON dataset.tenant_id = event.tenant_id
+           AND dataset.id = event.meta_dataset_id
+           AND dataset.dataset_id = '${META_CLEAN_DATASET_ID}'
+          WHERE event.tenant_id = leads.tenant_id AND event.lead_id = leads.id
+            AND event.event_name = 'Marketing Qualified Lead'
+            AND ${currentMetaEventIdFilter('event', 'leads', 'marketing_qualified_lead', currentMetaMode)}
+            ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS mql_validity,
+         (SELECT event.meta_response->>'events_received' FROM meta_conversion_events event
+          JOIN meta_datasets dataset
+            ON dataset.tenant_id = event.tenant_id
+           AND dataset.id = event.meta_dataset_id
+           AND dataset.dataset_id = '${META_CLEAN_DATASET_ID}'
+          WHERE event.tenant_id = leads.tenant_id AND event.lead_id = leads.id
+            AND event.event_name = 'Marketing Qualified Lead'
+            AND ${currentMetaEventIdFilter('event', 'leads', 'marketing_qualified_lead', currentMetaMode)}
+            ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS mql_events_received,
+         (SELECT event.status FROM meta_conversion_events event
+          JOIN meta_datasets dataset
+            ON dataset.tenant_id = event.tenant_id
+           AND dataset.id = event.meta_dataset_id
+           AND dataset.dataset_id = '${META_CLEAN_DATASET_ID}'
+          WHERE event.tenant_id = leads.tenant_id AND event.lead_id = leads.id
+            AND event.event_name = 'Sales Opportunity'
+            AND event.validity_status = 'VALID'
+            AND ${currentMetaEventIdFilter('event', 'leads', 'sales_opportunity', currentMetaMode)}
+            ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS opportunity_status
+         , (SELECT event.validity_status FROM meta_conversion_events event
+            JOIN meta_datasets dataset
+              ON dataset.tenant_id = event.tenant_id
+             AND dataset.id = event.meta_dataset_id
+             AND dataset.dataset_id = '${META_CLEAN_DATASET_ID}'
+            WHERE event.tenant_id = leads.tenant_id AND event.lead_id = leads.id
+              AND event.event_name = 'Sales Opportunity'
+              AND ${currentMetaEventIdFilter('event', 'leads', 'sales_opportunity', currentMetaMode)}
+            ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS opportunity_validity,
+         (SELECT event.meta_response->>'events_received' FROM meta_conversion_events event
+            JOIN meta_datasets dataset
+              ON dataset.tenant_id = event.tenant_id
+             AND dataset.id = event.meta_dataset_id
+             AND dataset.dataset_id = '${META_CLEAN_DATASET_ID}'
+            WHERE event.tenant_id = leads.tenant_id AND event.lead_id = leads.id
+              AND event.event_name = 'Sales Opportunity'
+              AND ${currentMetaEventIdFilter('event', 'leads', 'sales_opportunity', currentMetaMode)}
+            ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS opportunity_events_received
      ) meta_status ON true
      ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
      ORDER BY ${orderBy} LIMIT $${limitIndex} OFFSET $${values.length}`,
@@ -488,19 +536,61 @@ export async function getLeadById(id) {
      LEFT JOIN LATERAL (
        SELECT
          (SELECT event.status FROM meta_conversion_events event
-          WHERE event.tenant_id=leads.tenant_id AND event.lead_id=leads.id
-            AND event.validity_status = 'VALID'
-            AND event.event_id = concat('crm:', leads.id, ':marketing_qualified_lead:', '${currentMetaMode}')
-          ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS mql_status,
-         (SELECT event.validity_status FROM meta_conversion_events event
+          JOIN meta_datasets dataset
+            ON dataset.tenant_id = event.tenant_id
+           AND dataset.id = event.meta_dataset_id
+           AND dataset.dataset_id = '${META_CLEAN_DATASET_ID}'
           WHERE event.tenant_id=leads.tenant_id AND event.lead_id=leads.id
             AND event.event_name = 'Marketing Qualified Lead'
-          ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS mql_validity,
-         (SELECT event.status FROM meta_conversion_events event
-          WHERE event.tenant_id=leads.tenant_id AND event.lead_id=leads.id
             AND event.validity_status = 'VALID'
-            AND event.event_id = concat('crm:', leads.id, ':sales_opportunity:', '${currentMetaMode}')
+            AND ${currentMetaEventIdFilter('event', 'leads', 'marketing_qualified_lead', currentMetaMode)}
+          ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS mql_status,
+         (SELECT event.validity_status FROM meta_conversion_events event
+          JOIN meta_datasets dataset
+            ON dataset.tenant_id = event.tenant_id
+           AND dataset.id = event.meta_dataset_id
+           AND dataset.dataset_id = '${META_CLEAN_DATASET_ID}'
+          WHERE event.tenant_id=leads.tenant_id AND event.lead_id=leads.id
+            AND event.event_name = 'Marketing Qualified Lead'
+            AND ${currentMetaEventIdFilter('event', 'leads', 'marketing_qualified_lead', currentMetaMode)}
+          ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS mql_validity,
+         (SELECT event.meta_response->>'events_received' FROM meta_conversion_events event
+          JOIN meta_datasets dataset
+            ON dataset.tenant_id = event.tenant_id
+           AND dataset.id = event.meta_dataset_id
+           AND dataset.dataset_id = '${META_CLEAN_DATASET_ID}'
+          WHERE event.tenant_id=leads.tenant_id AND event.lead_id=leads.id
+            AND event.event_name = 'Marketing Qualified Lead'
+            AND ${currentMetaEventIdFilter('event', 'leads', 'marketing_qualified_lead', currentMetaMode)}
+          ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS mql_events_received,
+         (SELECT event.status FROM meta_conversion_events event
+          JOIN meta_datasets dataset
+            ON dataset.tenant_id = event.tenant_id
+           AND dataset.id = event.meta_dataset_id
+           AND dataset.dataset_id = '${META_CLEAN_DATASET_ID}'
+          WHERE event.tenant_id=leads.tenant_id AND event.lead_id=leads.id
+            AND event.event_name = 'Sales Opportunity'
+            AND event.validity_status = 'VALID'
+            AND ${currentMetaEventIdFilter('event', 'leads', 'sales_opportunity', currentMetaMode)}
           ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS opportunity_status
+         , (SELECT event.validity_status FROM meta_conversion_events event
+            JOIN meta_datasets dataset
+              ON dataset.tenant_id = event.tenant_id
+             AND dataset.id = event.meta_dataset_id
+             AND dataset.dataset_id = '${META_CLEAN_DATASET_ID}'
+            WHERE event.tenant_id=leads.tenant_id AND event.lead_id=leads.id
+              AND event.event_name = 'Sales Opportunity'
+              AND ${currentMetaEventIdFilter('event', 'leads', 'sales_opportunity', currentMetaMode)}
+            ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS opportunity_validity,
+         (SELECT event.meta_response->>'events_received' FROM meta_conversion_events event
+            JOIN meta_datasets dataset
+              ON dataset.tenant_id = event.tenant_id
+             AND dataset.id = event.meta_dataset_id
+             AND dataset.dataset_id = '${META_CLEAN_DATASET_ID}'
+            WHERE event.tenant_id=leads.tenant_id AND event.lead_id=leads.id
+              AND event.event_name = 'Sales Opportunity'
+              AND ${currentMetaEventIdFilter('event', 'leads', 'sales_opportunity', currentMetaMode)}
+            ORDER BY event.updated_at DESC, event.created_at DESC LIMIT 1) AS opportunity_events_received
      ) meta_status ON true
      WHERE leads.id = $2 AND leads.tenant_id = $3`,
     [tenantId(), id, tenantId()],
@@ -5569,7 +5659,7 @@ function firstLinkDiagnosticState(row) {
   if (code.includes('IDENTITY_CONFLICT') || code.includes('WA_IDENTITY')) return 'WA_IDENTITY_CONFLICT';
   if (['NO_MATCH', 'CHAT_LINK_NOT_FOUND', 'LEAD_PHONE_NOT_FOUND', 'LID_UNRESOLVED'].includes(code)) return 'NO_MATCH';
   if (row.action === 'CONFLICT') return 'BLOCKED';
-  if (row.mql_status === 'SENT' && row.mql_validity === 'VALID') return 'MQL_SENT';
+  if (row.mql_status === 'SENT' && row.mql_validity === 'VALID' && String(row.mql_events_received) === '1') return 'MQL_SENT';
   if (row.mql_validity === 'VALID') return 'MQL_ALREADY_VALID';
   if (row.action === 'STAGE_CHANGED') return 'STAGE_UPDATED';
   if (Number(row.verified_identity_count) === 1) return 'IDENTITY_VERIFIED';
@@ -5578,6 +5668,7 @@ function firstLinkDiagnosticState(row) {
 }
 
 export async function getFirstLinkDiagnostic() {
+  const currentMetaMode = process.env.META_TEST_MODE === 'true' ? 'test' : 'live';
   const result = await pool.query(`
     WITH armed AS (
       SELECT lead.*
@@ -5596,7 +5687,8 @@ export async function getFirstLinkDiagnostic() {
       evidence.action, evidence.detail_code, evidence.lead_id AS evidence_lead_id,
       COALESCE(active_links.count, 0)::int AS active_link_count,
       COALESCE(identities.count, 0)::int AS verified_identity_count,
-      mql.status AS mql_status, mql.validity_status AS mql_validity
+      mql.status AS mql_status, mql.validity_status AS mql_validity,
+      mql.events_received AS mql_events_received
     FROM armed
     LEFT JOIN LATERAL (
       SELECT receipt.id, receipt.remote_label_id, receipt.remote_label_name,
@@ -5622,10 +5714,15 @@ export async function getFirstLinkDiagnostic() {
         AND identity.verified = true
     ) identities ON true
     LEFT JOIN LATERAL (
-      SELECT event.status, event.validity_status
+      SELECT event.status, event.validity_status, event.meta_response->>'events_received' AS events_received
       FROM meta_conversion_events event
+      JOIN meta_datasets dataset
+        ON dataset.tenant_id = event.tenant_id
+       AND dataset.id = event.meta_dataset_id
+       AND dataset.dataset_id = '${META_CLEAN_DATASET_ID}'
       WHERE event.tenant_id = armed.tenant_id AND event.lead_id = armed.id
         AND event.event_name = 'Marketing Qualified Lead'
+        AND ${currentMetaEventIdFilter('event', 'armed', 'marketing_qualified_lead', currentMetaMode)}
       ORDER BY event.updated_at DESC, event.created_at DESC
       LIMIT 1
     ) mql ON true

@@ -203,9 +203,41 @@ test('interface abre WhatsApp sem confundir com Atendimento e registra históric
 test('status visual Meta seleciona o event_id do modo atual sem max(status)', async () => {
   const database = await read('src/db.js');
   assert.doesNotMatch(database, /max\(status\).*mql_status|mql_status.*max\(status\)/s);
-  assert.match(database, /marketing_qualified_lead:/);
-  assert.match(database, /sales_opportunity:/);
+  assert.match(database, /currentMetaEventIdFilter\('event', 'leads', 'marketing_qualified_lead', currentMetaMode\)/);
+  assert.match(database, /currentMetaEventIdFilter\('event', 'leads', 'sales_opportunity', currentMetaMode\)/);
+  assert.match(database, /currentMetaEventIdFilter/);
+  assert.match(database, /dataset\.dataset_id = '\$\{META_CLEAN_DATASET_ID\}'/);
+  assert.match(database, /:occ:%/);
+  assert.match(database, /meta_response->>'events_received'/);
   assert.match(database, /ORDER BY event\.updated_at DESC, event\.created_at DESC LIMIT 1/);
+});
+
+test('selo Meta diferencia ausência, pendência, falha, aceite e invalidação', () => {
+  const baseLead = {
+    id: '11111111-1111-4111-8111-111111111111',
+    name: 'Lead de teste visual',
+    stage: 'QUALIFIED',
+    meta_lead_id: '2545411659263187',
+  };
+  const base = {
+    counts: {
+      total: 1, new: 0, in_service: 0, qualified: 1, opportunities: 0,
+      enrolled: 0, paid: 0, lost: 0, qualificationRate: 100,
+      matriculationRate: 0, metaPending: 0, metaRetry: 0, metaFailed: 0,
+    },
+    metaStatus: { configured: true, graphVersion: 'v26.0', testMode: false, missing: [] },
+    filters: {},
+    pagination: { page: 1, hasNext: false },
+    csrfToken: 'csrf',
+  };
+  const render = (fields) => dashboardView({ ...base, leads: [{ ...baseLead, ...fields }] });
+
+  assert.match(render({}), /MQL não criado/);
+  assert.match(render({ mql_status: 'PENDING', mql_validity: 'VALID' }), /MQL pendente/);
+  assert.match(render({ mql_status: 'FAILED', mql_validity: 'VALID' }), /MQL falhou/);
+  assert.match(render({ mql_status: 'SENT', mql_validity: 'VALID', mql_events_received: '1' }), /MQL enviado/);
+  assert.doesNotMatch(render({ mql_status: 'SENT', mql_validity: 'VALID', mql_events_received: '0' }), /MQL enviado/);
+  assert.match(render({ mql_status: 'SENT', mql_validity: 'INVALIDATED' }), /MQL invalidado localmente/);
 });
 
 test('agenda diária WA2 é persistente e inicia após 00h01', async () => {

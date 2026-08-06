@@ -37,9 +37,10 @@ function wa2Labels(lead, { compact = false } = {}) {
   return `${shown.map((label) => `<span class="wa2-tag">${esc(label.name)}</span>`).join('')}${extra > 0 ? `<span class="wa2-tag wa2-tag-more">+${extra}</span>` : ''}` || '<span class="muted">Sem etiquetas WhatsApp</span>';
 }
 
-function metaEventBadge(label, status, attributable) {
+function metaEventBadge(label, status, attributable, { validity = null, eventsReceived = null } = {}) {
   if (!attributable) return `<span class="meta-status muted">${esc(label)} não atribuível</span>`;
-  const text = status === 'SENT' ? 'enviado' : status === 'FAILED' ? 'falhou' : status ? 'pendente' : 'não criado';
+  const accepted = status === 'SENT' && validity === 'VALID' && String(eventsReceived) === '1';
+  const text = accepted ? 'enviado' : status === 'FAILED' ? 'falhou' : status ? 'pendente' : 'não criado';
   return `<span class="meta-status meta-${String(status || 'pending').toLowerCase()}">${esc(label)} ${text}</span>`;
 }
 
@@ -50,9 +51,15 @@ function metaStatusMarkup(lead) {
   const attributable = Boolean(lead.meta_lead_id);
   const mql = lead.mql_validity === 'INVALIDATED'
     ? '<span class="meta-status meta-failed">MQL invalidado localmente</span>'
-    : metaEventBadge('MQL', lead.mql_status, attributable);
+    : metaEventBadge('MQL', lead.mql_status, attributable, {
+      validity: lead.mql_validity,
+      eventsReceived: lead.mql_events_received,
+    });
   const opportunity = ['NEGOTIATING', 'OPPORTUNITY', 'AWAITING_ENROLLMENT', 'AWAITING_PAYMENT'].includes(lead.stage)
-    ? metaEventBadge('Sales Opportunity', lead.opportunity_status, attributable) : '';
+    ? metaEventBadge('Sales Opportunity', lead.opportunity_status, attributable, {
+      validity: lead.opportunity_validity,
+      eventsReceived: lead.opportunity_events_received,
+    }) : '';
   return `<div class="meta-statuses">${mql}${opportunity}</div>`;
 }
 

@@ -30,6 +30,17 @@ export function isInternalTestLead(lead) {
   return lead?.is_internal_test === true || lead?.meta_outbound_eligible === false;
 }
 
+export function isFirstWa2LinkTemporallyEligible({ lead, eventObservedAt }) {
+  const eventTime = Date.parse(String(eventObservedAt || ''));
+  if (!lead || !Number.isFinite(eventTime)) return false;
+  if (lead.awaiting_manual_reclassification === true) {
+    const armedAt = Date.parse(String(lead.reclassification_armed_at || ''));
+    return Number.isFinite(armedAt) && eventTime > armedAt;
+  }
+  const receivedAt = Date.parse(String(lead.received_at || lead.created_at || ''));
+  return Number.isFinite(receivedAt) && eventTime > receivedAt;
+}
+
 export function canonicalInboundStage(stages) {
   const unique = [...new Set(stages)];
   const groups = [

@@ -33,6 +33,7 @@ import {
   classifyWa2LinkResolution,
   decideInboundLabelAction,
   officialCrmLabelStageFor,
+  isFirstWa2LinkTemporallyEligible,
   isInternalTestLead,
 } from './historical-sync.js';
 import {
@@ -6298,7 +6299,7 @@ export async function getWa2LabelEventCursor() {
   return result.rows[0] || null;
 }
 
-async function resolveSpreadsheetReclassification(client, { instance, event }) {
+async function resolveFirstWa2LinkLead(client, { instance, event }) {
   if (
     !instance || event.source !== 'WHATSAPP' || event.operation !== 'APPLY' ||
     event.eligibleForCrm !== true || !event.phoneNormalized
@@ -6313,9 +6314,8 @@ async function resolveSpreadsheetReclassification(client, { instance, event }) {
     `SELECT lead.*
      FROM leads lead
      WHERE lead.tenant_id = $1
-       AND lead.awaiting_manual_reclassification = true
-       AND lead.reclassification_armed_at IS NOT NULL
-       AND lead.reclassification_armed_at < $2
+       AND lead.source = 'META_INSTANT_FORM'
+       AND lead.stage = 'NEW'
        AND lead.meta_lead_id IS NOT NULL
        AND lead.meta_connection_id IS NOT NULL
        AND lead.dataset_id = $3
@@ -6323,12 +6323,23 @@ async function resolveSpreadsheetReclassification(client, { instance, event }) {
        AND lead.meta_outbound_eligible = true
        AND COALESCE(lead.import_phone_status, '') NOT IN ('PHONE_INVALID', 'PHONE_MISSING')
        AND (lead.phone_normalized = ANY($4::text[]) OR lead.whatsapp_normalized = ANY($4::text[]))
+       AND (
+         (lead.awaiting_manual_reclassification = true
+           AND lead.reclassification_armed_at IS NOT NULL
+           AND lead.reclassification_armed_at < $2)
+         OR (lead.awaiting_manual_reclassification = false
+           AND COALESCE(lead.received_at, lead.created_at) < $2)
+       )
      FOR UPDATE` ,
     [tenantId(), observedAt, String(META_CLEAN_DATASET_ID), identity.aliases],
   );
-  if (candidatesResult.rowCount === 0) return { lead: null, pending: null, conflictCode: 'NO_MATCH' };
-  if (candidatesResult.rowCount !== 1) return { lead: null, pending: null, conflictCode: 'MULTIPLE_LEAD_MATCHES' };
-  const lead = candidatesResult.rows[0];
+  const eligibleCandidates = candidatesResult.rows.filter((candidate) =>
+    isFirstWa2LinkTemporallyEligible({ lead: candidate, eventObservedAt: observedAt }));
+  if (eligibleCandidates.length === 0) return { lead: null, pending: null, conflictCode: 'NO_MATCH' };
+  if (eligibleCandidates.length !== 1 || candidatesResult.rowCount !== 1) {
+    return { lead: null, pending: null, conflictCode: 'MULTIPLE_LEAD_MATCHES' };
+  }
+  const lead = eligibleCandidates[0];
   const otherLeadResult = await client.query(
     `SELECT id FROM leads
      WHERE tenant_id = $1 AND id <> $2
@@ -6361,7 +6372,12 @@ async function resolveSpreadsheetReclassification(client, { instance, event }) {
   );
   if (identityConflict.rowCount > 0) return { lead: null, pending: null, conflictCode: 'WA_IDENTITY_CONFLICT' };
   return {
-    lead: { id: lead.id, stage: lead.stage, meta_lead_id: lead.meta_lead_id, awaiting_manual_reclassification: true },
+    lead: {
+      id: lead.id,
+      stage: lead.stage,
+      meta_lead_id: lead.meta_lead_id,
+      awaiting_manual_reclassification: lead.awaiting_manual_reclassification === true,
+    },
     pending: {
       leadId: lead.id,
       canonicalPhone: identity.canonicalE164,
@@ -6373,12 +6389,13 @@ async function resolveSpreadsheetReclassification(client, { instance, event }) {
       phoneJid,
       lidJid,
       chatJid: event.chatJid || lidJid || event.jid || null,
+      spreadsheetArmed: lead.awaiting_manual_reclassification === true,
     },
     conflictCode: null,
   };
 }
 
-async function createSpreadsheetReclassificationLink(client, { instance, pending }) {
+async function createFirstWa2Link(client, { instance, pending }) {
   const resolved = {
     contact: { id: pending.remoteContactId, jid: pending.phoneJid, phoneNormalized: pending.canonicalPhone },
     chat: { id: pending.remoteChatId, jid: pending.chatJid },
@@ -6393,7 +6410,9 @@ async function createSpreadsheetReclassificationLink(client, { instance, pending
     instanceId: instance.id,
     expectedPhoneNormalized: pending.canonicalPhone,
     resolved,
-    actor: 'system:spreadsheet-reclassification',
+    actor: pending.spreadsheetArmed
+      ? 'system:spreadsheet-reclassification'
+      : 'system:meta-lead-first-link',
   });
   const identityReference = deterministicEvidenceReference({
     evidenceType: 'WA2_CONTACT_STATE',
@@ -6434,9 +6453,14 @@ async function createSpreadsheetReclassificationLink(client, { instance, pending
         tenantId(), pending.leadId, instance.id, pending.canonicalPhone,
         JSON.stringify(getBrazilianPhoneIdentity(pending.canonicalPhone, { confirmedMobile: true }).aliases),
         pending.sourcePhone, pending.phoneJid, pending.lidJid,
-        DETERMINISTIC_IDENTITY_SOURCE, 'LABEL_AFTER_SPREADSHEET_ARMING',
+        DETERMINISTIC_IDENTITY_SOURCE,
+        pending.spreadsheetArmed
+          ? 'LABEL_AFTER_SPREADSHEET_ARMING'
+          : 'LABEL_AFTER_META_LEAD_IMPORT',
         pending.remoteContactId, pending.remoteChatId, new Date(pending.observedAt),
-        'system:spreadsheet-reclassification', identityReference,
+        pending.spreadsheetArmed
+          ? 'system:spreadsheet-reclassification'
+          : 'system:meta-lead-first-link', identityReference,
       ],
     );
     await client.query(
@@ -6444,10 +6468,13 @@ async function createSpreadsheetReclassificationLink(client, { instance, pending
          tenant_id, lead_id, previous_stage, new_stage, origin,
          observation, activity_type, metadata
        ) SELECT tenant_id, id, stage, stage, 'SYSTEM',
-         'Identidade WA2 verificada por etiqueta após armamento da importação.',
-         'WHATSAPP_IDENTITY_VERIFIED', $3
+         CASE WHEN $3::boolean
+           THEN 'Identidade WA2 verificada por etiqueta após armamento da importação.'
+           ELSE 'Identidade WA2 verificada por etiqueta após importação do lead Meta.'
+         END,
+         'WHATSAPP_IDENTITY_VERIFIED', $4
        FROM leads WHERE tenant_id = $1 AND id = $2`,
-      [tenantId(), pending.leadId, {
+      [tenantId(), pending.leadId, pending.spreadsheetArmed, {
         evidenceType: 'WA2_CONTACT_STATE',
         evidenceReference: identityReference,
         remoteChatId: pending.remoteChatId,
@@ -6548,7 +6575,7 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
     let pendingReclassification = null;
     let pendingResolutionConflict = null;
     if (!lead && instance && event.source === 'WHATSAPP' && event.operation === 'APPLY' && event.eligibleForCrm) {
-      const resolved = await resolveSpreadsheetReclassification(client, { instance, event });
+      const resolved = await resolveFirstWa2LinkLead(client, { instance, event });
       pendingReclassification = resolved.pending;
       pendingResolutionConflict = resolved.conflictCode;
       if (resolved.lead) lead = resolved.lead;
@@ -6641,7 +6668,7 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
         linkMatch: Boolean((link || pendingReclassification) && instance),
       });
     if (pendingReclassification && ['STAGE_CHANGED', 'NOOP'].includes(decision.action)) {
-      link = await createSpreadsheetReclassificationLink(client, {
+      link = await createFirstWa2Link(client, {
         instance,
         pending: pendingReclassification,
       });

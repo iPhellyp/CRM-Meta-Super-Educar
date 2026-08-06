@@ -1423,17 +1423,20 @@ export async function createMetaConnection({
   adAccountId,
   appId,
   encryptedAccessToken,
+  encryptedLeadRetrievalAccessToken,
   encryptedAppSecret,
 }) {
   const result = await pool.query(
     `INSERT INTO meta_connections (
        tenant_id, name, business_id, ad_account_id, app_id,
-       encrypted_access_token, encrypted_app_secret
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+       encrypted_access_token, encrypted_lead_retrieval_access_token,
+       encrypted_app_secret
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
      RETURNING *`,
     [
       tenantId(), name, businessId, adAccountId || null, appId || null,
-      encryptedAccessToken, encryptedAppSecret || null,
+      encryptedAccessToken, encryptedLeadRetrievalAccessToken || null,
+      encryptedAppSecret || null,
     ],
   );
   return result.rows[0];
@@ -2261,6 +2264,21 @@ export async function getWa2ContactLinkById(id) {
       AND instance.tenant_id = link.tenant_id
      WHERE link.id = $1 AND link.tenant_id = $2`,
     [id, tenantId()],
+  );
+  return result.rows[0] || null;
+}
+
+export async function replaceMetaConnectionLeadRetrievalToken(
+  id,
+  encryptedLeadRetrievalAccessToken,
+) {
+  const result = await pool.query(
+    `UPDATE meta_connections
+     SET encrypted_lead_retrieval_access_token = $3,
+         updated_at = now()
+     WHERE tenant_id = $1 AND id = $2
+     RETURNING *`,
+    [tenantId(), id, encryptedLeadRetrievalAccessToken],
   );
   return result.rows[0] || null;
 }

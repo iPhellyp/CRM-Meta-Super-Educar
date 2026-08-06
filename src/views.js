@@ -1029,7 +1029,8 @@ export function metaConnectionsView({
         <label>Business ID<input name="businessId" required inputmode="numeric"></label>
         <label>Ad Account ID<input name="adAccountId" inputmode="numeric"></label>
         <label>App ID<input name="appId" inputmode="numeric"></label>
-        <label>Access token<input name="accessToken" type="password" required autocomplete="new-password"></label>
+        <label>Access token CAPI<input name="accessToken" type="password" required autocomplete="new-password"></label>
+        <label>Access token Lead Retrieval<input name="leadRetrievalAccessToken" type="password" required autocomplete="new-password"></label>
         <label>App Secret opcional<input name="appSecret" type="password" autocomplete="new-password"></label>
         <button>Validar e salvar</button>
       </form>
@@ -1065,7 +1066,8 @@ export function metaConnectionsView({
       <section class="panel"><h2>Dataset/pixel</h2><form method="post" action="/meta/connections/${esc(selected.id)}/datasets" class="filter-grid">${csrfField(csrfToken)}<label>Nome<input name="name" required maxlength="200"></label><label>Dataset ID<input name="datasetId" required inputmode="numeric"></label><label>Test Event Code opcional<input name="testEventCode" type="password"></label><button>Salvar dataset</button></form>
         <div class="table-wrap"><table><thead><tr><th>Dataset</th><th>ID</th><th>Estado</th><th>Última validação</th><th>Erro/ação</th></tr></thead><tbody>${selected.datasets.map((dataset) => `<tr><td>${esc(dataset.name)}</td><td>${esc(dataset.dataset_id)}</td><td>${dataset.active ? 'Ativo' : 'Inativo'}</td><td>${formatDateTime(dataset.last_test_at)}</td><td>${detailValue(dataset.last_error)}${dataset.active ? `<form method="post" action="/meta/connections/${esc(selected.id)}/datasets/${esc(dataset.id)}/validate">${csrfField(csrfToken)}<button class="small">Validar dataset</button></form>` : ''}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">Nenhum dataset configurado.</td></tr>'}</tbody></table></div>
       </section>
-      <section class="panel"><h2>Renovar token</h2><form method="post" action="/meta/connections/${esc(selected.id)}/token" class="compact-form stack">${csrfField(csrfToken)}<label>Novo access token<input name="accessToken" type="password" required autocomplete="new-password"></label><button>Validar e substituir</button></form></section>
+      <section class="panel"><h2>Renovar token CAPI</h2><form method="post" action="/meta/connections/${esc(selected.id)}/token" class="compact-form stack">${csrfField(csrfToken)}<label>Novo access token CAPI<input name="accessToken" type="password" required autocomplete="new-password"></label><button>Validar e substituir</button></form></section>
+      <section class="panel"><h2>Token Lead Retrieval</h2><p>Usado somente para ler leads dos formulários vinculados. Nunca é usado para enviar CAPI.</p><form method="post" action="/meta/connections/${esc(selected.id)}/lead-retrieval-token" class="compact-form stack">${csrfField(csrfToken)}<label>Novo access token Lead Retrieval<input name="accessToken" type="password" required autocomplete="new-password"></label><button>Validar e salvar</button></form></section>
     ` : ''}
   `, { csrfToken });
 }

@@ -69,6 +69,7 @@ import {
   retryWa2ReconciliationFailures,
   recordWhatsAppOpened,
   replaceMetaConnectionAccessToken,
+  replaceMetaConnectionLeadRetrievalToken,
   setMetaHistoricalImportStatus,
   setMetaConnectionActive,
   setTenantWhatsAppMessage,
@@ -1876,8 +1877,18 @@ const metaConnectionSchema = z.object({
   adAccountId: z.string().regex(/^[0-9]{1,100}$/).or(z.literal('')).optional(),
   appId: z.string().regex(/^[0-9]{1,100}$/).or(z.literal('')).optional(),
   accessToken: z.string().trim().min(20).max(10_000),
+  leadRetrievalAccessToken: z.string().trim().min(20).max(10_000),
   appSecret: z.string().trim().max(10_000).optional(),
 });
+
+function leadRetrievalTokenFor(connection) {
+  if (!connection?.encrypted_lead_retrieval_access_token) {
+    const error = new Error('Token de Lead Retrieval não configurado para a conexão Meta');
+    error.code = 'META_LEAD_RETRIEVAL_TOKEN_NOT_CONFIGURED';
+    throw error;
+  }
+  return decryptSecret(connection.encrypted_lead_retrieval_access_token);
+}
 
 app.get('/meta/connections', async (req, res) => {
   try {
@@ -1889,7 +1900,7 @@ app.get('/meta/connections', async (req, res) => {
     const selectedPageId = String(req.query.pageId || '');
     if (selected && req.query.discover === 'pages') {
       remotePages = await listAccessibleMetaPages(
-        decryptSecret(selected.encrypted_access_token),
+        leadRetrievalTokenFor(selected),
       );
     }
     if (
@@ -1900,7 +1911,7 @@ app.get('/meta/connections', async (req, res) => {
     ) {
       remoteForms = await listAccessibleMetaForms(
         selectedPageId,
-        decryptSecret(selected.encrypted_access_token),
+        leadRetrievalTokenFor(selected),
       );
     }
     return res.send(metaConnectionsView({
@@ -1928,10 +1939,14 @@ app.post('/meta/connections', async (req, res) => {
     return redirectWith(res, '/meta/connections', 'error', 'Dados da conexão inválidos.');
   }
   try {
-    await validateMetaAccessToken(parsed.data.accessToken);
+    await Promise.all([
+      validateMetaAccessToken(parsed.data.accessToken),
+      validateMetaAccessToken(parsed.data.leadRetrievalAccessToken),
+    ]);
     const connection = await createMetaConnection({
       ...parsed.data,
       encryptedAccessToken: encryptSecret(parsed.data.accessToken),
+      encryptedLeadRetrievalAccessToken: encryptSecret(parsed.data.leadRetrievalAccessToken),
       encryptedAppSecret: parsed.data.appSecret
         ? encryptSecret(parsed.data.appSecret)
         : null,
@@ -1993,7 +2008,7 @@ app.post('/meta/connections/:id/pages', async (req, res) => {
   try {
     const connection = await getMetaConnectionById(parsedId.data);
     if (!connection?.active) throw new Error('Conexão inativa');
-    const pages = await listAccessibleMetaPages(decryptSecret(connection.encrypted_access_token));
+    const pages = await listAccessibleMetaPages(leadRetrievalTokenFor(connection));
     const page = pages.find((candidate) => candidate.id === pageId);
     if (!page) throw new Error('Página não pertence ao token');
     await upsertMetaPage({ connectionId: connection.id, pageId: page.id, name: page.name });
@@ -2029,7 +2044,7 @@ app.post('/meta/connections/:id/forms', async (req, res) => {
     if (!connection?.active || !page) throw new Error('Página inválida');
     const forms = await listAccessibleMetaForms(
       pageId,
-      decryptSecret(connection.encrypted_access_token),
+      leadRetrievalTokenFor(connection),
     );
     const form = forms.find((candidate) => candidate.id === formId);
     if (!form) throw new Error('Formulário não pertence à página');
@@ -2176,6 +2191,35 @@ app.post('/leads/:id/lost', async (req, res) => {
     return redirectWith(res, returnPath, 'error', error?.message === 'MANUAL_STAGE_REQUEST_PENDING'
       ? 'Já existe uma solicitação de etapa pendente para este lead.'
       : 'Não foi possível criar a solicitação de perda.');
+  }
+});
+
+app.post('/meta/connections/:id/lead-retrieval-token', async (req, res) => {
+  const parsedId = z.string().uuid().safeParse(req.params.id);
+  const token = z.string().trim().min(20).max(10_000).safeParse(req.body.accessToken);
+  if (!parsedId.success || !token.success) {
+    return redirectWith(res, '/meta/connections', 'error', 'Token de Lead Retrieval inválido.');
+  }
+  try {
+    await validateMetaAccessToken(token.data);
+    const updated = await replaceMetaConnectionLeadRetrievalToken(
+      parsedId.data,
+      encryptSecret(token.data),
+    );
+    if (!updated) throw new Error('Conexão não encontrada');
+    return redirectWith(
+      res,
+      `/meta/connections?connectionId=${parsedId.data}`,
+      'message',
+      'Token de Lead Retrieval validado e salvo com credencial criptografada.',
+    );
+  } catch {
+    return redirectWith(
+      res,
+      '/meta/connections',
+      'error',
+      'Não foi possível validar ou salvar o token de Lead Retrieval.',
+    );
   }
 });
 

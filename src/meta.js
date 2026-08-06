@@ -213,7 +213,7 @@ export async function importLeadPayload(
   tenantId = null,
   {
     upsert = upsertLead,
-    accessToken = process.env.META_PAGE_ACCESS_TOKEN,
+    accessToken = null,
     sourceContext = null,
     logOptionalErrors = true,
   } = {},
@@ -315,9 +315,14 @@ export async function importLeadgenId(
   tenantId = null,
   options = {},
 ) {
+  if (!options.accessToken) {
+    const error = new MetaGraphError('Token de Lead Retrieval não configurado');
+    error.code = 'META_LEAD_RETRIEVAL_TOKEN_NOT_CONFIGURED';
+    throw error;
+  }
   const leadPayload = await graphRequest(String(metaLeadId), {
     fields: 'id,created_time,ad_id,form_id,field_data',
-    token: options.accessToken || process.env.META_PAGE_ACCESS_TOKEN,
+    token: options.accessToken,
   });
   return importLeadPayload(leadPayload, webhookValue, receivedAt, tenantId, options);
 }
@@ -325,7 +330,7 @@ export async function importLeadgenId(
 export async function listMetaFormLeadsPage(formId, {
   after = null,
   limit = 100,
-  accessToken = process.env.META_PAGE_ACCESS_TOKEN,
+  accessToken = null,
   since = null,
   until = null,
 } = {}) {

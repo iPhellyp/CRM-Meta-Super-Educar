@@ -132,17 +132,20 @@ async function processJob(job) {
       pageId: job.payload.webhookValue?.page_id,
       formId: job.payload.webhookValue?.form_id,
     });
+    if (!sourceContext?.encrypted_lead_retrieval_access_token) {
+      const error = new Error('Token de Lead Retrieval não configurado para a conexão Meta');
+      error.code = 'META_LEAD_RETRIEVAL_TOKEN_NOT_CONFIGURED';
+      throw error;
+    }
     await importLeadgenId(
       job.payload.metaLeadId,
       job.payload.webhookValue,
       job.payload.receivedAt,
       job.tenant_id,
-      sourceContext
-        ? {
-          accessToken: decryptSecret(sourceContext.encrypted_access_token),
-          sourceContext,
-        }
-        : {},
+      {
+        accessToken: decryptSecret(sourceContext.encrypted_lead_retrieval_access_token),
+        sourceContext,
+      },
     );
     await completeJob(job.id);
     return;
@@ -359,9 +362,10 @@ async function processMetaHistoricalImport() {
         formId: run.form_id,
       })
       : null;
-    const accessToken = sourceContext
-      ? decryptSecret(sourceContext.encrypted_access_token)
-      : process.env.META_PAGE_ACCESS_TOKEN;
+    if (!sourceContext?.encrypted_lead_retrieval_access_token) {
+      throw new Error('Token de Lead Retrieval não configurado para a importação');
+    }
+    const accessToken = decryptSecret(sourceContext.encrypted_lead_retrieval_access_token);
     const page = await listMetaFormLeadsPage(run.form_id, {
       after: run.cursor_value,
       limit: 100,

@@ -420,7 +420,8 @@ export async function listLeads({
        ) AS wa2_instance_name
        , wa2_labels.labels AS wa2_labels
        , wa2_labels.last_sync_at AS wa2_labels_synced_at
-       , meta_status.mql_status, meta_status.mql_validity, meta_status.opportunity_status
+       , meta_status.mql_status, meta_status.mql_validity, meta_status.mql_events_received
+       , meta_status.opportunity_status, meta_status.opportunity_validity, meta_status.opportunity_events_received
      FROM leads
      LEFT JOIN meta_connections connection
        ON connection.tenant_id = leads.tenant_id
@@ -516,7 +517,8 @@ export async function getLeadById(id) {
        internal_test.marked_by AS internal_test_marked_by,
        instance.name AS wa2_instance_name,
        labels.labels AS wa2_labels, labels.last_sync_at AS wa2_labels_synced_at,
-       meta_status.mql_status, meta_status.mql_validity, meta_status.opportunity_status
+       meta_status.mql_status, meta_status.mql_validity, meta_status.mql_events_received,
+       meta_status.opportunity_status, meta_status.opportunity_validity, meta_status.opportunity_events_received
      FROM leads
      LEFT JOIN lead_internal_test_flags internal_test
        ON internal_test.tenant_id = leads.tenant_id AND internal_test.lead_id = leads.id

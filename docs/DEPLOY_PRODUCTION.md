@@ -50,6 +50,15 @@ somente o app migra no startup; o worker aguarda o mesmo banco e não concorre.
 
 ## Backup e rollback
 
+A recuperação automática de instância WA2 é opt-in. Os dois flags devem
+permanecer `false` por padrão:
+`WA2_INSTANCE_REPLACEMENT_ENABLED=false` e
+`WA2_INSTANCE_REPLACEMENT_EXECUTION_ENABLED=false`. Para rollback da unidade,
+desabilite ambos os flags, mantenha as tabelas e evidências aditivas para
+auditoria, e reverta apenas para uma tag imutável anterior. Não use `DROP`,
+`TRUNCATE`, limpeza de sessão ou restauração de banco sem evidência de
+corrupção e autorização explícita.
+
 `scripts/backup.sh` cria `pg_dump` custom, valida com `pg_restore --list`,
 gera SHA-256, usa diretório `0700`/arquivos restritos e nunca remove backups.
 Por padrão, grava fora do repositório em `/root/crm-meta-backups`. A variável

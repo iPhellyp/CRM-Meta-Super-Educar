@@ -11,6 +11,10 @@ import {
   getWa2StageLabelName,
   normalizeWa2LabelName,
 } from './wa2-label-sync.js';
+import {
+  WA2_REPLACEMENT_RESULTS,
+  maskReplacementPhone,
+} from './wa2-instance-replacement.js';
 
 const ASSET_VERSION = String(process.env.RELEASE_VERSION || 'dev')
   .replace(/[^A-Za-z0-9._-]/g, '-');
@@ -99,7 +103,7 @@ function appNavigation(csrfToken) {
         <details class="nav-group">
           <summary>Integrações</summary>
           <div class="nav-group-links"><a href="/meta/connections">Meta</a><a href="/wa2">WhatsApp</a>
-            <a href="/wa2/labels">Etiquetas</a></div>
+            <a href="/wa2/labels">Etiquetas</a><a href="/wa2/instance-replacement">Recuperar instância</a></div>
         </details>
         <details class="nav-group">
           <summary>Monitoramento</summary>
@@ -1853,6 +1857,133 @@ export function chatView({
           <form method="post" action="/chat/label" class="chat-label-form">${csrfField(csrfToken)}<input type="hidden" name="instanceId" value="${esc(selectedInstanceId)}"><input type="hidden" name="chatId" value="${esc(selectedChat.id)}"><select name="labelId" required>${labelOptions}</select><select name="operation"><option value="apply">Aplicar</option><option value="remove">Remover</option></select><button type="submit" class="secondary">Alterar etiqueta</button></form>
         ` : '<p class="empty">Selecione uma conversa.</p>'}
       </div>
+    </section>
+  `, { csrfToken });
+}
+
+function replacementStatusLabel(status) {
+  return {
+    DETECTED: 'Detectado',
+    VERIFYING: 'Verificando',
+    DRY_RUN_COMPLETED: 'Dry-run concluído',
+    WAITING_AUTHORIZATION: 'Aguardando autorização',
+    EXECUTING: 'Executando',
+    COMPLETED: 'Concluído',
+    PARTIAL: 'Parcial',
+    BLOCKED: 'Bloqueado',
+    FAILED: 'Falhou',
+  }[status] || status || '—';
+}
+
+function replacementResultLabel(result) {
+  return {
+    EXACT_SINGLE_MATCH: 'Match exato único',
+    ALREADY_ALIGNED: 'Já alinhado',
+    NO_MATCH: 'Sem correspondência',
+    MULTIPLE_MATCHES: 'Múltiplas correspondências',
+    IDENTITY_CONFLICT: 'Conflito de identidade',
+    PHONE_CONFLICT: 'Conflito de telefone',
+    INVALID_PHONE: 'Telefone inválido',
+    LID_WITHOUT_PN: 'LID sem PN',
+    NON_INDIVIDUAL_CHAT: 'Chat não individual',
+  }[result] || result || '—';
+}
+
+function replacementId(value) {
+  const text = String(value || '');
+  return text.length > 8 ? `${text.slice(0, 4)}…${text.slice(-4)}` : text || 'AUSENTE';
+}
+
+export function wa2InstanceReplacementView({
+  instances = [],
+  runs = [],
+  enabled = false,
+  report = null,
+  resultFilter = '',
+  message = '',
+  error = '',
+  csrfToken = '',
+}) {
+  const instanceOptions = instances.map((instance) =>
+    `<option value="${esc(instance.id)}">${esc(instance.name || 'Instância WA2')}</option>`).join('');
+  const runRows = runs.map((run) => `
+    <tr>
+      <td>${detailValue(run.old_instance_name || 'Instância antiga')} → ${detailValue(run.new_instance_name || 'Instância nova')}</td>
+      <td><span class="badge">${esc(replacementStatusLabel(run.status))}</span></td>
+      <td>${esc(run.total_links ?? 0)} / ${esc(run.recoverable_links ?? 0)}</td>
+      <td>${formatDateTime(run.created_at)}</td>
+    </tr>`).join('');
+  const allowedFilters = new Set([...WA2_REPLACEMENT_RESULTS, 'LABEL_NOT_FOUND', 'LABEL_CONFLICT']);
+  const activeFilter = allowedFilters.has(resultFilter) ? resultFilter : '';
+  const filteredItems = report
+    ? (report.items || []).filter((item) => !activeFilter || activeFilter === item.result)
+    : [];
+  const labelFilterRows = report && activeFilter === 'LABEL_NOT_FOUND'
+    ? (report.labels?.notFound || []).map((code) => `<tr><td>Etiqueta</td><td>${esc(code)}</td></tr>`).join('')
+    : report && activeFilter === 'LABEL_CONFLICT'
+      ? (report.labels?.ambiguous || []).map((item) => `<tr><td>Etiqueta ambígua</td><td>${esc(item.code)} · ${esc(item.count)}</td></tr>`).join('')
+      : '';
+  const exportLink = report?.context?.oldInstance?.id && report?.context?.newInstance?.id
+    ? `/wa2/instance-replacement/report.csv?oldInstanceId=${encodeURIComponent(report.context.oldInstance.id)}&newInstanceId=${encodeURIComponent(report.context.newInstance.id)}${activeFilter ? `&resultFilter=${encodeURIComponent(activeFilter)}` : ''}`
+    : '';
+  const reportBody = report ? `
+    <section class="panel">
+      <div class="panel-title"><h2>Resultado do dry-run</h2><span>${esc(report.classification || '—')}</span></div>
+      <div class="detail-grid">
+        <div><strong>Conta lógica</strong><span>${report.classification === 'SAME_ACCOUNT_REPLACEMENT' ? 'Candidata' : 'Não confirmada'}</span></div>
+        <div><strong>Instância antiga</strong><span>${esc(replacementId(report.context?.oldInstance?.remote_instance_id))}</span></div>
+        <div><strong>Instância nova</strong><span>${esc(replacementId(report.context?.newInstance?.remote_instance_id))}</span></div>
+        <div><strong>Número autenticado</strong><span>${esc(maskReplacementPhone(report.newStatus?.phone))}</span></div>
+        <div><strong>PN normalizado</strong><span>${esc(maskReplacementPhone(report.detection?.newIdentity?.canonicalPhone))}</span></div>
+        <div><strong>PN autenticado</strong><span>${report.detection?.newIdentity?.normalizedPnJid ? 'Confirmado' : 'Ausente'}</span></div>
+        <div><strong>Estado nova instância</strong><span>${report.newStatus?.status ? esc(report.newStatus.status) : 'não confirmado'}</span></div>
+        <div><strong>Etiquetas exatas</strong><span>${esc(report.labels?.exactMatches?.length || 0)}</span></div>
+        <div><strong>Etiquetas ausentes</strong><span>${esc(report.labels?.notFound?.length || 0)}</span></div>
+        <div><strong>Etiquetas ambíguas</strong><span>${esc(report.labels?.ambiguous?.length || 0)}</span></div>
+      </div>
+      <div class="stats">
+        ${stat('Vínculos antigos', report.totalLinks || 0)}
+        ${stat('Matches exatos', report.counts?.EXACT_SINGLE_MATCH || 0)}
+        ${stat('Já alinhados', report.counts?.ALREADY_ALIGNED || 0)}
+        ${stat('Bloqueados', report.blockedLinks || 0)}
+      </div>
+      <div class="actions"><a class="small button-link" href="${esc(exportLink)}">Exportar relatório sanitizado</a></div>
+      <form method="get" action="/wa2/instance-replacement" class="filters-grid">
+        <label>Filtrar resultado<select name="resultFilter">
+          <option value="">Todos os resultados</option>
+          ${[...WA2_REPLACEMENT_RESULTS, 'LABEL_NOT_FOUND', 'LABEL_CONFLICT'].map((value) => `<option value="${esc(value)}"${activeFilter === value ? ' selected' : ''}>${esc(replacementResultLabel(value))}</option>`).join('')}
+        </select></label>
+        <input type="hidden" name="oldInstanceId" value="${esc(report.context?.oldInstance?.id || '')}">
+        <input type="hidden" name="newInstanceId" value="${esc(report.context?.newInstance?.id || '')}">
+        <button type="submit" class="small">Aplicar filtro</button>
+      </form>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Resultado</th><th>Motivo</th></tr></thead>
+        <tbody>${labelFilterRows || filteredItems.map((item) => `<tr><td>${esc(replacementResultLabel(item.result))}</td><td>${esc(item.reasonCode || '—')}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">Nenhum caso para este filtro.</td></tr>'}</tbody>
+      </table></div>
+      <div class="alert warning">Este dry-run não executa vínculo, etiqueta, mudança de etapa, MQL, job ou Graph API. A execução depende de autorização separada.</div>
+    </section>` : '';
+  return layout('Recuperação de instância WA2', `
+    ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
+    ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+    <section class="hero"><div><h1>Recuperação de instância WhatsApp</h1><p>Auditoria determinística após exclusão e recriação da instância.</p></div></section>
+    ${!enabled ? '<section class="panel"><div class="alert warning">Funcionalidade desativada. Nenhuma detecção, consulta ao WA2, dry-run ou execução será realizada.</div></section>' : ''}
+    ${enabled ? '<section class="panel">' : ''}
+      ${enabled ? `
+      <h2>Dry-run somente leitura</h2>
+      <p class="muted">Confirma o mesmo PN autenticado, remapeia etiquetas por nome exato e procura chats por telefone determinístico. Nenhuma alteração é feita nesta tela.</p>
+      ${instances.length >= 2 ? `<form method="post" action="/wa2/instance-replacement/dry-run" class="filters-grid">
+        ${csrfField(csrfToken)}
+        <label>Instância antiga<select name="oldInstanceId" required><option value="">Selecione</option>${instanceOptions}</select></label>
+        <label>Instância nova<select name="newInstanceId" required><option value="">Selecione</option>${instanceOptions}</select></label>
+        <button type="submit">Executar dry-run</button>
+      </form>` : '<div class="alert warning">São necessárias pelo menos duas instâncias locais para preparar o dry-run.</div>'}
+    </section>` : ''}
+    ${reportBody}
+    <section class="panel">
+      <div class="panel-title"><h2>Execuções preparadas</h2><span>${runs.length}</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Instâncias</th><th>Status</th><th>Links / recuperáveis</th><th>Criado</th></tr></thead>
+        <tbody>${runRows || '<tr><td colspan="4" class="empty">Nenhuma execução preparada.</td></tr>'}</tbody></table></div>
     </section>
   `, { csrfToken });
 }

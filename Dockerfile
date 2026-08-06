@@ -16,6 +16,7 @@ COPY --chown=node:node scripts/meta-clean-canary.mjs ./scripts/meta-clean-canary
 COPY --chown=node:node scripts/meta-clean-historical.mjs ./scripts/meta-clean-historical.mjs
 COPY --chown=node:node scripts/import-univc-spreadsheet.mjs ./scripts/import-univc-spreadsheet.mjs
 COPY --chown=node:node scripts/reprocess-wa2-technical.mjs ./scripts/reprocess-wa2-technical.mjs
+COPY --chown=node:node scripts/wa2-instance-replacement.mjs ./scripts/wa2-instance-replacement.mjs
 USER node
 EXPOSE 3000
 CMD ["node", "src/server.js"]

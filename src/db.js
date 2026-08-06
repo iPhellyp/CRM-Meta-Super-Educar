@@ -49,6 +49,8 @@ import {
   validateCurrentLabelEvidence,
   validateRebindAdapterEvidence,
 } from './wa2-rebind.js';
+import { isWa2ReplacementEventAfterCutover } from './wa2-instance-replacement.js';
+import { wa2InstanceReplacementConfig } from './wa2-instance-replacement-config.js';
 import {
   MANUAL_STAGE_REQUEST_STATUSES,
   MQL_VALIDITY,
@@ -67,6 +69,7 @@ import {
 const { Pool } = pg;
 const DEFAULT_TENANT_ID = 'super-educar';
 const WORKER_NAME = 'meta-worker';
+export const WA2_INSTANCE_REPLACED_REASON = 'WA2_INSTANCE_REPLACED';
 export const WA2_EXTERNAL_LABEL_FILTER = '__external__';
 export const WA2_NO_EXTERNAL_LABEL_FILTER = '__none__';
 export const WA2_ANY_LABEL_FILTER = WA2_EXTERNAL_LABEL_FILTER;
@@ -2303,6 +2306,330 @@ export async function getActiveWa2ContactLinkForLead(leadId, instanceId = null) 
   );
   if (instanceId) return result.rows[0] || null;
   return result.rows;
+}
+
+export async function getWa2InstanceReplacementInputs(oldInstanceId, newInstanceId) {
+  const tenant = tenantId();
+  const [instances, links, bindings] = await Promise.all([
+    pool.query(
+      `SELECT * FROM wa2_instances
+       WHERE tenant_id = $1 AND id = ANY($2::uuid[])
+       ORDER BY created_at`,
+      [tenant, [oldInstanceId, newInstanceId]],
+    ),
+    pool.query(
+      `SELECT link.*, lead.stage, lead.phone_normalized AS lead_phone_normalized,
+              lead.whatsapp_normalized AS lead_whatsapp_normalized,
+              identity.id AS identity_id, identity.canonical_phone AS identity_canonical_phone,
+              identity.phone_jid AS identity_phone_jid, identity.lid_jid AS identity_lid_jid,
+              identity.verified AS identity_verified, identity.identity_count
+       FROM wa2_contact_links link
+       JOIN leads lead
+         ON lead.tenant_id = link.tenant_id AND lead.id = link.lead_id
+       LEFT JOIN LATERAL (
+       SELECT verified_identity.*, count(*) OVER () AS identity_count
+         FROM lead_verified_whatsapp_identities verified_identity
+         WHERE verified_identity.tenant_id = link.tenant_id
+           AND verified_identity.lead_id = link.lead_id
+           AND verified_identity.wa2_instance_id = link.wa2_instance_id
+         ORDER BY verified_identity.verified_at DESC
+         LIMIT 1
+       ) identity ON true
+       WHERE link.tenant_id = $1
+         AND link.wa2_instance_id = $2
+         AND link.unlinked_at IS NULL
+       ORDER BY link.created_at, link.id`,
+      [tenant, oldInstanceId],
+    ),
+    listWa2LabelBindings(oldInstanceId),
+  ]);
+  return {
+    tenantId: tenant,
+    oldInstance: instances.rows.find((instance) => instance.id === oldInstanceId) || null,
+    newInstance: instances.rows.find((instance) => instance.id === newInstanceId) || null,
+    oldLinks: links.rows,
+    oldBindings: bindings,
+  };
+}
+
+export async function listWa2ReplacementNewState(instanceId, canonicalPhone, remoteChatId = null) {
+  const aliases = getBrazilianPhoneIdentity(canonicalPhone, { confirmedMobile: true }).aliases;
+  const safeAliases = aliases.length ? aliases : [canonicalPhone];
+  const values = [tenantId(), instanceId, safeAliases];
+  const chatFilter = remoteChatId ? ' OR link.remote_chat_id = $4' : '';
+  if (remoteChatId) values.push(remoteChatId);
+  const [links, identities] = await Promise.all([
+    pool.query(
+      `SELECT link.*, lead.stage
+       FROM wa2_contact_links link
+       JOIN leads lead ON lead.tenant_id = link.tenant_id AND lead.id = link.lead_id
+       WHERE link.tenant_id = $1 AND link.wa2_instance_id = $2
+         AND link.unlinked_at IS NULL
+         AND (link.phone_normalized = ANY($3::text[])${chatFilter})`,
+      values,
+    ),
+    pool.query(
+      `SELECT * FROM lead_verified_whatsapp_identities
+       WHERE tenant_id = $1 AND wa2_instance_id = $2
+       AND canonical_phone = ANY($3::text[])
+       ORDER BY verified_at DESC`,
+      [tenantId(), instanceId, safeAliases],
+    ),
+  ]);
+  return { links: links.rows, identities: identities.rows };
+}
+
+export async function createWa2InstanceReplacementRun({
+  logicalAccountId = null,
+  oldInstanceId,
+  newInstanceId,
+  status = 'DRY_RUN_COMPLETED',
+  dryRunAt = new Date(),
+  cutoverAt = null,
+  summary = {},
+} = {}) {
+  const result = await pool.query(
+    `INSERT INTO wa2_instance_replacement_runs (
+       tenant_id, logical_account_id, old_instance_id, new_instance_id,
+       status, cutover_at, dry_run_at, total_links, recoverable_links,
+       already_aligned, blocked_links, label_matches, label_conflicts, summary
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+     RETURNING *`,
+    [
+      tenantId(), logicalAccountId, oldInstanceId, newInstanceId, status,
+      cutoverAt, dryRunAt, summary.totalLinks || 0, summary.recoverableLinks || 0,
+      summary.alreadyAligned || 0, summary.blockedLinks || 0,
+      summary.labelMatches || 0, summary.labelConflicts || 0, summary,
+    ],
+  );
+  return result.rows[0];
+}
+
+export async function getWa2InstanceReplacementRun(runId) {
+  const runResult = await pool.query(
+    `SELECT * FROM wa2_instance_replacement_runs
+     WHERE tenant_id = $1 AND id = $2`,
+    [tenantId(), runId],
+  );
+  if (!runResult.rows[0]) return null;
+  const items = await pool.query(
+    `SELECT * FROM wa2_instance_replacement_items
+     WHERE tenant_id = $1 AND run_id = $2
+     ORDER BY created_at, id`,
+    [tenantId(), runId],
+  );
+  return { ...runResult.rows[0], items: items.rows };
+}
+
+export async function listWa2InstanceReplacementRuns(limit = 20) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
+  const result = await pool.query(
+    `SELECT run.*,
+            old_instance.name AS old_instance_name,
+            new_instance.name AS new_instance_name
+     FROM wa2_instance_replacement_runs run
+     LEFT JOIN wa2_instances old_instance
+       ON old_instance.tenant_id = run.tenant_id
+      AND old_instance.id = run.old_instance_id
+     LEFT JOIN wa2_instances new_instance
+       ON new_instance.tenant_id = run.tenant_id
+      AND new_instance.id = run.new_instance_id
+     WHERE run.tenant_id = $1
+     ORDER BY run.created_at DESC
+     LIMIT $2`,
+    [tenantId(), safeLimit],
+  );
+  return result.rows;
+}
+
+export async function updateWa2InstanceReplacementRunStatus(runId, status, fields = {}) {
+  const allowed = new Set([
+    'DETECTED', 'VERIFYING', 'DRY_RUN_COMPLETED', 'WAITING_AUTHORIZATION',
+    'EXECUTING', 'COMPLETED', 'PARTIAL', 'BLOCKED', 'FAILED',
+  ]);
+  if (!allowed.has(status)) throw new Wa2DataError('Estado de substituição inválido', 'WA2_REPLACEMENT_STATUS_INVALID');
+  const result = await pool.query(
+    `UPDATE wa2_instance_replacement_runs
+     SET status = $3,
+         authorized_at = COALESCE($4, authorized_at),
+         executed_at = COALESCE($5, executed_at),
+         error_code = COALESCE($6, error_code),
+         updated_at = now()
+     WHERE tenant_id = $1 AND id = $2
+     RETURNING *`,
+    [tenantId(), runId, status, fields.authorizedAt || null, fields.executedAt || null, fields.errorCode || null],
+  );
+  return result.rows[0] || null;
+}
+
+export async function executeWa2InstanceReplacementItem({
+  runId,
+  leadId,
+  oldLinkId,
+  newInstanceId,
+  resolved,
+  canonicalPhone,
+  actor = 'system:wa2-instance-replacement',
+  cutoverAt = new Date(),
+} = {}) {
+  const safeActor = optionalActor(actor) || 'system:wa2-instance-replacement';
+  const safePhone = normalizeConfirmedWhatsAppPhone(canonicalPhone);
+  if (!safePhone || !resolved?.contact?.id || !resolved?.chat?.id) {
+    throw new Wa2DataError('Candidato de substituição inválido', 'WA2_REPLACEMENT_INPUT_INVALID');
+  }
+  const newJid = String(resolved.contact.jid || resolved.chat.jid || '').trim().toLowerCase();
+  if (!/^\d+@(s\.whatsapp\.net|c\.us)$/.test(newJid)) {
+    throw new Wa2DataError('PN do candidato de substituição inválido', 'WA2_REPLACEMENT_PHONE_INVALID');
+  }
+  const chatJid = String(resolved.chat.jid || '').trim().toLowerCase();
+  const lidJid = chatJid.endsWith('@lid') ? chatJid : null;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existingItem = await client.query(
+      `SELECT * FROM wa2_instance_replacement_items
+       WHERE tenant_id = $1 AND run_id = $2 AND lead_id = $3
+       FOR UPDATE`,
+      [tenantId(), runId, leadId],
+    );
+    if (existingItem.rows[0]) {
+      await client.query('COMMIT');
+      return { status: existingItem.rows[0].result, idempotent: true, item: existingItem.rows[0] };
+    }
+    const leadResult = await client.query(
+      `SELECT * FROM leads WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+      [tenantId(), leadId],
+    );
+    const oldLinkResult = await client.query(
+      `SELECT * FROM wa2_contact_links
+       WHERE tenant_id = $1 AND id = $2 AND lead_id = $3
+       FOR UPDATE`,
+      [tenantId(), oldLinkId, leadId],
+    );
+    const instanceResult = await client.query(
+      `SELECT * FROM wa2_instances
+       WHERE tenant_id = $1 AND id = $2
+       FOR UPDATE`,
+      [tenantId(), newInstanceId],
+    );
+    if (!leadResult.rows[0] || !oldLinkResult.rows[0] || !instanceResult.rows[0]) {
+      throw new Wa2DataError('Dados do item de substituição não encontrados', 'WA2_REPLACEMENT_NOT_FOUND');
+    }
+    if (!instanceResult.rows[0].enabled) {
+      throw new Wa2DataError('A nova instância está desabilitada', 'WA2_REPLACEMENT_INSTANCE_DISABLED');
+    }
+    const oldLink = oldLinkResult.rows[0];
+    if (oldLink.unlinked_at) {
+      throw new Wa2DataError('Vínculo antigo já foi encerrado', 'WA2_REPLACEMENT_LINK_CHANGED');
+    }
+    const conflictResult = await client.query(
+      `SELECT * FROM wa2_contact_links
+       WHERE tenant_id = $1 AND wa2_instance_id = $2 AND unlinked_at IS NULL
+         AND (lead_id = $3 OR remote_chat_id = $4 OR phone_normalized = $5)
+       FOR UPDATE`,
+      [tenantId(), newInstanceId, leadId, resolved.chat.id, safePhone],
+    );
+    const conflicting = conflictResult.rows.find(
+      (link) => link.lead_id !== leadId || link.remote_chat_id !== resolved.chat.id,
+    );
+    if (conflicting) {
+      throw new Wa2DataError('Candidato já está vinculado a outro lead ou chat', 'WA2_REPLACEMENT_IDENTITY_CONFLICT');
+    }
+    if (conflictResult.rows.some((link) => link.lead_id === leadId && link.remote_chat_id === resolved.chat.id)) {
+      const item = await client.query(
+        `INSERT INTO wa2_instance_replacement_items (
+           tenant_id, run_id, lead_id, old_link_id, candidate_chat_id,
+           candidate_contact_id, normalized_pn_jid, result, reason_code, writes
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+        [tenantId(), runId, leadId, oldLinkId, resolved.chat.id, resolved.contact.id,
+          newJid, 'ALREADY_ALIGNED', 'ALREADY_ALIGNED', { writes: 0 }],
+      );
+      await client.query('COMMIT');
+      return { status: 'ALREADY_ALIGNED', idempotent: true, item: item.rows[0] };
+    }
+    const identityResult = await client.query(
+      `SELECT * FROM lead_verified_whatsapp_identities
+       WHERE tenant_id = $1 AND lead_id = $2 AND wa2_instance_id = $3
+         AND canonical_phone = $4
+       FOR UPDATE`,
+      [tenantId(), leadId, oldLink.wa2_instance_id, safePhone],
+    );
+    const newIdentityConflict = await client.query(
+      `SELECT * FROM lead_verified_whatsapp_identities
+       WHERE tenant_id = $1 AND wa2_instance_id = $2 AND canonical_phone = $3
+       FOR UPDATE`,
+      [tenantId(), newInstanceId, safePhone],
+    );
+    if (newIdentityConflict.rows.some((identity) => identity.lead_id !== leadId)) {
+      throw new Wa2DataError('Identidade canônica pertence a outro lead', 'WA2_REPLACEMENT_IDENTITY_CONFLICT');
+    }
+    await client.query(
+      `UPDATE wa2_contact_links
+       SET unlinked_at = now(), unlinked_by = $2,
+           unlink_reason = 'INSTANCE_REPLACED', updated_at = now()
+       WHERE tenant_id = $1 AND id = $3 AND unlinked_at IS NULL`,
+      [tenantId(), safeActor, oldLinkId],
+    );
+    const newLink = await client.query(
+      `INSERT INTO wa2_contact_links (
+         tenant_id, lead_id, wa2_instance_id, remote_contact_id,
+         remote_chat_id, jid, phone_normalized, linked_by,
+         resolved_at, last_verified_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
+       RETURNING *`,
+      [tenantId(), leadId, newInstanceId, resolved.contact.id, resolved.chat.id,
+        newJid, safePhone, safeActor, cutoverAt],
+    );
+    if (identityResult.rows[0]) {
+      await client.query(
+        `UPDATE lead_verified_whatsapp_identities
+         SET wa2_instance_id = $4, remote_contact_id = $5, remote_chat_id = $6,
+             phone_jid = $7, lid_jid = COALESCE($8, lid_jid), updated_at = now()
+         WHERE tenant_id = $1 AND id = $2 AND lead_id = $3`,
+        [tenantId(), identityResult.rows[0].id, leadId, newInstanceId,
+          resolved.contact.id, resolved.chat.id, newJid, lidJid],
+      );
+    }
+    const history = await client.query(
+      `INSERT INTO lead_stage_history (
+         tenant_id, lead_id, previous_stage, new_stage, origin,
+         observation, activity_type, metadata
+       ) VALUES ($1,$2,$3,$3,'SYSTEM',$4,$5,$6)
+       RETURNING id`,
+      [tenantId(), leadId, leadResult.rows[0].stage,
+        'Vínculo WA2 recuperado após substituição determinística de instância.',
+         'SYNC_CONFLICT',
+         { recoveryReason: WA2_INSTANCE_REPLACED_REASON, runId, oldLinkId, newLinkId: newLink.rows[0].id, oldInstanceId: oldLink.wa2_instance_id, newInstanceId, cutoverAt: new Date(cutoverAt).toISOString() }],
+    );
+    const item = await client.query(
+      `INSERT INTO wa2_instance_replacement_items (
+         tenant_id, run_id, lead_id, old_link_id, candidate_chat_id,
+         candidate_contact_id, normalized_pn_jid, result, reason_code, writes
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [tenantId(), runId, leadId, oldLinkId, resolved.chat.id, resolved.contact.id,
+        newJid, 'EXACT_SINGLE_MATCH', 'INSTANCE_REPLACED',
+        {
+          oldLink: oldLinkId,
+          newLink: newLink.rows[0].id,
+          identityUpdated: Boolean(identityResult.rows[0]),
+          historyId: history.rows[0].id,
+          resolved: {
+            contactId: resolved.contact.id,
+            contactJid: newJid,
+            phoneNormalized: safePhone,
+            chatId: resolved.chat.id,
+            chatJid,
+          },
+        }],
+    );
+    await client.query('COMMIT');
+    return { status: 'EXACT_SINGLE_MATCH', idempotent: false, link: newLink.rows[0], item: item.rows[0] };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function getNormalWa2RebindState(
@@ -6653,6 +6980,26 @@ export async function processWa2LabelEvent(event, currentRemoteLabelIds = []) {
       [tenantId(), event.instanceId],
     );
     const instance = instanceResult.rows[0] || null;
+    if (instance && wa2InstanceReplacementConfig().enabled) {
+      const cutoverResult = await client.query(
+        `SELECT max(cutover_at) AS cutover_at
+         FROM wa2_instance_replacement_runs
+         WHERE tenant_id = $1
+           AND new_instance_id = $2
+           AND cutover_at IS NOT NULL
+           AND status IN ('EXECUTING', 'COMPLETED', 'PARTIAL')`,
+        [tenantId(), instance.id],
+      );
+      const cutoverAt = cutoverResult.rows[0]?.cutover_at || null;
+      if (cutoverAt && !isWa2ReplacementEventAfterCutover(event.observedAt, cutoverAt)) {
+        await client.query('COMMIT');
+        return {
+          duplicate: false,
+          action: 'IGNORED',
+          code: 'BEFORE_INSTANCE_REPLACEMENT_CUTOVER',
+        };
+      }
+    }
     let link = null;
     let lead = null;
     if (instance) {

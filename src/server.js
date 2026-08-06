@@ -54,6 +54,7 @@ import {
   listMetaImportForms,
   listHistoricalOperations,
   listWa2InstancesLocal,
+  listWa2InstanceReplacementRuns,
   listVerifiedWhatsAppIdentitiesForLead,
   listWa2LabelBindings,
   listWa2LabelJobs,
@@ -138,6 +139,7 @@ import {
   wa2QrView,
   renderLeadRow,
   renderLeadCard,
+  wa2InstanceReplacementView,
 } from './views.js';
 import {
   Wa2Error,
@@ -183,6 +185,8 @@ import {
   createWhatsAppActionHandler,
   createWhatsAppOpenedHandler,
 } from './whatsapp-action.js';
+import { collectWa2InstanceReplacementDryRun } from './wa2-instance-replacement-runner.js';
+import { wa2InstanceReplacementConfig } from './wa2-instance-replacement-config.js';
 import {
   LEAD_FILE_LIMITS,
   parseLeadFile,
@@ -810,6 +814,138 @@ app.get('/wa2', async (req, res) => {
     error: req.query.error || '',
     csrfToken: issueCsrfToken(req, res),
   }));
+});
+
+async function renderWa2InstanceReplacementPage(req, res, extra = {}) {
+  const enabled = wa2InstanceReplacementConfig().enabled;
+  const [instances, runs] = enabled
+    ? await Promise.all([listWa2InstancesLocal(), listWa2InstanceReplacementRuns()])
+    : [[], []];
+  return res.send(wa2InstanceReplacementView({
+    instances,
+    runs,
+    enabled,
+    ...extra,
+    csrfToken: issueCsrfToken(req, res),
+  }));
+}
+
+app.get('/wa2/instance-replacement', async (req, res) => {
+  try {
+    const enabled = wa2InstanceReplacementConfig().enabled;
+    if (!enabled) {
+      return await renderWa2InstanceReplacementPage(req, res, {
+        message: 'Funcionalidade desativada; nenhuma consulta ou alteração foi executada.',
+      });
+    }
+    const oldInstanceId = z.string().uuid().safeParse(req.query.oldInstanceId);
+    const newInstanceId = z.string().uuid().safeParse(req.query.newInstanceId);
+    let report = null;
+    let error = String(req.query.error || '').slice(0, 300);
+    if (oldInstanceId.success && newInstanceId.success && oldInstanceId.data !== newInstanceId.data) {
+      try {
+        report = await collectWa2InstanceReplacementDryRun(oldInstanceId.data, newInstanceId.data);
+      } catch {
+        error = 'Não foi possível confirmar a evidência autenticada no WA2; nenhuma alteração foi feita.';
+      }
+    }
+    return await renderWa2InstanceReplacementPage(req, res, {
+      message: String(req.query.message || '').slice(0, 300),
+      error,
+      report,
+      resultFilter: String(req.query.resultFilter || ''),
+    });
+  } catch {
+    return res.status(503).send(wa2InstanceReplacementView({
+      error: 'Não foi possível carregar a recuperação de instância.',
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  }
+});
+
+function replacementCsvCell(value) {
+  const text = String(value ?? '');
+  return `"${text.replaceAll('"', '""').replaceAll('\r', ' ').replaceAll('\n', ' ')}"`;
+}
+
+function replacementCsvId(value) {
+  const text = String(value || '');
+  return text.length > 8 ? `${text.slice(0, 4)}…${text.slice(-4)}` : text;
+}
+
+app.get('/wa2/instance-replacement/report.csv', async (req, res) => {
+  if (!wa2InstanceReplacementConfig().enabled) {
+    return res.status(404).send('Funcionalidade desativada.');
+  }
+  const oldInstanceId = z.string().uuid().safeParse(req.query.oldInstanceId);
+  const newInstanceId = z.string().uuid().safeParse(req.query.newInstanceId);
+  if (!oldInstanceId.success || !newInstanceId.success || oldInstanceId.data === newInstanceId.data) {
+    return res.status(400).send('Relatório inválido.');
+  }
+  try {
+    const report = await collectWa2InstanceReplacementDryRun(oldInstanceId.data, newInstanceId.data);
+    const allowed = new Set([
+      'EXACT_SINGLE_MATCH', 'ALREADY_ALIGNED', 'NO_MATCH', 'MULTIPLE_MATCHES',
+      'IDENTITY_CONFLICT', 'PHONE_CONFLICT', 'INVALID_PHONE', 'LID_WITHOUT_PN',
+      'NON_INDIVIDUAL_CHAT', 'LABEL_NOT_FOUND', 'LABEL_CONFLICT',
+    ]);
+    const filter = allowed.has(String(req.query.resultFilter || '')) ? String(req.query.resultFilter) : '';
+    const rows = [
+      ['tipo', 'valor', 'motivo'],
+      ['classificacao', report.classification, ''],
+      ['total_links', report.totalLinks, ''],
+      ['recuperaveis', report.recoverableLinks, ''],
+      ['bloqueados', report.blockedLinks, ''],
+    ];
+    for (const item of report.items || []) {
+      if (!filter || filter === item.result) rows.push(['vinculo', replacementCsvId(item.leadId), item.reasonCode || item.result]);
+    }
+    if (!filter || filter === 'LABEL_NOT_FOUND') {
+      for (const code of report.labels?.notFound || []) rows.push(['etiqueta', code, 'LABEL_NOT_FOUND']);
+    }
+    if (!filter || filter === 'LABEL_CONFLICT') {
+      for (const item of report.labels?.ambiguous || []) rows.push(['etiqueta', item.code, `LABEL_CONFLICT:${item.count}`]);
+    }
+    res.set({
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="wa2-instance-replacement-report.csv"',
+      'Cache-Control': 'no-store',
+    });
+    return res.send(`\uFEFF${rows.map((row) => row.map(replacementCsvCell).join(';')).join('\n')}\n`);
+  } catch {
+    return res.status(503).send('Relatório indisponível; nenhuma alteração foi feita.');
+  }
+});
+
+app.post('/wa2/instance-replacement/dry-run', async (req, res) => {
+  if (!wa2InstanceReplacementConfig().enabled) {
+    return await renderWa2InstanceReplacementPage(req, res, {
+      message: 'Funcionalidade desativada; nenhuma consulta ou alteração foi executada.',
+    });
+  }
+  const oldInstanceId = z.string().uuid().safeParse(req.body.oldInstanceId);
+  const newInstanceId = z.string().uuid().safeParse(req.body.newInstanceId);
+  if (!oldInstanceId.success || !newInstanceId.success || oldInstanceId.data === newInstanceId.data) {
+    return renderWa2InstanceReplacementPage(req, res, {
+      error: 'Selecione duas instâncias locais diferentes.',
+    });
+  }
+  try {
+    const report = await collectWa2InstanceReplacementDryRun(oldInstanceId.data, newInstanceId.data);
+    return await renderWa2InstanceReplacementPage(req, res, {
+      report,
+      resultFilter: String(req.body.resultFilter || ''),
+    });
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: 'warn',
+      msg: 'Dry-run de substituição WA2 bloqueado',
+      code: error?.code || error?.remoteCode || 'WA2_REPLACEMENT_DRY_RUN_FAILED',
+    }));
+    return renderWa2InstanceReplacementPage(req, res, {
+      error: 'Não foi possível confirmar a evidência autenticada no WA2; nenhuma alteração foi feita.',
+    });
+  }
 });
 
 app.get('/chat', (_req, res) => {

@@ -65,6 +65,12 @@ import {
   META_CLEAN_DATASET_ID,
   META_LEGACY_DATASET_ID,
 } from './meta-clean-config.js';
+import {
+  WEBSITE_EXTERNAL_SYSTEM,
+  WEBSITE_SOURCE,
+  WebsiteIngestError,
+  technicalWebsiteLeadName,
+} from './website-lead-ingest.js';
 
 const { Pool } = pg;
 const DEFAULT_TENANT_ID = 'super-educar';
@@ -896,6 +902,177 @@ export async function upsertLead(input, { client = pool } = {}) {
     [currentTenantId, lead.id, lead.stage],
   );
   return lead;
+}
+
+export async function createWebsiteLeadSubmission(input) {
+  const currentTenantId = String(input?.tenantId || '').trim();
+  if (!currentTenantId || !input?.externalLeadId || !input?.payloadHash || !input?.nonceHash) {
+    throw new WebsiteIngestError('INVALID_WEBSITE_SUBMISSION');
+  }
+  const nameIsPlaceholder = input.nameIsPlaceholder ?? input.name == null;
+  const nameSource = input.nameSource || (nameIsPlaceholder ? 'TECHNICAL_PLACEHOLDER' : 'USER_PROVIDED');
+  const client = await pool.connect();
+  let transactionOpen = false;
+  try {
+    await client.query('BEGIN');
+    transactionOpen = true;
+    const lockKeys = [
+      `external:${input.externalLeadId}`,
+      input.websiteSubmissionId ? `submission:${input.websiteSubmissionId}` : null,
+    ].filter(Boolean).sort();
+    for (const lockKey of lockKeys) {
+      await client.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [`${currentTenantId}:${WEBSITE_EXTERNAL_SYSTEM}:${lockKey}`],
+      );
+    }
+
+    await client.query(
+      `WITH expired AS (
+         SELECT id
+         FROM website_lead_ingest_nonces
+         WHERE tenant_id = $1
+           AND external_system = $2
+           AND expires_at <= now()
+         ORDER BY expires_at ASC
+         LIMIT 100
+       )
+       DELETE FROM website_lead_ingest_nonces nonce
+       USING expired
+       WHERE nonce.id = expired.id`,
+      [currentTenantId, WEBSITE_EXTERNAL_SYSTEM],
+    );
+
+    const nonceResult = await client.query(
+      `INSERT INTO website_lead_ingest_nonces (
+         tenant_id, external_system, nonce_hash, received_at, expires_at
+       ) VALUES ($1,$2,$3,now(),$4)
+       ON CONFLICT (tenant_id, external_system, nonce_hash)
+       DO UPDATE SET received_at = EXCLUDED.received_at,
+                     expires_at = EXCLUDED.expires_at
+       WHERE website_lead_ingest_nonces.expires_at <= now()
+       RETURNING id`,
+      [currentTenantId, WEBSITE_EXTERNAL_SYSTEM, input.nonceHash, input.nonceExpiresAt],
+    );
+    if (!nonceResult.rows[0]) throw new WebsiteIngestError('NONCE_REPLAY');
+
+    const existingResult = await client.query(
+      `SELECT id, lead_id, website_event_id, payload_hash
+       FROM website_lead_submissions
+       WHERE tenant_id = $1
+         AND external_system = $2
+         AND (
+           external_lead_id = $3
+           OR ($4::uuid IS NOT NULL AND website_submission_id = $4::uuid)
+         )
+       FOR UPDATE`,
+      [
+        currentTenantId,
+        WEBSITE_EXTERNAL_SYSTEM,
+        input.externalLeadId,
+        input.websiteSubmissionId || null,
+      ],
+    );
+    const existing = existingResult.rows[0];
+    if (existing) {
+      if (existing.payload_hash !== input.payloadHash) {
+        throw new WebsiteIngestError('EXTERNAL_ID_CONFLICT');
+      }
+      await client.query('COMMIT');
+      transactionOpen = false;
+      return {
+        created: false,
+        code: 'IDEMPOTENT_REPLAY',
+        leadId: existing.lead_id,
+        websiteEventId: existing.website_event_id,
+      };
+    }
+
+    const leadResult = await client.query(
+      `INSERT INTO leads (
+         tenant_id, name, email, phone, phone_normalized, course, source, stage,
+         received_at, source_created_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,'NEW',now(),$8)
+       RETURNING id`,
+      [
+        currentTenantId,
+        input.name || technicalWebsiteLeadName(input.externalLeadId),
+        input.email || null,
+        input.phone,
+        input.phoneNormalized,
+        input.courseName || input.interest,
+        WEBSITE_SOURCE,
+        input.submittedAt,
+      ],
+    );
+    const leadId = leadResult.rows[0].id;
+    await client.query(
+      `INSERT INTO lead_stage_history (
+         tenant_id, lead_id, previous_stage, new_stage, origin,
+         observation, activity_type, metadata
+       ) VALUES ($1,$2,'NEW','NEW',$3,$4,'LEAD_RECEIVED',$5)`,
+      [
+        currentTenantId,
+        leadId,
+        WEBSITE_SOURCE,
+        'Lead recebido do formulário do site Super Educar.',
+        {
+          source: WEBSITE_SOURCE,
+          nameIsPlaceholder,
+          nameSource,
+        },
+      ],
+    );
+    await client.query(
+      `INSERT INTO website_lead_submissions (
+         tenant_id, external_system, external_lead_id, website_submission_id,
+         website_event_id, lead_id, payload_hash, interest, course_id,
+         course_name, modality, name, name_is_placeholder, name_source,
+         email, phone, phone_normalized, submitted_at, attribution_json
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
+       )`,
+      [
+        currentTenantId,
+        WEBSITE_EXTERNAL_SYSTEM,
+        input.externalLeadId,
+        input.websiteSubmissionId || null,
+        input.websiteEventId,
+        leadId,
+        input.payloadHash,
+        input.interest,
+        input.courseId,
+        input.courseName,
+        input.modality,
+        input.name,
+        nameIsPlaceholder,
+        nameSource,
+        input.email,
+        input.phone,
+        input.phoneNormalized,
+        input.submittedAt,
+        input.attribution,
+      ],
+    );
+    await client.query('COMMIT');
+    transactionOpen = false;
+    return {
+      created: true,
+      code: 'CREATED',
+      leadId,
+      websiteEventId: input.websiteEventId,
+    };
+  } catch (error) {
+    if (transactionOpen) {
+      try { await client.query('ROLLBACK'); } catch { /* preserve original error */ }
+    }
+    if (error?.code === '23505') {
+      throw new WebsiteIngestError('EXTERNAL_ID_CONFLICT');
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 function serializeJsonb(value, fallback) {

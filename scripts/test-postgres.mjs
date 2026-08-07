@@ -65,22 +65,28 @@ try {
   const databaseUrl =
     `postgresql://${user}:${password}@127.0.0.1:${match[1]}/${database}`;
 
-  const result = run(
-    process.execPath,
-    ['--test', 'test/lead-file-import-postgres.test.js'],
-    {
-      allowFailure: true,
-      env: {
-        ...process.env,
-        TEST_DATABASE_URL: databaseUrl,
-        DATABASE_URL: databaseUrl,
-        DATABASE_SSL: 'false',
-        DEFAULT_TENANT_ID: `jsonb-test-${process.pid}`,
+  const integrationTests = [
+    ['test/lead-file-import-postgres.test.js', `jsonb-test-${process.pid}`],
+    ['test/website-lead-ingest-postgres.test.js', `website-test-${process.pid}`],
+  ];
+  exitCode = 0;
+  for (const [testFile, tenantId] of integrationTests) {
+    const result = run(
+      process.execPath,
+      ['--test', testFile],
+      {
+        allowFailure: true,
+        env: {
+          ...process.env,
+          TEST_DATABASE_URL: databaseUrl,
+          DATABASE_URL: databaseUrl,
+          DATABASE_SSL: 'false',
+          DEFAULT_TENANT_ID: tenantId,
+        },
       },
-    },
-  );
-
-  exitCode = result.status ?? 1;
+    );
+    if ((result.status ?? 1) !== 0) exitCode = result.status ?? 1;
+  }
 } finally {
   run(
     docker,

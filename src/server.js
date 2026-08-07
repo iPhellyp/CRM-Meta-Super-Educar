@@ -15,6 +15,7 @@ import {
   createMetaHistoricalImport,
   createLeadFileImportPreview,
   cancelLeadFileImport,
+  createWebsiteLeadSubmission,
   createWa2Reconciliation,
   createWa2ContactLink,
   decideWa2StageConfirmation,
@@ -185,6 +186,16 @@ import {
   createWhatsAppActionHandler,
   createWhatsAppOpenedHandler,
 } from './whatsapp-action.js';
+import {
+  authenticateWebsiteRequest,
+  createWebsiteRateLimiter,
+  isValidWebsiteIdempotencyKey,
+  normalizeWebsiteLeadPayload,
+  WEBSITE_EXTERNAL_SYSTEM,
+  WEBSITE_INGEST_ROUTE,
+  websiteIngestConfig,
+  WebsiteIngestError,
+} from './website-lead-ingest.js';
 import { collectWa2InstanceReplacementDryRun } from './wa2-instance-replacement-runner.js';
 import { wa2InstanceReplacementConfig } from './wa2-instance-replacement-config.js';
 import {
@@ -196,6 +207,7 @@ import {
 
 const app = express();
 const loginAttempts = new Map();
+const websiteRateLimiter = createWebsiteRateLimiter();
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 5;
 const LEAD_FILE_TIMEOUT_MS = 15_000;
@@ -214,12 +226,20 @@ const leadFileUpload = multer({
 app.set('trust proxy', 1);
 app.use(helmet());
 app.use(compression());
+app.use(cookieParser());
+app.post(
+  WEBSITE_INGEST_ROUTE,
+  websiteFeatureGate,
+  express.raw({ type: 'application/json', limit: '32kb' }),
+  receiveWebsiteLead,
+);
 app.use(express.urlencoded({ extended: false, limit: '32kb' }));
 app.use(express.json({
   limit: '256kb',
-  verify: (req, _res, buffer) => { req.rawBody = buffer; },
+  verify: (req, _res, buffer) => {
+    if (req.path === '/webhooks/meta/leadgen') req.rawBody = buffer;
+  },
 }));
-app.use(cookieParser());
 app.use(express.static('public', {
   maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0,
   setHeaders: (res, filePath) => {
@@ -328,6 +348,124 @@ function recordFailedLogin(req) {
         loginAttempts.delete(attemptKey);
       }
     }
+  }
+}
+
+function websiteErrorStatus(code) {
+  if (code === 'NONCE_REPLAY' || code === 'EXTERNAL_ID_CONFLICT') return 409;
+  if (code === 'INVALID_PAYLOAD' || code === 'INVALID_WEBSITE_SUBMISSION') return 422;
+  if (code === 'WEBSITE_INGEST_NOT_CONFIGURED') return 503;
+  return 500;
+}
+
+function websiteRequestId() {
+  return crypto.randomUUID();
+}
+
+function requestHeaderValues(req, name) {
+  const wanted = String(name).toLowerCase();
+  const rawHeaders = Array.isArray(req.rawHeaders) ? req.rawHeaders : [];
+  const rawValues = [];
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    if (String(rawHeaders[index]).toLowerCase() === wanted) rawValues.push(String(rawHeaders[index + 1] ?? ''));
+  }
+  if (rawValues.length) return rawValues;
+  const value = req.headers?.[wanted];
+  if (Array.isArray(value)) return value.map((entry) => String(entry));
+  return value == null ? [] : [String(value)];
+}
+
+function websiteFeatureGate(_req, res, next) {
+  res.set('Cache-Control', 'no-store');
+  if (!websiteIngestConfig().enabled) {
+    return res.status(503).json({ ok: false, code: 'WEBSITE_INGEST_DISABLED' });
+  }
+  return next();
+}
+
+async function receiveWebsiteLead(req, res) {
+  const startedAt = Date.now();
+  const requestId = websiteRequestId();
+  const config = websiteIngestConfig();
+  res.set('Cache-Control', 'no-store');
+  if (!req.is('application/json')) {
+    return res.status(415).json({ ok: false, code: 'UNSUPPORTED_MEDIA_TYPE' });
+  }
+  if (!Buffer.isBuffer(req.body)) {
+    return res.status(422).json({ ok: false, code: 'INVALID_PAYLOAD' });
+  }
+  if (!config.configured) {
+    return res.status(503).json({ ok: false, code: 'WEBSITE_INGEST_NOT_CONFIGURED' });
+  }
+
+  const authentication = authenticateWebsiteRequest({
+    headers: req.headers,
+    rawBody: req.body,
+  });
+  if (!authentication.ok) {
+    return res.status(authentication.status).json({ ok: false, code: authentication.code });
+  }
+  const rate = websiteRateLimiter.allow(WEBSITE_EXTERNAL_SYSTEM);
+  if (!rate.allowed) {
+    res.set('Retry-After', String(rate.retryAfter));
+    return res.status(429).json({ ok: false, code: 'RATE_LIMITED' });
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(req.body.toString('utf8'));
+  } catch {
+    return res.status(422).json({ ok: false, code: 'INVALID_PAYLOAD' });
+  }
+
+  try {
+    const normalized = normalizeWebsiteLeadPayload(payload);
+    const idempotencyKeys = requestHeaderValues(req, 'Idempotency-Key');
+    if (idempotencyKeys.length !== 1
+      || !isValidWebsiteIdempotencyKey(idempotencyKeys[0], normalized.externalLeadId)) {
+      return res.status(422).json({ ok: false, code: 'INVALID_IDEMPOTENCY_KEY' });
+    }
+    const nonceHash = crypto.createHash('sha256')
+      .update(authentication.nonce, 'utf8')
+      .digest('hex');
+    const result = await createWebsiteLeadSubmission({
+      ...normalized,
+      tenantId: config.tenantId,
+      nonceHash,
+      nonceExpiresAt: new Date(Date.now() + config.clockSkewSeconds * 1000),
+    });
+    const status = result.created ? 201 : 200;
+    console.log(JSON.stringify({
+      level: 'info',
+      msg: 'Website lead recebido',
+      request_id: requestId,
+      integration: WEBSITE_EXTERNAL_SYSTEM,
+      external_lead_id_hash: crypto.createHash('sha256')
+        .update(normalized.externalLeadId, 'utf8').digest('hex').slice(0, 16),
+      result: result.code,
+      status,
+      duration_ms: Date.now() - startedAt,
+    }));
+    return res.status(status).json({
+      ok: true,
+      code: result.code,
+      external_lead_id: normalized.externalLeadId,
+      website_event_id: result.websiteEventId,
+    });
+  } catch (error) {
+    const code = error instanceof WebsiteIngestError ? error.code : 'INTERNAL_ERROR';
+    const status = websiteErrorStatus(code);
+    if (status >= 500) {
+      console.error(JSON.stringify({
+        level: 'error',
+        msg: 'Falha ao receber website lead',
+        request_id: requestId,
+        integration: WEBSITE_EXTERNAL_SYSTEM,
+        error: error?.name || 'Error',
+      }));
+      return res.status(500).json({ ok: false, code: 'INTERNAL_ERROR', request_id: requestId });
+    }
+    return res.status(status).json({ ok: false, code });
   }
 }
 
@@ -2598,9 +2736,15 @@ app.use((error, _req, res, _next) => {
       : undefined,
   }));
   if (error?.type === 'entity.too.large') {
+    if (_req.path === WEBSITE_INGEST_ROUTE) {
+      return res.status(413).json({ ok: false, code: 'PAYLOAD_TOO_LARGE' });
+    }
     return res.status(413).send('Payload excede o limite permitido.');
   }
   if (error instanceof SyntaxError && error?.status === 400) {
+    if (_req.path === WEBSITE_INGEST_ROUTE) {
+      return res.status(422).json({ ok: false, code: 'INVALID_PAYLOAD' });
+    }
     return res.status(400).send('Payload JSON inválido.');
   }
   return res.status(500).send('Erro interno. Consulte os logs.');

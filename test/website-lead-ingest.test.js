@@ -104,9 +104,254 @@ test('payload completo preserva dados permitidos e cria event ID determinístico
   assert.equal(normalized.attribution.utm_campaign, 'campaign');
   assert.equal(normalized.attribution.landing_page_url, 'https://supereducar.com/');
   assert.equal(normalized.attribution.consent_at, '2026-08-06T19:50:00.000Z');
+  assert.equal(normalized.attribution.provider, 'meta');
+  assert.deepEqual(normalized.attribution.click_ids, {
+    fbclid: 'fbclid-value',
+    fbp: 'fbp-value',
+    fbc: 'fbc-value',
+  });
   assert.equal(normalized.phone, BASE_PAYLOAD.phone);
   assert.equal(normalized.nameIsPlaceholder, false);
   assert.equal(normalized.nameSource, 'USER_PROVIDED');
+});
+
+test('atribuição universal normaliza Meta e preserva campos extensíveis', () => {
+  const normalized = normalizeWebsiteLeadPayload({
+    ...BASE_PAYLOAD,
+    attribution: {
+      provider: ' Google ',
+      source: ' Google ',
+      medium: ' CPC ',
+      channel: ' Paid_Search ',
+      campaign_id: 'campaign-123',
+      campaign_name: 'Campanha',
+      ad_group_id: 'group-456',
+      ad_group_name: 'Grupo',
+      ad_id: 'ad-789',
+      ad_name: 'Anúncio',
+      keyword: 'veterinária',
+      match_type: 'Exact',
+      click_ids: { gclid: 'gclid-value', gbraid: 'gbraid-value', wbraid: 'wbraid-value' },
+      extra: { landing_variant: 'A', score: 1, qualified: true, note: null },
+    },
+  });
+  assert.equal(normalized.attribution.provider, 'google');
+  assert.equal(normalized.attribution.source, 'google');
+  assert.equal(normalized.attribution.medium, 'cpc');
+  assert.equal(normalized.attribution.channel, 'paid_search');
+  assert.equal(normalized.attribution.match_type, 'exact');
+  assert.deepEqual(normalized.attribution.click_ids, {
+    gclid: 'gclid-value',
+    gbraid: 'gbraid-value',
+    wbraid: 'wbraid-value',
+  });
+  assert.deepEqual(normalized.attribution.extra, {
+    landing_variant: 'A', score: 1, qualified: true, note: null,
+  });
+});
+
+test('providers e click IDs de plataformas conhecidas e futuras não exigem migration', () => {
+  const cases = [
+    ['google', 'gclid'], ['google', 'gbraid'], ['google', 'wbraid'],
+    ['tiktok', 'ttclid'], ['microsoft', 'msclkid'], ['future_network', 'future_click_id'],
+  ];
+  for (const [provider, clickId] of cases) {
+    const normalized = normalizeWebsiteLeadPayload({
+      ...BASE_PAYLOAD,
+      external_lead_id: `site-${provider}-${clickId}`,
+      attribution: { provider, click_ids: { [clickId]: 'click-value' } },
+    });
+    assert.equal(normalized.attribution.provider, provider);
+    assert.equal(normalized.attribution.click_ids[clickId], 'click-value');
+  }
+});
+
+test('origens orgânica, direta e referral preservam a classificação enviada', () => {
+  const cases = [
+    { provider: 'organic', source: 'google', medium: 'organic', channel: 'organic' },
+    { provider: 'direct', source: 'direct', medium: 'none', channel: 'direct' },
+    { provider: 'referral', source: 'parceiro.example', medium: 'referral', channel: 'referral' },
+  ];
+  for (const [index, attribution] of cases.entries()) {
+    const normalized = normalizeWebsiteLeadPayload({
+      ...BASE_PAYLOAD,
+      external_lead_id: `site-origin-${index}`,
+      attribution,
+    });
+    assert.deepEqual(normalized.attribution, attribution);
+  }
+});
+
+test('attribution novo tem precedência determinística e rejeita contradição legada', () => {
+  const legacy = normalizeWebsiteLeadPayload({
+    ...BASE_PAYLOAD,
+    fbclid: 'same-click',
+    utm_source: 'facebook',
+    utm_medium: 'paid_social',
+  });
+  const equivalent = normalizeWebsiteLeadPayload({
+    ...BASE_PAYLOAD,
+    attribution: {
+      provider: 'meta',
+      source: 'facebook',
+      medium: 'paid_social',
+      click_ids: { fbclid: 'same-click' },
+    },
+  });
+  assert.equal(equivalent.payloadHash, legacy.payloadHash);
+  assert.throws(
+    () => normalizeWebsiteLeadPayload({
+      ...BASE_PAYLOAD,
+      utm_source: 'facebook',
+      attribution: { source: 'google' },
+    }),
+    { code: 'ATTRIBUTION_CONFLICT' },
+  );
+});
+
+test('legacy e universal convergem para o mesmo hash canônico', () => {
+  const cases = [
+    [
+      { fbclid: 'fb-click' },
+      { attribution: { provider: 'meta', click_ids: { fbclid: 'fb-click' } } },
+    ],
+    [
+      { fbp: 'fb-browser' },
+      { attribution: { provider: 'meta', click_ids: { fbp: 'fb-browser' } } },
+    ],
+    [
+      { fbc: 'fb-campaign' },
+      { attribution: { provider: 'meta', click_ids: { fbc: 'fb-campaign' } } },
+    ],
+    [
+      { utm_source: 'facebook' },
+      { attribution: { provider: 'meta', source: 'facebook', utm_source: 'facebook' } },
+    ],
+    [
+      { utm_source: ' FACEBOOK ', utm_medium: ' PAID_SOCIAL ' },
+      { attribution: { provider: 'meta', source: 'facebook', medium: 'paid_social' } },
+    ],
+    [
+      { utm_source: 'google', utm_medium: 'cpc', utm_campaign: 'campaign' },
+      { attribution: { provider: 'google', source: 'google', medium: 'cpc', utm_campaign: 'campaign' } },
+    ],
+    [
+      { campaign_id: 'campaign-id' },
+      { attribution: { campaign_id: 'campaign-id' } },
+    ],
+    [
+      { adset_id: 'adset-id' },
+      { attribution: { adset_id: 'adset-id' } },
+    ],
+    [
+      { ad_id: 'ad-id' },
+      { attribution: { ad_id: 'ad-id' } },
+    ],
+    [
+      {
+        utm_content: 'content', utm_term: 'term',
+        landing_page_url: 'https://supereducar.com/landing',
+        referrer_url: 'https://google.com/',
+      },
+      {
+        attribution: {
+          utm_content: 'content', utm_term: 'term',
+          landing_page_url: 'https://supereducar.com/landing',
+          referrer_url: 'https://google.com/',
+        },
+      },
+    ],
+  ];
+  for (const [legacyFields, universalFields] of cases) {
+    const legacy = normalizeWebsiteLeadPayload({ ...BASE_PAYLOAD, ...legacyFields });
+    const universal = normalizeWebsiteLeadPayload({ ...BASE_PAYLOAD, ...universalFields });
+    assert.deepEqual(universal.attribution, legacy.attribution);
+    assert.equal(universal.payloadHash, legacy.payloadHash);
+  }
+});
+
+test('replay legacy/universal equivalente é idempotente nos dois sentidos', () => {
+  const legacy = normalizeWebsiteLeadPayload({
+    ...BASE_PAYLOAD,
+    external_lead_id: 'replay-equivalent',
+    utm_source: 'facebook',
+    fbclid: 'replay-click',
+  });
+  const universal = normalizeWebsiteLeadPayload({
+    ...BASE_PAYLOAD,
+    external_lead_id: 'replay-equivalent',
+    attribution: {
+      provider: 'meta',
+      source: 'facebook',
+      click_ids: { fbclid: 'replay-click' },
+    },
+  });
+  const legacyRecord = {
+    payload_hash: legacy.payloadHash,
+    lead_id: 'lead-replay',
+    website_event_id: legacy.websiteEventId,
+  };
+  const universalRecord = {
+    payload_hash: universal.payloadHash,
+    lead_id: 'lead-replay',
+    website_event_id: universal.websiteEventId,
+  };
+  assert.equal(decideWebsiteSubmission(legacyRecord, universal).code, 'IDEMPOTENT_REPLAY');
+  assert.equal(decideWebsiteSubmission(universalRecord, legacy).code, 'IDEMPOTENT_REPLAY');
+});
+
+test('enriquecimento posterior com novo click ID continua bloqueado na V1', () => {
+  const first = normalizeWebsiteLeadPayload({
+    ...BASE_PAYLOAD,
+    external_lead_id: 'replay-enrichment',
+    utm_source: 'google',
+  });
+  const second = normalizeWebsiteLeadPayload({
+    ...BASE_PAYLOAD,
+    external_lead_id: 'replay-enrichment',
+    attribution: {
+      provider: 'google',
+      source: 'google',
+      click_ids: { gclid: 'new-gclid' },
+    },
+  });
+  const decision = decideWebsiteSubmission({
+    payload_hash: first.payloadHash,
+    lead_id: 'lead-enrichment',
+    website_event_id: first.websiteEventId,
+  }, second);
+  assert.equal(decision.code, 'EXTERNAL_ID_CONFLICT');
+  assert.notEqual(first.payloadHash, second.payloadHash);
+  assert.deepEqual(first.attribution, { provider: 'google', source: 'google' });
+});
+
+test('extra e click_ids rejeitam estruturas inseguras, limites e prototype pollution', () => {
+  assert.throws(() => normalizeWebsiteLeadPayload({
+    ...BASE_PAYLOAD,
+    attribution: { click_ids: { gclid: ['not-string'] } },
+  }), { code: 'INVALID_PAYLOAD' });
+  assert.throws(() => normalizeWebsiteLeadPayload({
+    ...BASE_PAYLOAD,
+    attribution: { extra: { nested: { value: true } } },
+  }), { code: 'INVALID_PAYLOAD' });
+  const pollutedClickIds = JSON.parse('{"__proto__":"blocked"}');
+  assert.throws(() => normalizeWebsiteLeadPayload({
+    ...BASE_PAYLOAD,
+    attribution: { click_ids: pollutedClickIds },
+  }), { code: 'INVALID_PAYLOAD' });
+  const polluted = JSON.parse('{"__proto__":{"polluted":true}}');
+  assert.throws(() => normalizeWebsiteLeadPayload({
+    ...BASE_PAYLOAD,
+    attribution: { extra: polluted },
+  }), { code: 'INVALID_PAYLOAD' });
+  assert.throws(() => normalizeWebsiteLeadPayload({
+    ...BASE_PAYLOAD,
+    attribution: { extra: Object.fromEntries(Array.from({ length: 31 }, (_unused, index) => [`k${index}`, true])) },
+  }), { code: 'INVALID_PAYLOAD' });
+  assert.throws(() => normalizeWebsiteLeadPayload({
+    ...BASE_PAYLOAD,
+    attribution: { extra: Object.fromEntries(Array.from({ length: 9 }, (_unused, index) => [`k${index}`, 'x'.repeat(1000)])) },
+  }), { code: 'INVALID_PAYLOAD' });
 });
 
 test('nome ausente usa placeholder técnico e nome informado é preservado', () => {
@@ -308,6 +553,11 @@ test('contrato implementado usa migration aditiva, rota antes do parser global e
   assert.match(docs, /1414255997275699/);
   assert.match(docs, /1059632093187676/);
   assert.match(docs, /775516968145969/);
+  assert.match(docs, /Atribuição universal/);
+  assert.match(docs, /Google Ads/);
+  assert.match(docs, /click_ids/);
+  assert.match(docs, /ATTRIBUTION_CONFLICT/);
+  assert.match(docs, /não pertence[\s\S]*exclusivamente à Meta/);
   assert.match(docs, /name_is_placeholder=true/);
   assert.match(docs, /Idempotency-Key.*obrigatória/);
   assert.match(docs, /não deve ser[\s\S]*executado no navegador/);
@@ -315,6 +565,34 @@ test('contrato implementado usa migration aditiva, rota antes do parser global e
   assert.match(envExample, /SUPEREDUCAR_WEBSITE_INGEST_TENANT_ID=\r?\n/);
   assert.match(stack, /SUPEREDUCAR_WEBSITE_INGEST_ENABLED/);
   assert.doesNotMatch(server.slice(server.indexOf('async function receiveWebsiteLead'), server.indexOf("app.get('/health'")), /fetch\(|axios|meta_conversion_events|meta_jobs|wa2_contact_links|Graph/i);
+});
+
+test('WEBSITE_FORM não altera os defaults de META_INSTANT_FORM', async () => {
+  const previousDatabaseUrl = process.env.DATABASE_URL;
+  if (!previousDatabaseUrl) process.env.DATABASE_URL = 'postgresql://test:test@127.0.0.1:5432/test';
+  const { upsertLead } = await import(`../src/db.js?meta-regression=${Date.now()}`);
+  if (!previousDatabaseUrl) delete process.env.DATABASE_URL;
+  const queries = [];
+  const fakeClient = {
+    async query(sql, params) {
+      queries.push({ sql, params });
+      if (sql.includes('INSERT INTO leads')) {
+        return { rows: [{ source: params[7], stage: params[8], was_inserted: false }] };
+      }
+      return { rows: [] };
+    },
+  };
+  const lead = await upsertLead({
+    tenantId: 'website-meta-regression',
+    metaLeadId: 'meta-regression-lead',
+    name: 'Lead Meta de teste',
+    phone: '+55 38 9 9999-9999',
+  }, { client: fakeClient });
+  assert.equal(lead.source, 'META_INSTANT_FORM');
+  assert.equal(lead.stage, 'NEW');
+  assert.equal(queries.length, 1);
+  assert.equal(queries[0].params[7], 'META_INSTANT_FORM');
+  assert.equal(queries[0].params[8], 'NEW');
 });
 
 test('identidade lógica não depende de domínio, origem, IP ou hostname', () => {

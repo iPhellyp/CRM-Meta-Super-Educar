@@ -353,7 +353,9 @@ function recordFailedLogin(req) {
 
 function websiteErrorStatus(code) {
   if (code === 'NONCE_REPLAY' || code === 'EXTERNAL_ID_CONFLICT') return 409;
-  if (code === 'INVALID_PAYLOAD' || code === 'INVALID_WEBSITE_SUBMISSION') return 422;
+  if (code === 'INVALID_PAYLOAD'
+    || code === 'INVALID_WEBSITE_SUBMISSION'
+    || code === 'ATTRIBUTION_CONFLICT') return 422;
   if (code === 'WEBSITE_INGEST_NOT_CONFIGURED') return 503;
   return 500;
 }

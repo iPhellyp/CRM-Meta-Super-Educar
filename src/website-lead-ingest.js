@@ -22,13 +22,35 @@ const ALLOWED_FIELDS = new Set([
   'course_name', 'modality', 'name', 'phone', 'email', 'fbclid', 'fbp', 'fbc',
   'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term',
   'campaign_id', 'adset_id', 'ad_id', 'landing_page_url', 'referrer_url',
-  'consent_at', 'submitted_at',
+  'consent_at', 'submitted_at', 'attribution',
 ]);
-const ATTRIBUTION_FIELDS = [
+const LEGACY_ATTRIBUTION_FIELDS = [
   'fbclid', 'fbp', 'fbc', 'utm_source', 'utm_medium', 'utm_campaign',
   'utm_content', 'utm_term', 'campaign_id', 'adset_id', 'ad_id',
   'landing_page_url', 'referrer_url', 'consent_at',
 ];
+const UNIVERSAL_ATTRIBUTION_FIELDS = new Set([
+  'provider', 'source', 'medium', 'channel',
+  'campaign_id', 'campaign_name',
+  'ad_group_id', 'ad_group_name',
+  'adset_id', 'adset_name',
+  'ad_id', 'ad_name',
+  'creative_id', 'creative_name',
+  'placement', 'keyword', 'match_type',
+  'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term',
+  'landing_page_url', 'referrer_url', 'consent_at',
+  'click_ids', 'extra',
+]);
+const ATTRIBUTION_LABEL_FIELDS = new Set([
+  'provider', 'source', 'medium', 'channel', 'match_type',
+  'utm_source', 'utm_medium',
+]);
+const ATTRIBUTION_URL_FIELDS = new Set(['landing_page_url', 'referrer_url']);
+const ATTRIBUTION_DATE_FIELDS = new Set(['consent_at']);
+const ATTRIBUTION_MAX_BYTES = 8 * 1024;
+const CLICK_IDS_MAX_KEYS = 32;
+const CLICK_ID_KEY_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/i;
+const PROTOTYPE_POLLUTION_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/;
@@ -81,6 +103,227 @@ function normalizeUrl(value) {
   } catch {
     fail('INVALID_PAYLOAD');
   }
+}
+
+function isPlainRecord(value) {
+  return value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function assertSafeRecord(value) {
+  if (!isPlainRecord(value)) fail('INVALID_PAYLOAD');
+  for (const key of Object.keys(value)) {
+    if (PROTOTYPE_POLLUTION_KEYS.has(key.toLowerCase())) fail('INVALID_PAYLOAD');
+  }
+}
+
+function normalizeAttributionOptionalString(value, maxLength = 200, { lowercase = false } = {}) {
+  if (value == null || value === '') return null;
+  if (typeof value !== 'string') fail('INVALID_PAYLOAD');
+  const normalized = value.trim();
+  if (!normalized || normalized.length > maxLength || CONTROL_CHARACTER_PATTERN.test(normalized)) {
+    fail('INVALID_PAYLOAD');
+  }
+  return lowercase ? normalized.toLowerCase() : normalized;
+}
+
+function normalizeProvider(value) {
+  const provider = normalizeAttributionOptionalString(value, 64, { lowercase: true });
+  if (provider && !/^[a-z0-9][a-z0-9._-]*$/.test(provider)) fail('INVALID_PAYLOAD');
+  return provider;
+}
+
+function normalizeClickIds(value) {
+  if (value == null) return null;
+  assertSafeRecord(value);
+  const keys = Object.keys(value);
+  if (keys.length > CLICK_IDS_MAX_KEYS) fail('INVALID_PAYLOAD');
+  const normalized = {};
+  for (const rawKey of keys) {
+    const key = rawKey.trim().toLowerCase();
+    if (!CLICK_ID_KEY_PATTERN.test(key) || Object.hasOwn(normalized, key)) fail('INVALID_PAYLOAD');
+    const clickId = normalizeAttributionOptionalString(value[rawKey], 512);
+    if (!clickId) fail('INVALID_PAYLOAD');
+    normalized[key] = clickId;
+  }
+  return Object.keys(normalized).length ? normalized : null;
+}
+
+function normalizeExtra(value) {
+  if (value == null) return null;
+  assertSafeRecord(value);
+  const keys = Object.keys(value);
+  if (keys.length > 30) fail('INVALID_PAYLOAD');
+  const normalized = {};
+  for (const rawKey of keys) {
+    const key = rawKey.trim();
+    if (!key || key.length > 200 || CONTROL_CHARACTER_PATTERN.test(key) || Object.hasOwn(normalized, key)) {
+      fail('INVALID_PAYLOAD');
+    }
+    const extraValue = value[rawKey];
+    if (extraValue !== null
+      && typeof extraValue !== 'string'
+      && typeof extraValue !== 'number'
+      && typeof extraValue !== 'boolean') fail('INVALID_PAYLOAD');
+    if (typeof extraValue === 'number' && !Number.isFinite(extraValue)) fail('INVALID_PAYLOAD');
+    if (typeof extraValue === 'string'
+      && (extraValue.length > 1000 || CONTROL_CHARACTER_PATTERN.test(extraValue))) fail('INVALID_PAYLOAD');
+    normalized[key] = extraValue;
+  }
+  return Object.keys(normalized).length ? normalized : null;
+}
+
+function normalizeUniversalAttribution(value) {
+  if (value == null) return null;
+  assertSafeRecord(value);
+  for (const key of Object.keys(value)) {
+    if (!UNIVERSAL_ATTRIBUTION_FIELDS.has(key)) fail('INVALID_PAYLOAD');
+  }
+  const normalized = {};
+  for (const key of UNIVERSAL_ATTRIBUTION_FIELDS) {
+    if (!Object.hasOwn(value, key)) continue;
+    if (key === 'provider') {
+      const provider = normalizeProvider(value[key]);
+      if (provider != null) normalized[key] = provider;
+    } else if (key === 'click_ids') {
+      const clickIds = normalizeClickIds(value[key]);
+      if (clickIds) normalized[key] = clickIds;
+    } else if (key === 'extra') {
+      const extra = normalizeExtra(value[key]);
+      if (extra) normalized[key] = extra;
+    } else if (ATTRIBUTION_URL_FIELDS.has(key)) {
+      const url = normalizeUrl(value[key]);
+      if (url) normalized[key] = url;
+    } else if (ATTRIBUTION_DATE_FIELDS.has(key)) {
+      const date = normalizeIsoDate(value[key]);
+      if (date) normalized[key] = date;
+    } else {
+      const text = normalizeAttributionOptionalString(
+        value[key],
+        key.endsWith('_id') ? 200 : 200,
+        { lowercase: ATTRIBUTION_LABEL_FIELDS.has(key) },
+      );
+      if (text != null) normalized[key] = text;
+    }
+  }
+  if (Buffer.byteLength(stableWebsiteJson(normalized), 'utf8') > ATTRIBUTION_MAX_BYTES) {
+    fail('INVALID_PAYLOAD');
+  }
+  return Object.keys(normalized).length ? normalized : null;
+}
+
+function inferLegacyProvider(source) {
+  const normalized = String(source || '').trim().toLowerCase();
+  if (['facebook', 'instagram', 'meta'].includes(normalized)) return 'meta';
+  if (normalized === 'google') return 'google';
+  if (normalized === 'tiktok') return 'tiktok';
+  if (['bing', 'microsoft'].includes(normalized)) return 'microsoft';
+  if (normalized === 'linkedin') return 'linkedin';
+  if (normalized === 'youtube') return 'youtube';
+  return null;
+}
+
+function legacyAttribution(normalized) {
+  const attribution = {};
+  for (const field of LEGACY_ATTRIBUTION_FIELDS) {
+    const key = field.replace(/_([a-z])/g, (_match, letter) => letter.toUpperCase());
+    if (normalized[key] != null) {
+      attribution[field] = ['utm_source', 'utm_medium'].includes(field)
+        ? normalized[key].toLowerCase()
+        : normalized[key];
+    }
+  }
+  if (normalized.utmSource != null) {
+    attribution.source = normalized.utmSource.toLowerCase();
+    const provider = inferLegacyProvider(normalized.utmSource);
+    if (provider) attribution.provider = provider;
+  }
+  if (normalized.utmMedium != null) attribution.medium = normalized.utmMedium.toLowerCase();
+  const clickIds = Object.fromEntries(
+    ['fbclid', 'fbp', 'fbc']
+      .filter((field) => normalized[field] != null)
+      .map((field) => [field, normalized[field]]),
+  );
+  if (Object.keys(clickIds).length) attribution.click_ids = clickIds;
+  return attribution;
+}
+
+function inferCanonicalProvider({ source = null, clickIds = null } = {}) {
+  const providers = new Set();
+  const clickProviderMap = {
+    fbclid: 'meta',
+    fbp: 'meta',
+    fbc: 'meta',
+    gclid: 'google',
+    gbraid: 'google',
+    wbraid: 'google',
+    ttclid: 'tiktok',
+    msclkid: 'microsoft',
+  };
+  for (const key of Object.keys(clickIds || {})) {
+    if (clickProviderMap[key]) providers.add(clickProviderMap[key]);
+  }
+  const sourceProvider = inferLegacyProvider(source);
+  if (sourceProvider) providers.add(sourceProvider);
+  return providers.size === 1 ? [...providers][0] : null;
+}
+
+function canonicalizeAttribution(value) {
+  if (!value || Object.keys(value).length === 0) return {};
+  const canonical = {};
+  const source = value.source || value.utm_source || null;
+  const utmSource = value.utm_source || null;
+  const medium = value.medium || value.utm_medium || null;
+  const utmMedium = value.utm_medium || null;
+
+  if (source) canonical.source = source;
+  if (utmSource && utmSource !== source) canonical.utm_source = utmSource;
+  if (medium) canonical.medium = medium;
+  if (utmMedium && utmMedium !== medium) canonical.utm_medium = utmMedium;
+  if (value.provider) canonical.provider = value.provider;
+
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'provider' || key === 'source' || key === 'utm_source'
+      || key === 'medium' || key === 'utm_medium'
+      || key === 'fbclid' || key === 'fbp' || key === 'fbc') continue;
+    canonical[key] = item;
+  }
+
+  if (!canonical.provider) {
+    const provider = inferCanonicalProvider({
+      source: canonical.source || canonical.utm_source,
+      clickIds: canonical.click_ids,
+    });
+    if (provider) canonical.provider = provider;
+  }
+  return canonical;
+}
+
+function mergeAttributions(legacy, explicit) {
+  if (!legacy && !explicit) return null;
+  const merged = { ...(legacy || {}) };
+  for (const [key, value] of Object.entries(explicit || {})) {
+    if (key === 'click_ids') {
+      const mergedClickIds = { ...(merged.click_ids || {}) };
+      for (const [clickKey, clickValue] of Object.entries(value)) {
+        if (mergedClickIds[clickKey] != null && mergedClickIds[clickKey] !== clickValue) {
+          fail('ATTRIBUTION_CONFLICT');
+        }
+        mergedClickIds[clickKey] = clickValue;
+      }
+      merged.click_ids = mergedClickIds;
+      continue;
+    }
+    if (merged[key] != null && merged[key] !== value) fail('ATTRIBUTION_CONFLICT');
+    merged[key] = value;
+  }
+  const canonical = canonicalizeAttribution(merged);
+  if (Buffer.byteLength(stableWebsiteJson(canonical), 'utf8') > ATTRIBUTION_MAX_BYTES) {
+    fail('INVALID_PAYLOAD');
+  }
+  return canonical;
 }
 
 function stableValue(value) {
@@ -165,13 +408,9 @@ export function normalizeWebsiteLeadPayload(payload) {
   }
   normalized.consentAt = normalizeIsoDate(payload.consent_at);
 
-  const attribution = Object.fromEntries(
-    ATTRIBUTION_FIELDS
-      .map((field) => {
-        const key = field.replace(/_([a-z])/g, (_match, letter) => letter.toUpperCase());
-        return [field, normalized[key] ?? null];
-      })
-      .filter(([, value]) => value != null),
+  const attribution = mergeAttributions(
+    legacyAttribution(normalized),
+    normalizeUniversalAttribution(payload.attribution),
   );
   const hashInput = {
     external_lead_id: normalized.externalLeadId,
@@ -184,7 +423,7 @@ export function normalizeWebsiteLeadPayload(payload) {
     email: normalized.email,
     phone: normalized.phoneNormalized,
     submitted_at: normalized.submittedAt,
-    ...attribution,
+    attribution,
   };
   return {
     ...normalized,

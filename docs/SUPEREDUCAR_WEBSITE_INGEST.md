@@ -1,4 +1,4 @@
-# API de leads do site Super Educar
+# API universal de leads WEBSITE_FORM — Super Educar
 
 ## Objetivo
 
@@ -8,9 +8,14 @@ físico do site: qualquer servidor autorizado pode chamar o receptor quando
 possuir a credencial HMAC correta.
 
 A integração usa a identidade lógica `supereducar-website`, com
-`external_system=SUPEREDUCAR_WEBSITE` e `source=WEBSITE_FORM`. O tenant vem
-somente da configuração do servidor CRM; `tenant_id` enviado pelo remetente é
-rejeitado como campo desconhecido.
+`external_system=SUPEREDUCAR_WEBSITE` e `source=WEBSITE_FORM`. O mesmo endpoint
+recebe leads de Meta/Facebook/Instagram, Google Ads, Google orgânico, TikTok,
+Microsoft Ads, LinkedIn, YouTube, tráfego direto, referral, afiliados,
+parceiros, e-mail, QR Code e origens futuras. A API não pertence
+exclusivamente à Meta.
+
+O tenant vem somente da configuração do servidor CRM; `tenant_id` enviado pelo
+remetente é rejeitado como campo desconhecido.
 
 Rota:
 
@@ -30,6 +35,81 @@ SUPEREDUCAR_WEBSITE_INGEST_CLOCK_SKEW_SECONDS=300
 
 Quando desativada, a API retorna `503 WEBSITE_INGEST_DISABLED` antes de
 validar o conteúdo ou consultar/persistir dados comerciais.
+
+## Atribuição universal
+
+O campo opcional `attribution` é armazenado no `attribution_json` existente,
+sem migration específica por plataforma. `provider` é uma string normalizada
+em lowercase, sem enum fechado; origens futuras podem ser adicionadas sem
+migration.
+
+```json
+{
+  "provider": "google",
+  "source": "google",
+  "medium": "cpc",
+  "channel": "paid_search",
+  "campaign_id": "123",
+  "campaign_name": "Campanha",
+  "ad_group_id": "456",
+  "ad_id": "789",
+  "utm_source": "google",
+  "utm_medium": "cpc",
+  "click_ids": {
+    "gclid": "...",
+    "gbraid": "...",
+    "wbraid": "..."
+  },
+  "landing_page_url": "https://example.com/landing",
+  "referrer_url": "https://www.google.com/",
+  "extra": {
+    "landing_variant": "A",
+    "score": 1,
+    "qualified_by_source": false
+  }
+}
+```
+
+`click_ids` aceita chaves futuras seguras, com valores string, sem arrays,
+objetos aninhados ou chaves `__proto__`, `constructor` e `prototype`. `extra`
+aceita somente mapa simples de string, número, boolean ou `null`. Há limites
+de quantidade, tamanho e atribuição total de 8 KB.
+
+Classificações recomendadas enviadas pela origem:
+
+```text
+Meta Ads:        provider=meta,     source=facebook|instagram, medium=paid_social, channel=paid_social
+Google Ads:      provider=google,   source=google,              medium=cpc,         channel=paid_search
+Google orgânico: provider=organic,  source=google,              medium=organic,    channel=organic
+TikTok Ads:      provider=tiktok,   source=tiktok,              medium=paid_social, channel=paid_social
+Direto:          provider=direct,   source=direct,              medium=none,        channel=direct
+Referral:        provider=referral, source=<domínio>,           medium=referral,    channel=referral
+```
+
+A origem deve enviar apenas o que realmente conhece; o CRM não adivinha
+campanha, anúncio, palavra-chave ou plataforma ausente.
+
+Os campos legados de primeiro nível (`fbclid`, `fbp`, `fbc`, `utm_*`, IDs,
+URLs e `consent_at`) continuam aceitos e são normalizados para a estrutura
+universal. Quando `attribution` e campos legados são enviados juntos, os
+valores explícitos de `attribution` têm precedência, campos legados ausentes
+podem complementar a estrutura e valores contraditórios retornam
+`422 ATTRIBUTION_CONFLICT`.
+
+### Equivalência e idempotência V1
+
+Antes do hash semântico, os formatos legado e universal convergem para uma
+representação canônica. Assim, `fbclid` no primeiro nível e
+`attribution.click_ids.fbclid` têm o mesmo significado; `utm_source` também
+converge para `source` quando os valores são iguais. Campos duplicados não
+entram duas vezes no hash. Payloads legado e universal que contenham a mesma
+informação retornam `IDEMPOTENT_REPLAY`, independentemente da sintaxe usada.
+
+A idempotência da V1 é estrita. Se o mesmo `external_lead_id` receber
+informação nova ou diferente, como um `gclid` que não existia no primeiro
+request, a API retorna `409 EXTERNAL_ID_CONFLICT`. O lead existente e seu
+`attribution_json` não são atualizados nem enriquecidos. Enriquecimento
+posterior pertence a uma futura V2.
 
 ## Fontes Meta separadas
 
@@ -99,6 +179,24 @@ URLs HTTP/HTTPS e `consent_at`. Objetos, arrays, campos desconhecidos, URLs
 não HTTP(S), textos excessivos, e-mail inválido, telefone inválido ou data
 inválida são rejeitados.
 
+Exemplos compactos de `attribution`:
+
+```json
+{"provider":"tiktok","source":"tiktok","medium":"paid_social","channel":"paid_social","click_ids":{"ttclid":"..."}}
+```
+
+```json
+{"provider":"organic","source":"google","medium":"organic","channel":"organic"}
+```
+
+```json
+{"provider":"direct","source":"direct","medium":"none","channel":"direct"}
+```
+
+```json
+{"provider":"referral","source":"parceiro.example","medium":"referral","channel":"referral"}
+```
+
 Não são aceitos campos que alterem o funil ou roteamento, incluindo `tenant_id`,
 `source`, `stage`, `dataset_id`, `event_name`, `mql_status` e
 `payment_status`.
@@ -144,7 +242,7 @@ Respostas:
 401 autenticação inválida
 413 corpo excedente
 415 Content-Type incorreto
-422 payload inválido
+422 payload inválido ou ATTRIBUTION_CONFLICT
 429 rate limit
 503 feature desativada ou não configurada
 500 INTERNAL_ERROR com request_id
@@ -153,7 +251,8 @@ Respostas:
 Cada submissão nova cria, numa transação, exatamente uma submission e um lead
 `WEBSITE_FORM` em `NEW`, além do histórico de recebimento. Não cria job, MQL,
 evento Meta, vínculo WhatsApp, identidade WA2, alteração de stage por etiqueta
-ou alteração de outro lead. Concorrência é serializada por tenant e IDs
+ou alteração de outro lead. A atribuição universal normalizada é salva no
+`attribution_json` da submission. Concorrência é serializada por tenant e IDs
 externos; constraints únicas permanecem como segunda barreira.
 
 `Idempotency-Key` é obrigatória e deve ser exatamente
@@ -180,9 +279,11 @@ exigir.
 
 O Pixel Web e eventual CAPI Web futura usarão uma fonte Meta própria e
 `event_name=Lead`, com `event_id=website_event_id`. Eles são separados da
-fonte CRM de qualificação (`Marketing Qualified Lead`) e do dataset legado.
-Esta unidade não configura Pixel, não exige Pixel ID, não envia CAPI e não
-envia evento Meta.
+fonte CRM de qualificação (`Marketing Qualified Lead`) e do dataset legado. O
+Pixel Meta `1414255997275699` é somente uma das possíveis origens; Google,
+TikTok, Microsoft, orgânico, direto e referral não devem ser convertidos em
+eventos Meta por esta API. Esta unidade não configura Pixel, não exige Pixel
+ID, não envia CAPI e não envia evento Meta.
 
 ## Exemplo PHP server-side
 

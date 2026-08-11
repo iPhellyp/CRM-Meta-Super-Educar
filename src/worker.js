@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'node:crypto';
 import {
   claimMetaHistoricalImport,
   claimWa2LabelEventCursor,
@@ -7,6 +8,7 @@ import {
   claimNextJob,
   blockMetaConversionJob,
   closePool,
+  createWebsiteLeadSubmission,
   completeWa2LabelJob,
   completeMetaHistoricalPage,
   completeWa2LabelEventPage,
@@ -83,6 +85,14 @@ import { createWorkerHeartbeatLoop } from './worker-heartbeat.js';
 import { PHONE_CLASSIFICATIONS, selectBestLeadPhone } from './phone.js';
 import { decryptSecret } from './secret-crypto.js';
 import {
+  normalizeWebsiteLeadPayload,
+  WEBSITE_SOURCE,
+} from './website-lead-ingest.js';
+import {
+  supereducarCaptacaoConfig,
+  syncSupereducarCaptacao,
+} from './supereducar-captacao.js';
+import {
   createWa2DailyScheduleState,
   describeWa2DailyError,
   isWa2DailyReconciliationEnabled,
@@ -96,6 +106,8 @@ let stopping = false;
 let heartbeatLoop = null;
 let dailyReconciliationTimer = null;
 let dailyReconciliationPromise = null;
+let supereducarCaptacaoTimer = null;
+let supereducarCaptacaoPromise = null;
 const dailyReconciliationState = createWa2DailyScheduleState();
 const labeledIdentityCache = new Map();
 const identityRefreshByInstance = new Map();
@@ -596,6 +608,70 @@ async function scheduleDailyReconciliationIfNeeded() {
   return dailyReconciliationPromise;
 }
 
+async function runSupereducarCaptacaoSync(config) {
+  const result = await syncSupereducarCaptacao({
+    config,
+    ingest: async (payload) => {
+      if (payload.source !== WEBSITE_SOURCE || payload.stage !== 'NEW') {
+        const error = new Error('Mapeamento de origem ou etapa inválido');
+        error.code = 'INVALID_SOURCE_OR_STAGE';
+        throw error;
+      }
+      const {
+        source: _source,
+        stage: _stage,
+        ...websitePayload
+      } = payload;
+      const normalized = normalizeWebsiteLeadPayload(websitePayload);
+      return createWebsiteLeadSubmission({
+        ...normalized,
+        tenantId: process.env.DEFAULT_TENANT_ID,
+        attribution: normalized.attribution || {},
+        nonceHash: crypto.createHash('sha256')
+          .update(crypto.randomUUID(), 'utf8')
+          .digest('hex'),
+        nonceExpiresAt: new Date(Date.now() + 5 * 60_000),
+      });
+    },
+  });
+  const level = result.status === 'error' ? 'error' : 'info';
+  console[level](JSON.stringify({
+    level,
+    msg: result.status === 'error'
+      ? 'Falha na sincronização da captação Super Educar'
+      : 'Sincronização da captação Super Educar concluída',
+    status: result.status,
+    code: result.code,
+    httpStatus: result.httpStatus,
+    transient: result.transient,
+    total: result.total,
+    fetched: result.fetched,
+    created: result.created,
+    replayed: result.replayed,
+    skipped: result.skipped,
+    failed: result.failed,
+    ignoredBeforeCutoff: result.ignoredBeforeCutoff,
+    errors: result.errors,
+  }));
+  return result;
+}
+
+function scheduleSupereducarCaptacaoSync(config) {
+  if (supereducarCaptacaoPromise) return supereducarCaptacaoPromise;
+  supereducarCaptacaoPromise = runSupereducarCaptacaoSync(config)
+    .catch((error) => {
+      console.error(JSON.stringify({
+        level: 'error',
+        msg: 'Falha inesperada na sincronização da captação Super Educar',
+        error: error?.name || 'Error',
+      }));
+    })
+    .finally(() => {
+      supereducarCaptacaoPromise = null;
+    });
+  return supereducarCaptacaoPromise;
+}
+
 async function run() {
   validateDatabaseConfig();
   validateMetaConfig();
@@ -618,6 +694,15 @@ async function run() {
   }, DAILY_RECONCILIATION_INTERVAL_MS);
   dailyReconciliationTimer.unref();
   void scheduleDailyReconciliationIfNeeded();
+
+  const supereducarCaptacao = supereducarCaptacaoConfig();
+  if (supereducarCaptacao.enabled) {
+    supereducarCaptacaoTimer = setInterval(() => {
+      void scheduleSupereducarCaptacaoSync(supereducarCaptacao);
+    }, supereducarCaptacao.intervalMs);
+    supereducarCaptacaoTimer.unref();
+    void scheduleSupereducarCaptacaoSync(supereducarCaptacao);
+  }
 
   while (!stopping) {
     if (stopping) break;
@@ -674,6 +759,8 @@ function stop(signal) {
   stopping = true;
   if (dailyReconciliationTimer) clearInterval(dailyReconciliationTimer);
   dailyReconciliationTimer = null;
+  if (supereducarCaptacaoTimer) clearInterval(supereducarCaptacaoTimer);
+  supereducarCaptacaoTimer = null;
   heartbeatLoop?.stop();
   heartbeatLoop = null;
   console.log(JSON.stringify({ level: 'info', msg: 'Worker encerrando', signal }));
@@ -693,5 +780,6 @@ try {
   process.exitCode = 1;
 } finally {
   await dailyReconciliationPromise?.catch(() => undefined);
+  await supereducarCaptacaoPromise?.catch(() => undefined);
   await closePool();
 }

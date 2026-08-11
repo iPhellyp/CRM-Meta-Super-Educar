@@ -1051,7 +1051,7 @@ export async function createWebsiteLeadSubmission(input) {
         input.phone,
         input.phoneNormalized,
         input.submittedAt,
-        input.attribution,
+        input.attribution || {},
       ],
     );
     await client.query('COMMIT');

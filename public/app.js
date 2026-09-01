@@ -9,9 +9,49 @@ function setContextMessage(region, message, { error = false } = {}) {
   const chatRoot = document.querySelector('[data-chat-root]');
   if (!chatRoot) return;
   let polling = false;
+  const formatDateTime = (value) => {
+    if (!value) return '';
+    const date = new Date(value);
+    return Number.isFinite(date.getTime())
+      ? new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short', timeZone: 'America/Sao_Paulo' }).format(date).replace(',', ' às ')
+      : '';
+  };
+  const chatTitle = (chat) => chat.displayName || chat.name || chat.displayPhone || 'Contato WhatsApp';
+  const renderChats = (items) => {
+    const target = chatRoot.querySelector('[data-chat-items]');
+    if (!target) return;
+    const scrollTop = target.scrollTop;
+    target.replaceChildren();
+    if (!items.length) {
+      const empty = document.createElement('p');
+      empty.className = 'empty';
+      empty.textContent = 'Nenhuma conversa encontrada.';
+      target.append(empty);
+      return;
+    }
+    for (const chat of items) {
+      const link = document.createElement('a');
+      link.className = `chat-list-item${chat.id === chatRoot.dataset.chatId ? ' is-active' : ''}`;
+      const params = new URLSearchParams({ instanceId: chatRoot.dataset.instanceId || '', chatId: chat.id });
+      if (chatRoot.dataset.labelId) params.set('labelId', chatRoot.dataset.labelId);
+      if (chatRoot.dataset.search) params.set('search', chatRoot.dataset.search);
+      link.href = `/chat?${params}`;
+      const title = document.createElement('strong');
+      title.textContent = chatTitle(chat);
+      const preview = document.createElement('small');
+      preview.textContent = chat.lastMessageText || 'Sem mensagem salva';
+      const meta = document.createElement('span');
+      meta.className = 'muted';
+      meta.textContent = `${chat.displayPhone || (chat.isGroup ? 'Grupo' : 'WhatsApp')} · ${chat.messageCount || 0} mensagem(ns) · ${(chat.labels || []).map((label) => label.name).join(', ') || 'sem etiqueta'}`;
+      link.append(title, preview, meta);
+      target.append(link);
+    }
+    target.scrollTop = scrollTop;
+  };
   const renderMessages = (items) => {
     const target = chatRoot.querySelector('[data-chat-messages]');
     if (!target) return;
+    const nearBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 80;
     target.replaceChildren();
     if (!items.length) {
       const empty = document.createElement('p');
@@ -24,12 +64,13 @@ function setContextMessage(region, message, { error = false } = {}) {
       const article = document.createElement('article');
       article.className = `chat-message ${item.fromMe ? 'from-me' : 'from-contact'}`;
       const body = document.createElement('div');
-      body.textContent = item.text || item.messageType || 'Mensagem sem texto';
+      body.textContent = item.text || 'Mensagem recebida';
       const meta = document.createElement('small');
-      meta.textContent = `${item.fromMe ? 'Você' : 'Contato'} · ${item.timestamp || item.createdAt || ''}`;
+      meta.textContent = `${item.fromMe ? 'Você' : 'Contato'} · ${formatDateTime(item.timestamp || item.createdAt)}`;
       article.append(body, meta);
       target.append(article);
     }
+    if (nearBottom) target.scrollTop = target.scrollHeight;
   };
   const poll = async () => {
     if (polling || document.hidden) return;
@@ -37,10 +78,20 @@ function setContextMessage(region, message, { error = false } = {}) {
     try {
       const params = new URLSearchParams({ format: 'json', instanceId: chatRoot.dataset.instanceId || '', search: chatRoot.dataset.search || '' });
       if (chatRoot.dataset.chatId) params.set('chatId', chatRoot.dataset.chatId);
+      if (chatRoot.dataset.labelId) params.set('labelId', chatRoot.dataset.labelId);
       const response = await fetch(`/chat?${params}`, { cache: 'no-store', credentials: 'same-origin' });
       if (!response.ok) return;
       const data = await response.json();
-      if (data.selectedChat?.id === chatRoot.dataset.chatId) renderMessages(data.messages || []);
+      renderChats(data.chats || []);
+      if (data.selectedChat?.id === chatRoot.dataset.chatId) {
+        renderMessages(data.messages || []);
+        const title = chatRoot.querySelector('[data-chat-title]');
+        const phone = chatRoot.querySelector('[data-chat-phone]');
+        const count = chatRoot.querySelector('[data-chat-message-count]');
+        if (title) title.textContent = chatTitle(data.selectedChat);
+        if (phone) phone.textContent = data.selectedChat.displayPhone || (data.selectedChat.isGroup ? 'Grupo' : 'WhatsApp');
+        if (count) count.textContent = `${data.selectedChat.messageCount || 0} mensagem(ns)`;
+      }
       const count = chatRoot.querySelector('[data-chat-count]');
       if (count) count.textContent = String((data.chats || []).length);
     } catch {
@@ -49,7 +100,8 @@ function setContextMessage(region, message, { error = false } = {}) {
       polling = false;
     }
   };
-  window.setInterval(poll, 2000);
+  // ponytail: short polling keeps the CRM stateless; move to SSE only if the 4s latency becomes insufficient.
+  window.setInterval(poll, 4000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) void poll(); });
 })();
 

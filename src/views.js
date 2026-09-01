@@ -107,7 +107,7 @@ function appNavigation(csrfToken) {
         <details class="nav-group">
           <summary>WhatsApp</summary>
           <div class="nav-group-links"><a href="/wa2">Visão geral e conexão</a>
-            <a href="/contatos">Contatos</a><a href="/chat">Conversas</a><a href="/wa2/labels">Etiquetas</a>
+            <a href="/contatos">Contatos</a><a href="/chat">Conversas</a><a href="/etiquetas">Etiquetas e contatos</a>
             <a href="/campanhas">Campanhas</a><a href="/envios">Envios</a><a href="/wa2/label-jobs">Sincronização</a>
             <a href="/wa2/instance-replacement">Recuperar instância</a></div>
         </details>
@@ -1548,8 +1548,27 @@ export function wa2InstanceView({
       <div><strong>Conectada em</strong><span>${formatDateTime(status.connectedAt)}</span></div>
       <div><strong>Última sincronização</strong><span>${formatDateTime(status.lastSyncAt)}</span></div>
       <div><strong>Requer QR</strong><span>${status.requiresQr ? 'Sim' : 'Não'}</span></div>
+      <div><strong>Código de pareamento</strong><span>${status.requiresPairingCode ? 'Disponível' : '—'}</span></div>
       <div><strong>Último código de erro</strong><span>${detailValue(status.lastErrorCode)}</span></div>
       <div><strong>Atualizada em</strong><span>${formatDateTime(status.updatedAt)}</span></div>
+    </section>
+    <section class="panel" data-auto-refresh-ms="${status.requiresPairingCode || String(status.status || '').toLowerCase() === 'connecting' ? '2500' : '0'}">
+      <h2>Conectar pelo número de telefone</h2>
+      ${status.pairingCode
+        ? `<div class="pairing-code" aria-live="polite">${esc(status.pairingCode)}</div>
+           <p>Abra o WhatsApp no celular → Dispositivos conectados → Conectar com número de telefone e informe este código. Ele expira em poucos minutos.</p>`
+        : `<p>Use esta opção para vincular sem QR Code. O número informado deve ser o número do WhatsApp que será conectado.</p>`}
+      <form method="post" action="/wa2/instances/${encodeURIComponent(instanceId)}/pairing-code" class="compact-form">
+        ${csrfField(csrfToken)}
+        <label>Número do WhatsApp<input name="phone" required maxlength="20" inputmode="tel" placeholder="(11) 98765-4321"></label>
+        <button class="small">Gerar código de pareamento</button>
+      </form>
+      <form method="post" action="/wa2/instances/${encodeURIComponent(instanceId)}/reset" class="compact-form"
+        data-confirm="Isso apagará a sessão salva desta instância. Você terá que vinculá-la novamente. Continuar?">
+        ${csrfField(csrfToken)}
+        <input type="hidden" name="confirmation" value="RESET_WA2_SESSION">
+        <button class="small danger">Resetar sessão antes do pareamento</button>
+      </form>
     </section>
     <section class="panel">
       <h2>Ações</h2>
@@ -1822,6 +1841,7 @@ export function chatView({
   selectedChat = null,
   messages = [],
   labels = [],
+  labelId = '',
   search = '',
   error = '',
   message = '',
@@ -1831,14 +1851,14 @@ export function chatView({
     `<option value="${esc(instance.id)}"${instance.id === selectedInstanceId ? ' selected' : ''}>${esc(instance.name || instance.id)}</option>`
   ).join('');
   const chatItems = chats.map((chat) => `
-    <a class="chat-list-item${selectedChat?.id === chat.id ? ' is-active' : ''}" href="/chat?instanceId=${encodeURIComponent(selectedInstanceId)}&chatId=${encodeURIComponent(chat.id)}">
-      <strong>${esc(chat.name || chat.jid)}</strong>
+    <a class="chat-list-item${selectedChat?.id === chat.id ? ' is-active' : ''}" href="/chat?instanceId=${encodeURIComponent(selectedInstanceId)}&chatId=${encodeURIComponent(chat.id)}${labelId ? `&labelId=${encodeURIComponent(labelId)}` : ''}${search ? `&search=${encodeURIComponent(search)}` : ''}">
+      <strong>${esc(chat.displayName || chat.name || chat.displayPhone || 'Contato WhatsApp')}</strong>
       <small>${esc(chat.lastMessageText || 'Sem mensagem salva')}</small>
-      <span class="muted">${chat.messageCount} mensagem(ns) · ${chat.labels.map((label) => esc(label.name)).join(', ') || 'sem etiqueta'}</span>
+      <span class="muted">${esc(chat.displayPhone || (chat.isGroup ? 'Grupo' : 'WhatsApp'))} · ${chat.messageCount} mensagem(ns) · ${chat.labels.map((label) => esc(label.name)).join(', ') || 'sem etiqueta'}</span>
     </a>`).join('');
   const messageItems = messages.map((item) => `
     <article class="chat-message ${item.fromMe ? 'from-me' : 'from-contact'}">
-      <div>${esc(item.text || item.messageType || 'Mensagem sem texto')}</div>
+      <div>${esc(item.text || 'Mensagem recebida')}</div>
       <small>${item.fromMe ? 'Você' : 'Contato'} · ${formatDateTime(item.timestamp || item.createdAt)}</small>
     </article>`).join('');
   const labelOptions = labels.map((label) => `<option value="${esc(label.id)}">${esc(label.name)}</option>`).join('');
@@ -1849,21 +1869,76 @@ export function chatView({
     <section class="panel">
       <form method="get" action="/chat" class="filters-grid">
         <label>Instância<select name="instanceId" required>${instanceOptions}</select></label>
+        <label>Etiqueta<select name="labelId"><option value="">Todas</option>${labels.map((label) => `<option value="${esc(label.id)}"${label.id === labelId ? ' selected' : ''}>${esc(label.name)}</option>`).join('')}</select></label>
         <label>Buscar<input name="search" value="${esc(search)}" maxlength="120" placeholder="Nome, telefone ou mensagem"></label>
         <button type="submit">Atualizar</button>
       </form>
     </section>
-    <section class="chat-layout" data-chat-root data-instance-id="${esc(selectedInstanceId)}" data-chat-id="${esc(selectedChat?.id || '')}" data-search="${esc(search)}">
+    <section class="chat-layout" data-chat-root data-instance-id="${esc(selectedInstanceId)}" data-chat-id="${esc(selectedChat?.id || '')}" data-search="${esc(search)}" data-label-id="${esc(labelId)}">
       <div class="panel chat-list"><div class="panel-title"><div><h2>Conversas</h2><small class="muted">Selecione uma conversa para abrir o histórico</small></div><span class="chat-count" data-chat-count>${chats.length}</span></div><div class="chat-list-scroll" data-chat-items>${chatItems || '<p class="empty">Nenhuma conversa encontrada.</p>'}</div></div>
       <div class="panel chat-thread">
         ${selectedChat ? `
-          <div class="panel-title chat-thread-title"><div><h2>${esc(selectedChat.name || selectedChat.jid)}</h2><small>${esc(selectedChat.jid)}</small></div><span class="muted">${selectedChat.messageCount} mensagem(ns)</span></div>
+          <div class="panel-title chat-thread-title"><div><h2 data-chat-title>${esc(selectedChat.displayName || selectedChat.name || selectedChat.displayPhone || 'Contato WhatsApp')}</h2><small data-chat-phone>${esc(selectedChat.displayPhone || (selectedChat.isGroup ? 'Grupo' : 'WhatsApp'))}</small></div><span class="muted" data-chat-message-count>${selectedChat.messageCount} mensagem(ns)</span></div>
           <div class="chat-labels"><strong>Etiquetas</strong>${selectedChat.labels.map((label) => `<span class="wa2-tag">${esc(label.name)}</span>`).join('') || '<span class="muted">Nenhuma</span>'}</div>
           <div class="chat-messages" data-chat-messages>${messageItems || '<p class="empty">Nenhuma mensagem persistida.</p>'}</div>
           <form method="post" action="/chat/send" class="chat-composer">${csrfField(csrfToken)}<input type="hidden" name="instanceId" value="${esc(selectedInstanceId)}"><input type="hidden" name="chatId" value="${esc(selectedChat.id)}"><textarea name="text" maxlength="4000" required placeholder="Digite uma mensagem"></textarea><button type="submit">Enviar</button></form>
           <form method="post" action="/chat/label" class="chat-label-form">${csrfField(csrfToken)}<input type="hidden" name="instanceId" value="${esc(selectedInstanceId)}"><input type="hidden" name="chatId" value="${esc(selectedChat.id)}"><select name="labelId" required>${labelOptions}</select><select name="operation"><option value="apply">Aplicar</option><option value="remove">Remover</option></select><button type="submit" class="secondary">Alterar etiqueta</button></form>
         ` : '<p class="empty">Selecione uma conversa.</p>'}
       </div>
+    </section>
+  `, { csrfToken });
+}
+
+export function whatsappLabelsView({
+  instance = null,
+  labels = [],
+  error = '',
+  csrfToken = '',
+}) {
+  const rows = labels.map((label) => `
+    <a class="label-card" href="/etiquetas/${encodeURIComponent(label.id)}?instanceId=${encodeURIComponent(instance?.id || '')}">
+      <strong>${esc(label.name)}</strong><span>${esc(label.chatCount ?? 0)} contato(s)</span>
+    </a>`).join('');
+  return layout('Etiquetas WhatsApp', `
+    ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+    <section class="hero"><div><h1>Etiquetas WhatsApp</h1><p>Veja todas as etiquetas sincronizadas e os contatos de cada uma.</p></div>
+      <div class="meta-box ${instance ? 'ready' : 'pending'}"><strong>${esc(instance?.name || 'Sem instância')}</strong><span>${labels.length} etiqueta(s)</span></div>
+    </section>
+    <section class="panel"><div class="panel-title"><h2>Catálogo</h2><a class="button-link secondary" href="/chat">Conversas</a></div>
+      <div class="label-grid">${rows || '<p class="empty">Nenhuma etiqueta sincronizada.</p>'}</div>
+    </section>
+  `, { csrfToken });
+}
+
+export function whatsappLabelContactsView({
+  instance = null,
+  label = null,
+  chats = [],
+  search = '',
+  nextCursor = null,
+  error = '',
+  csrfToken = '',
+}) {
+  const rows = chats.map((chat) => `
+    <tr><td><strong>${esc(chat.displayName || chat.name || chat.displayPhone || 'Contato WhatsApp')}</strong><small>${esc(chat.displayPhone || 'Identidade sem telefone')}</small></td>
+      <td>${esc(chat.lastMessageText || 'Sem mensagem salva')}</td><td>${formatDateTime(chat.lastMessageAt)}</td>
+      <td><a class="small button-link" href="/chat?instanceId=${encodeURIComponent(instance?.id || '')}&chatId=${encodeURIComponent(chat.id)}">Abrir conversa</a></td></tr>`).join('');
+  const nextLink = nextCursor
+    ? `<a class="button-link secondary" href="/etiquetas/${encodeURIComponent(label?.id || '')}?instanceId=${encodeURIComponent(instance?.id || '')}&search=${encodeURIComponent(search)}&cursor=${encodeURIComponent(nextCursor)}">Próxima página</a>`
+    : '';
+  return layout(`${label?.name || 'Etiqueta'} · Contatos`, `
+    ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+    <section class="hero"><div><h1>${esc(label?.name || 'Etiqueta WhatsApp')}</h1><p>Contatos vinculados a esta etiqueta.</p></div>
+      <div class="meta-box ready"><strong>${esc(label?.chatCount ?? chats.length)} contato(s)</strong><span>${esc(instance?.name || 'WhatsApp')}</span></div>
+    </section>
+    <section class="panel"><form method="get" action="/etiquetas/${encodeURIComponent(label?.id || '')}" class="filter-grid">
+      <input type="hidden" name="instanceId" value="${esc(instance?.id || '')}">
+      <label>Buscar<input name="search" value="${esc(search)}" maxlength="120" placeholder="Nome ou telefone"></label>
+      <button type="submit">Filtrar</button><a class="button-link secondary" href="/etiquetas?instanceId=${encodeURIComponent(instance?.id || '')}">Voltar às etiquetas</a>
+    </form></section>
+    <section class="panel"><div class="panel-title"><h2>Contatos</h2><span>${chats.length} exibidos</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Contato</th><th>Última mensagem</th><th>Data</th><th>Ação</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">Nenhum contato encontrado.</td></tr>'}</tbody></table></div>
+      <div class="actions">${nextLink}</div>
     </section>
   `, { csrfToken });
 }

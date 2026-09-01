@@ -9,6 +9,8 @@ import {
   wa2LabelJobsView,
   wa2QrView,
   chatView,
+  whatsappLabelsView,
+  whatsappLabelContactsView,
 } from '../src/views.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -102,6 +104,22 @@ test('CRM concentra conversas e etiquetas WhatsApp, mantendo reconciliação for
   });
   assert.match(html, /Conversas WhatsApp/);
   assert.match(html, /Alterar etiqueta/);
+});
+
+test('CRM exibe o catálogo real de etiquetas e seus contatos', () => {
+  const labels = whatsappLabelsView({
+    instance: { id: 'instance-1', name: 'WhatsApp principal' },
+    labels: [{ id: '10', name: 'Novo', chatCount: 4 }],
+  });
+  const contacts = whatsappLabelContactsView({
+    instance: { id: 'instance-1', name: 'WhatsApp principal' },
+    label: { id: '10', name: 'Novo', chatCount: 4 },
+    chats: [{ id: 'chat-1', displayName: 'Ana', displayPhone: '+55 (11) 98765-4321', jid: '5511987654321@s.whatsapp.net', lastMessageText: 'Olá', lastMessageAt: '2026-08-01T12:00:00.000Z' }],
+  });
+  assert.match(labels, /href="\/etiquetas\/10/);
+  assert.match(labels, /4 contato/);
+  assert.match(contacts, /Ana/);
+  assert.match(contacts, /\+55 \(11\) 98765-4321/);
 });
 
 test('eventos e jobs têm status textual, cards mobile e erro escapado', () => {

@@ -667,6 +667,50 @@ test('lista etiquetas da instância com o contrato real e descarta extras', asyn
   assert.equal(capturedOptions.headers['idempotency-key'], undefined);
 });
 
+test('lista chats com identificação amigável e filtro de etiqueta', async () => {
+  let capturedUrl;
+  const client = clientWith(async (url) => {
+    capturedUrl = url;
+    return jsonResponse({
+      instanceId: 'instance-1',
+      chats: [{
+        id: 'chat-1',
+        jid: '5511987654321@s.whatsapp.net',
+        displayName: 'Ana',
+        displayPhone: '+55 (11) 98765-4321',
+        updatedAt: '2026-07-27T12:00:00.000Z',
+        messageCount: 2,
+        labels: [{ waLabelId: '10', name: 'Novo' }],
+      }],
+      nextCursor: null,
+      hasMore: false,
+    });
+  });
+  const page = await client.listChats('instance-1', { labelId: '10', limit: 50 });
+  assert.equal(page.chats[0].displayName, 'Ana');
+  assert.equal(page.chats[0].messageCount, 2);
+  assert.match(capturedUrl, /\/chats\?limit=50&labelId=10/);
+});
+
+test('lista mensagens e envia pelo contrato interno', async () => {
+  const calls = [];
+  const client = clientWith(async (url, options) => {
+    calls.push({ url, options });
+    if (options.method === 'POST') return jsonResponse({ queued: true, jobId: 'manual-job' }, { status: 202 });
+    return jsonResponse({
+      instanceId: 'instance-1',
+      chatId: 'chat-1',
+      messages: [{ id: 'message-1', waMessageId: 'wa-1', fromMe: false, text: 'Oi', createdAt: '2026-07-27T12:00:00.000Z' }],
+      nextBefore: null,
+      hasMore: false,
+    });
+  });
+  assert.equal((await client.listChatMessages('instance-1', 'chat-1')).messages[0].text, 'Oi');
+  assert.deepEqual(await client.sendChatMessage('instance-1', 'chat-1', 'Oi', { idempotencyKey: 'crm-message:test-1' }), { queued: true, jobId: 'manual-job' });
+  assert.equal(calls[0].url, 'http://localhost:3100/api/internal/v1/instances/instance-1/chats/chat-1/messages?limit=50');
+  assert.equal(calls[1].options.method, 'POST');
+});
+
 test('lista etiquetas do chat usando IDs validados e rota exata', async () => {
   let capturedUrl;
   const client = clientWith(async (url) => {

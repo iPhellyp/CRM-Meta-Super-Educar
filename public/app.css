@@ -300,6 +300,10 @@
 .chat-composer { align-items: end; margin-top: 12px; }
 .chat-composer textarea { flex: 1 1 300px; min-height: 64px; resize: vertical; }
 .chat-label-form { margin-top: 12px; }
+.label-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.label-card { display: grid; gap: 6px; padding: 16px; border: 1px solid var(--color-border, #e1e5eb); border-radius: 12px; color: inherit; text-decoration: none; background: var(--color-surface, #fff); }
+.label-card span { color: var(--color-text-secondary, #66717c); font-size: .82rem; }
+.label-card:hover, .label-card:focus-visible { border-color: var(--color-brand, #6740a3); background: #f6f1ff; box-shadow: 0 0 0 2px rgba(103,64,163,.1); }
 @media (max-width: 760px) {
   .chat-layout { grid-template-columns: 1fr; gap: 12px; }
   .chat-list-scroll { max-height: 285px; }
@@ -351,6 +355,7 @@
   .modal form { display: flex; flex-direction: column; gap: var(--space-4); }
   .qr-panel { text-align: center; }
   .qr-image { display: block; width: min(100%, 420px); height: auto; margin: 0 auto var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-md); }
+  .pairing-code { margin: var(--space-4) 0; padding: var(--space-4); border: 2px dashed var(--color-accent); border-radius: var(--radius-md); color: var(--color-accent); font: 700 clamp(2rem, 8vw, 3rem)/1.1 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .18em; text-align: center; }
   .compact-form { max-width: 540px; }
   .dashboard-tool > summary, .origin-details > summary { cursor: pointer; font-weight: var(--font-weight-bold); }
   .dashboard-tool > summary { font-size: var(--font-h3); }

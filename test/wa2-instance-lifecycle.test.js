@@ -33,3 +33,17 @@ test('CRM exibe o QR remoto e atualiza enquanto conecta', async () => {
   assert.match(browser, /data-auto-refresh-ms/);
   assert.match(views, /Excluir instância/);
 });
+
+test('CRM oferece pairing code e reset explícito da sessão', async () => {
+  const [views, server, client] = await Promise.all([
+    read('src/views.js'),
+    read('src/server.js'),
+    read('src/wa2.js'),
+  ]);
+  assert.match(views, /pairing-code/);
+  assert.match(views, /RESET_WA2_SESSION/);
+  assert.match(server, /app\.post\('\/wa2\/instances\/:id\/pairing-code'/);
+  assert.match(server, /app\.post\('\/wa2\/instances\/:id\/reset'/);
+  assert.match(client, /requestWa2PairingCode/);
+  assert.match(client, /resetWa2Instance/);
+});

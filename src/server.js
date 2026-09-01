@@ -139,6 +139,8 @@ import {
   wa2LabelJobsView,
   wa2QrView,
   chatView,
+  whatsappLabelsView,
+  whatsappLabelContactsView,
   whatsappContactsView,
   whatsappCampaignsView,
   whatsappSendsView,
@@ -156,6 +158,8 @@ import {
   getWa2Health,
   getWa2InstanceQr,
   getWa2InstanceStatus,
+  requestWa2PairingCode,
+  resetWa2Instance,
   getWa2IdentityRebuildStatus,
   listWa2Chats,
   listWa2ChatMessages,
@@ -817,6 +821,83 @@ async function renderWhatsappContactsPage(req, res) {
 
 app.get(['/contatos', '/whatsapp/contatos'], renderWhatsappContactsPage);
 
+async function renderWhatsappLabelsPage(req, res) {
+  const instance = await requestedWhatsappInstance(req.query.instanceId);
+  if (!instance) {
+    return res.status(503).send(whatsappLabelsView({
+      error: 'Nenhuma instância WhatsApp habilitada.',
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  }
+  try {
+    const labels = await listWa2Labels(instance.remote_instance_id);
+    return res.send(whatsappLabelsView({
+      instance,
+      labels,
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  } catch (error) {
+    console.error(JSON.stringify({ level: 'warn', msg: 'Falha ao carregar etiquetas WhatsApp', code: error?.code || 'WHATSAPP_LABELS_LOAD_FAILED' }));
+    return res.status(503).send(whatsappLabelsView({
+      instance,
+      error: 'Não foi possível carregar as etiquetas WhatsApp.',
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  }
+}
+
+app.get('/etiquetas', renderWhatsappLabelsPage);
+
+async function renderWhatsappLabelContactsPage(req, res) {
+  const instance = await requestedWhatsappInstance(req.query.instanceId);
+  const labelId = String(req.params.id || '').trim();
+  const search = String(req.query.search || '').trim().slice(0, 120);
+  const cursor = String(req.query.cursor || '').trim();
+  if (!instance) {
+    return res.status(503).send(whatsappLabelContactsView({
+      search,
+      error: 'Nenhuma instância WhatsApp habilitada.',
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  }
+  try {
+    const labels = await listWa2Labels(instance.remote_instance_id);
+    const label = labels.find((item) => item.id === labelId);
+    if (!label) {
+      return res.status(404).send(whatsappLabelContactsView({
+        instance,
+        search,
+        error: 'Etiqueta WhatsApp não encontrada.',
+        csrfToken: issueCsrfToken(req, res),
+      }));
+    }
+    const page = await listWa2Chats(instance.remote_instance_id, {
+      search,
+      labelId,
+      cursor: cursor || null,
+      limit: 100,
+    });
+    return res.send(whatsappLabelContactsView({
+      instance,
+      label,
+      chats: page.chats,
+      nextCursor: page.nextCursor,
+      search,
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  } catch (error) {
+    console.error(JSON.stringify({ level: 'warn', msg: 'Falha ao carregar contatos da etiqueta WhatsApp', code: error?.code || 'WHATSAPP_LABEL_CONTACTS_LOAD_FAILED' }));
+    return res.status(503).send(whatsappLabelContactsView({
+      instance,
+      search,
+      error: 'Não foi possível carregar os contatos desta etiqueta.',
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  }
+}
+
+app.get('/etiquetas/:id', renderWhatsappLabelContactsPage);
+
 async function renderWhatsappCampaignsPage(req, res) {
   const instance = await requestedWhatsappInstance(req.query.instanceId);
   if (!instance) {
@@ -1271,6 +1352,7 @@ async function renderChatPage(req, res) {
   const search = String(req.query.search || '').trim().slice(0, 120);
   const requestedInstanceId = String(req.query.instanceId || '');
   const requestedChatId = String(req.query.chatId || '').trim().slice(0, 200);
+  const labelId = String(req.query.labelId || '').trim().slice(0, 128);
   let instances = [];
   let selectedInstance = null;
   let chats = [];
@@ -1289,7 +1371,7 @@ async function renderChatPage(req, res) {
     if (selectedInstance) {
       const remoteInstanceId = selectedInstance.remote_instance_id;
       const [chatPage, remoteLabels] = await Promise.all([
-        listWa2Chats(remoteInstanceId, { search, limit: 50 }),
+        listWa2Chats(remoteInstanceId, { search, labelId: labelId || null, limit: 50 }),
         listWa2Labels(remoteInstanceId),
       ]);
       chats = chatPage.chats;
@@ -1316,6 +1398,7 @@ async function renderChatPage(req, res) {
     selectedChat,
     messages,
     labels,
+    labelId,
     search,
   };
   if (formatJson) {
@@ -1721,6 +1804,52 @@ app.post('/wa2/instances/:id/connect', async (req, res) => {
   }
 });
 
+app.post('/wa2/instances/:id/pairing-code', async (req, res) => {
+  let instanceId;
+  try {
+    instanceId = validateWa2InstanceId(req.params.id);
+    await requestWa2PairingCode(instanceId, req.body.phone);
+    return redirectWith(
+      res,
+      `/wa2/instances/${encodeURIComponent(instanceId)}`,
+      'message',
+      'Solicitação enviada. O código aparecerá nesta página em alguns segundos.',
+    );
+  } catch (error) {
+    const path = instanceId
+      ? `/wa2/instances/${encodeURIComponent(instanceId)}`
+      : '/wa2';
+    return redirectWith(res, path, 'error', wa2LinkErrorMessage(error));
+  }
+});
+
+app.post('/wa2/instances/:id/reset', async (req, res) => {
+  let instanceId;
+  try {
+    instanceId = validateWa2InstanceId(req.params.id);
+    if (req.body.confirmation !== 'RESET_WA2_SESSION') {
+      return redirectWith(
+        res,
+        `/wa2/instances/${encodeURIComponent(instanceId)}`,
+        'error',
+        'Confirmação de reset inválida.',
+      );
+    }
+    await resetWa2Instance(instanceId);
+    return redirectWith(
+      res,
+      `/wa2/instances/${encodeURIComponent(instanceId)}`,
+      'message',
+      'Reset da sessão enfileirado. Aguarde a desconexão e então gere o código.',
+    );
+  } catch (error) {
+    const path = instanceId
+      ? `/wa2/instances/${encodeURIComponent(instanceId)}`
+      : '/wa2';
+    return redirectWith(res, path, 'error', wa2LinkErrorMessage(error));
+  }
+});
+
 app.post('/wa2/instances/:id/sync', async (req, res) => {
   let instanceId;
   try {
@@ -1789,6 +1918,9 @@ function wa2LinkErrorMessage(error) {
     return messages[error.code] || 'Não foi possível alterar o vínculo WA2.';
   }
   if (error instanceof Wa2Error) {
+    if (error.remoteCode === 'PAIRING_RESET_REQUIRED') {
+      return 'A sessão atual precisa ser resetada antes de gerar o código de pareamento.';
+    }
     if (error.remoteCode === 'CONTACT_NOT_FOUND') return 'Contato não encontrado no WA2.';
     if (error.remoteCode === 'INSTANCE_NOT_FOUND') return 'Instância não encontrada no WA2.';
     if (error.remoteCode === 'CONTACT_AMBIGUOUS' || error.status === 409) {

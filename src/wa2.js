@@ -296,13 +296,17 @@ function sanitizeLabel(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Wa2Error('Etiqueta WA2 incompatível', { code: 'WA2_LABEL_INVALID' });
   }
-  return {
+  const sanitized = {
     id: validateWa2ResourceId(
       requiredRemoteText(value.waLabelId, 128, 'WA2_LABEL_INVALID'),
       'etiqueta',
     ),
     name: requiredRemoteText(value.name, 200, 'WA2_LABEL_INVALID'),
   };
+  if (Number.isSafeInteger(value.chatCount) && value.chatCount >= 0) {
+    sanitized.chatCount = value.chatCount;
+  }
+  return sanitized;
 }
 
 function sanitizeLabels(payload) {
@@ -325,6 +329,8 @@ function sanitizeChat(value) {
     id,
     jid,
     name: optionalRemoteText(value.name, 200, 'WA2_CHAT_INVALID'),
+    displayName: optionalRemoteText(value.displayName, 200, 'WA2_CHAT_INVALID'),
+    displayPhone: optionalRemoteText(value.displayPhone, 80, 'WA2_CHAT_INVALID'),
     isGroup: value.isGroup === true,
     unreadCount: Number.isSafeInteger(value.unreadCount) ? value.unreadCount : 0,
     lastMessageAt: value.lastMessageAt == null ? null : parseIsoDate(value.lastMessageAt)?.toISOString() || null,
@@ -332,7 +338,9 @@ function sanitizeChat(value) {
     lastInboundAt: value.lastInboundAt == null ? null : parseIsoDate(value.lastInboundAt)?.toISOString() || null,
     lastOutboundAt: value.lastOutboundAt == null ? null : parseIsoDate(value.lastOutboundAt)?.toISOString() || null,
     updatedAt: requiredRemoteText(value.updatedAt, 50, 'WA2_CHAT_INVALID'),
-    messageCount: Number.isSafeInteger(value._count?.messages) ? value._count.messages : 0,
+    messageCount: Number.isSafeInteger(value.messageCount)
+      ? value.messageCount
+      : Number.isSafeInteger(value._count?.messages) ? value._count.messages : 0,
     labels: Array.isArray(value.labels) ? value.labels.map(sanitizeLabel) : [],
   };
 }
@@ -360,6 +368,7 @@ function sanitizeMessage(value) {
     timestamp: value.timestamp == null ? null : parseIsoDate(value.timestamp)?.toISOString() || null,
     messageType: optionalRemoteText(value.messageType, 120, 'WA2_MESSAGE_INVALID'),
     text: optionalRemoteText(value.text, 4000, 'WA2_MESSAGE_INVALID'),
+    senderJid: optionalRemoteText(value.senderJid, 255, 'WA2_MESSAGE_INVALID'),
     createdAt: requiredRemoteText(value.createdAt, 50, 'WA2_MESSAGE_INVALID'),
   };
 }
@@ -718,6 +727,11 @@ function sanitizeStatus(payload) {
     connectedAt: safeText(value.connectedAt, 50),
     lastSyncAt: safeText(value.lastSyncAt, 50),
     requiresQr: value.requiresQr === true,
+    requiresPairingCode: value.requiresPairingCode === true,
+    pairingCode: typeof value.pairingCode === 'string' && /^[A-Z0-9]{8}$/.test(value.pairingCode)
+      ? value.pairingCode
+      : null,
+    pairingCodeExpiresAt: safeText(value.pairingCodeExpiresAt, 50),
     lastErrorCode: safeText(value.lastErrorCode, 80),
     updatedAt: safeText(value.updatedAt, 50),
   };
@@ -762,9 +776,11 @@ function sanitizeMutation(payload, operation) {
     };
   }
 
-  const allowedStatuses = operation === 'connect'
+  const allowedStatuses = operation === 'connect' || operation === 'pairing-code'
     ? new Set(['connecting', 'connected'])
-    : new Set(['disconnecting', 'disconnected']);
+    : operation === 'reset'
+      ? new Set(['resetting'])
+      : new Set(['disconnecting', 'disconnected']);
   if (!allowedStatuses.has(value.status) || typeof value.enqueued !== 'boolean') {
     throw new Wa2Error('Resposta de operação incompatível', {
       code: 'WA2_RESPONSE_INVALID',
@@ -1190,12 +1206,13 @@ export function createWa2Client({
     listLabels: (instanceId) => request(instancePath(instanceId, '/labels'), {
       parse: sanitizeLabels,
     }),
-    listChats: (instanceId, { search = '', cursor = null, limit = 50 } = {}) => {
+    listChats: (instanceId, { search = '', labelId = null, cursor = null, limit = 50 } = {}) => {
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
         throw new Wa2Error('Paginação de chats inválida', { code: 'WA2_CHATS_PAGE_INVALID' });
       }
       const query = new URLSearchParams({ limit: String(limit) });
       if (search) query.set('search', String(search).slice(0, 120));
+      if (labelId) query.set('labelId', validateWa2ResourceId(labelId, 'etiqueta'));
       if (cursor) query.set('cursor', validateWa2ResourceId(cursor, 'cursor'));
       return request(instancePath(instanceId, `/chats?${query}`), { parse: sanitizeChats });
     },
@@ -1264,6 +1281,22 @@ export function createWa2Client({
         parse: (payload) => sanitizeMutation(payload, 'connect'),
       });
     },
+    requestPairingCode: (instanceId, phone) => {
+      const normalizedPhone = normalizeWhatsAppPhone(String(phone || '').trim());
+      if (!normalizedPhone) {
+        throw new Wa2Error('Telefone inválido para pareamento', { code: 'WA2_PHONE_INVALID' });
+      }
+      return request(instancePath(instanceId, '/pairing-code'), {
+        method: 'POST',
+        body: { phone: normalizedPhone },
+        parse: (payload) => sanitizeMutation(payload, 'pairing-code'),
+      });
+    },
+    resetInstance: (instanceId) => request(instancePath(instanceId, '/reset'), {
+      method: 'POST',
+      body: { confirmation: 'RESET_WA2_SESSION' },
+      parse: (payload) => sanitizeMutation(payload, 'reset'),
+    }),
     syncInstance: (instanceId, scope) => {
       if (!SYNC_SCOPES.has(scope)) {
         throw new Wa2Error('Escopo de sincronização inválido', { code: 'WA2_SYNC_SCOPE_INVALID' });
@@ -1342,6 +1375,10 @@ export const removeWa2ChatLabel = (instanceId, chatId, labelId, options = {}) =>
 };
 export const connectWa2Instance = (instanceId, mode, options) =>
   defaultClient(options).connectInstance(instanceId, mode);
+export const requestWa2PairingCode = (instanceId, phone, options) =>
+  defaultClient(options).requestPairingCode(instanceId, phone);
+export const resetWa2Instance = (instanceId, options) =>
+  defaultClient(options).resetInstance(instanceId);
 export const syncWa2Instance = (instanceId, scope, options) =>
   defaultClient(options).syncInstance(instanceId, scope);
 export const disconnectWa2Instance = (instanceId, options) =>

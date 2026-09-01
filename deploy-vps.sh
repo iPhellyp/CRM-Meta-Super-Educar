@@ -269,7 +269,7 @@ done
   echo "WA2_INTERNAL_API_PRIVATE invalido" >&2
   exit 1
 }
-if [[ "$WA2_INTERNAL_API_PRIVATE" == "true" ]]; then
+if [[ "${WA2_INTERNAL_API_PRIVATE:-false}" == "true" ]]; then
   [[ "$WA2_INTERNAL_API_BASE_URL" == "http://crm-meta-whatsapp_app:3000" ]] || {
     echo "WA2_INTERNAL_API_BASE_URL privado invalido" >&2
     exit 1
@@ -303,7 +303,7 @@ export IMAGE_TAG
 echo "Git confirmado: branch=${branch} commit=${commit}"
 echo "Tag imutavel selecionada: ${IMAGE_TAG}"
 
-if [[ "$WA2_INTERNAL_API_PRIVATE" == "true" ]]; then
+if [[ "${WA2_INTERNAL_API_PRIVATE:-false}" == "true" ]]; then
   crm_app_container="$(docker ps --filter "label=com.docker.swarm.service.name=${stack_name}_app" --format '{{.ID}}' | head -n 1)"
   [[ -n "$crm_app_container" ]] || { echo "Container do CRM indisponivel para health WA2" >&2; exit 1; }
   docker exec "$crm_app_container" node -e 'fetch(process.env.WA2_INTERNAL_API_BASE_URL + "/api/internal/v1/health", { headers: { authorization: "Bearer " + process.env.WA2_INTERNAL_API_SECRET } }).then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1))'

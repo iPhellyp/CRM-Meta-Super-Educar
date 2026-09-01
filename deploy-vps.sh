@@ -304,7 +304,8 @@ echo "Git confirmado: branch=${branch} commit=${commit}"
 echo "Tag imutavel selecionada: ${IMAGE_TAG}"
 
 if [[ "$WA2_INTERNAL_API_PRIVATE" == "true" ]]; then
-  crm_app_container="$(get_one_running_container_id "${stack_name}_app")"
+  crm_app_container="$(docker ps --filter "label=com.docker.swarm.service.name=${stack_name}_app" --format '{{.ID}}' | head -n 1)"
+  [[ -n "$crm_app_container" ]] || { echo "Container do CRM indisponivel para health WA2" >&2; exit 1; }
   docker exec "$crm_app_container" node -e 'fetch(process.env.WA2_INTERNAL_API_BASE_URL + "/api/internal/v1/health", { headers: { authorization: "Bearer " + process.env.WA2_INTERNAL_API_SECRET } }).then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1))'
   echo "HTTP interno CRM -> WA2 confirmado na rede privada"
 else

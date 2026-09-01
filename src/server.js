@@ -139,6 +139,9 @@ import {
   wa2LabelJobsView,
   wa2QrView,
   chatView,
+  whatsappContactsView,
+  whatsappCampaignsView,
+  whatsappSendsView,
   renderLeadRow,
   renderLeadCard,
   wa2InstanceReplacementView,
@@ -166,6 +169,14 @@ import {
   validateWa2InstanceId,
   wa2ConfigStatus,
 } from './wa2.js';
+import {
+  createWhatsappCampaign,
+  listWhatsappCampaigns,
+  listWhatsappContacts,
+  listWhatsappLabels,
+  listWhatsappSends,
+  updateWhatsappCampaign,
+} from './whatsapp-core.js';
 import {
   getWhatsAppUrl,
   normalizeConfirmedWhatsAppPhone,
@@ -752,6 +763,172 @@ app.post(
 );
 
 app.use((req, res, next) => req.method === 'POST' ? requireCsrf(req, res, next) : next());
+
+async function requestedWhatsappInstance(rawInstanceId = '') {
+  const instances = await listWa2InstancesLocal({ enabledOnly: true });
+  const requested = z.string().uuid().safeParse(String(rawInstanceId || ''));
+  const instance = (requested.success ? instances.find((item) => item.id === requested.data) : null)
+    || instances.find((item) => item.is_default)
+    || instances[0]
+    || null;
+  return instance;
+}
+
+function whatsappCoreErrorMessage(error) {
+  return {
+    WHATSAPP_LABEL_NOT_FOUND: 'Etiqueta WhatsApp não encontrada.',
+    WHATSAPP_CAMPAIGN_EMPTY: 'Nenhum contato individual elegível foi encontrado para esta etiqueta.',
+    WHATSAPP_CAMPAIGN_ALREADY_RUNNING: 'Já existe uma campanha ativa nesta instância.',
+    WHATSAPP_CAMPAIGN_NOT_STARTABLE: 'Campanha não pode ser iniciada neste status.',
+    WHATSAPP_CAMPAIGN_NOT_RUNNING: 'Campanha não está em execução.',
+    WHATSAPP_CAMPAIGN_NOT_CANCELABLE: 'Campanha não encontrada ou já finalizada.',
+    WHATSAPP_CAMPAIGN_ACTION_INVALID: 'Ação de campanha inválida.',
+  }[error?.code] || 'Não foi possível concluir a operação WhatsApp.';
+}
+
+async function renderWhatsappContactsPage(req, res) {
+  const instance = await requestedWhatsappInstance(req.query.instanceId);
+  const search = String(req.query.search || '').trim().slice(0, 120);
+  if (!instance) {
+    return res.status(503).send(whatsappContactsView({
+      search,
+      error: 'Nenhuma instância WhatsApp habilitada.',
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  }
+  try {
+    const result = await listWhatsappContacts(instance.remote_instance_id, { search, limit: 100 });
+    return res.send(whatsappContactsView({
+      instance,
+      ...result,
+      search,
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  } catch (error) {
+    console.error(JSON.stringify({ level: 'warn', msg: 'Falha ao carregar contatos WhatsApp', code: error?.code || 'WHATSAPP_CONTACTS_LOAD_FAILED' }));
+    return res.status(503).send(whatsappContactsView({
+      instance,
+      search,
+      error: 'Não foi possível carregar os contatos WhatsApp.',
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  }
+}
+
+app.get(['/contatos', '/whatsapp/contatos'], renderWhatsappContactsPage);
+
+async function renderWhatsappCampaignsPage(req, res) {
+  const instance = await requestedWhatsappInstance(req.query.instanceId);
+  if (!instance) {
+    return res.status(503).send(whatsappCampaignsView({
+      error: 'Nenhuma instância WhatsApp habilitada.',
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  }
+  try {
+    const [labels, campaigns] = await Promise.all([
+      listWhatsappLabels(instance.remote_instance_id),
+      listWhatsappCampaigns(instance.remote_instance_id),
+    ]);
+    return res.send(whatsappCampaignsView({
+      instance,
+      labels,
+      campaigns,
+      message: String(req.query.message || '').slice(0, 300),
+      error: String(req.query.error || '').slice(0, 300),
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  } catch (error) {
+    console.error(JSON.stringify({ level: 'warn', msg: 'Falha ao carregar campanhas WhatsApp', code: error?.code || 'WHATSAPP_CAMPAIGNS_LOAD_FAILED' }));
+    return res.status(503).send(whatsappCampaignsView({
+      instance,
+      error: 'Não foi possível carregar as campanhas WhatsApp.',
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  }
+}
+
+app.get(['/campanhas', '/whatsapp/campanhas'], renderWhatsappCampaignsPage);
+
+app.post(['/campanhas', '/whatsapp/campanhas'], async (req, res) => {
+  const instanceId = z.string().uuid().safeParse(req.body.instanceId);
+  const name = z.string().trim().min(2).max(200).safeParse(req.body.name);
+  const message = z.string().trim().min(1).max(4000).safeParse(req.body.message);
+  const labelId = z.string().trim().min(1).max(200).safeParse(req.body.labelId);
+  if (!instanceId.success || !name.success || !message.success || !labelId.success) {
+    return redirectWith(res, '/campanhas', 'error', 'Informe nome, etiqueta e mensagem válidos.');
+  }
+  try {
+    const instance = await getWa2InstanceLocalById(instanceId.data);
+    if (!instance?.enabled) throw new Error('WHATSAPP_INSTANCE_DISABLED');
+    const created = await createWhatsappCampaign({
+      instanceId: instance.remote_instance_id,
+      name: name.data,
+      message: message.data,
+      labelId: labelId.data,
+    });
+    return redirectWith(res, `/campanhas?instanceId=${encodeURIComponent(instance.id)}`, 'message', `Campanha criada com ${created.recipientCount} destinatário(s).`);
+  } catch (error) {
+    return redirectWith(res, '/campanhas', 'error', error?.message === 'WHATSAPP_INSTANCE_DISABLED'
+      ? 'Instância WhatsApp desabilitada.'
+      : whatsappCoreErrorMessage(error));
+  }
+});
+
+app.post(['/campanhas/:id/:action', '/whatsapp/campanhas/:id/:action'], async (req, res) => {
+  const instanceId = z.string().uuid().safeParse(req.body.instanceId);
+  const campaignId = z.string().trim().min(1).max(200).safeParse(req.params.id);
+  const action = z.enum(['start', 'pause', 'resume', 'cancel']).safeParse(req.params.action);
+  const redirectPath = instanceId.success ? `/campanhas?instanceId=${encodeURIComponent(instanceId.data)}` : '/campanhas';
+  if (!instanceId.success || !campaignId.success || !action.success) {
+    return redirectWith(res, redirectPath, 'error', 'Ação de campanha inválida.');
+  }
+  try {
+    const instance = await getWa2InstanceLocalById(instanceId.data);
+    if (!instance?.enabled) throw new Error('WHATSAPP_INSTANCE_DISABLED');
+    await updateWhatsappCampaign(instance.remote_instance_id, campaignId.data, action.data);
+    return redirectWith(res, redirectPath, 'message', 'Campanha atualizada.');
+  } catch (error) {
+    return redirectWith(res, redirectPath, 'error', error?.message === 'WHATSAPP_INSTANCE_DISABLED'
+      ? 'Instância WhatsApp desabilitada.'
+      : whatsappCoreErrorMessage(error));
+  }
+});
+
+async function renderWhatsappSendsPage(req, res) {
+  const instance = await requestedWhatsappInstance(req.query.instanceId);
+  const selectedCampaignId = String(req.query.campaignId || '').trim().slice(0, 200);
+  if (!instance) {
+    return res.status(503).send(whatsappSendsView({
+      selectedCampaignId,
+      error: 'Nenhuma instância WhatsApp habilitada.',
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  }
+  try {
+    const [campaigns, sends] = await Promise.all([
+      listWhatsappCampaigns(instance.remote_instance_id),
+      listWhatsappSends(instance.remote_instance_id, selectedCampaignId),
+    ]);
+    return res.send(whatsappSendsView({
+      instance,
+      campaigns,
+      sends,
+      selectedCampaignId,
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  } catch (error) {
+    console.error(JSON.stringify({ level: 'warn', msg: 'Falha ao carregar envios WhatsApp', code: error?.code || 'WHATSAPP_SENDS_LOAD_FAILED' }));
+    return res.status(503).send(whatsappSendsView({
+      instance,
+      selectedCampaignId,
+      error: 'Não foi possível carregar os envios WhatsApp.',
+      csrfToken: issueCsrfToken(req, res),
+    }));
+  }
+}
+
+app.get(['/envios', '/whatsapp/envios'], renderWhatsappSendsPage);
 
 app.post('/logout', (_req, res) => {
   clearSession(res);

@@ -68,6 +68,7 @@ try {
   const integrationTests = [
     ['test/lead-file-import-postgres.test.js', `jsonb-test-${process.pid}`],
     ['test/website-lead-ingest-postgres.test.js', `website-test-${process.pid}`],
+    ['test/whatsapp-core-postgres.test.js', `whatsapp-core-test-${process.pid}`],
   ];
   exitCode = 0;
   for (const [testFile, tenantId] of integrationTests) {

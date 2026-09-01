@@ -107,7 +107,8 @@ function appNavigation(csrfToken) {
         <details class="nav-group">
           <summary>WhatsApp</summary>
           <div class="nav-group-links"><a href="/wa2">Visão geral e conexão</a>
-            <a href="/chat">Conversas</a><a href="/wa2/labels">Etiquetas</a><a href="/wa2/label-jobs">Sincronização</a>
+            <a href="/contatos">Contatos</a><a href="/chat">Conversas</a><a href="/wa2/labels">Etiquetas</a>
+            <a href="/campanhas">Campanhas</a><a href="/envios">Envios</a><a href="/wa2/label-jobs">Sincronização</a>
             <a href="/wa2/instance-replacement">Recuperar instância</a></div>
         </details>
         <details class="nav-group">
@@ -1089,8 +1090,8 @@ export function metaConnectionsView({
 }
 
 function statusClass(status) {
-  if (['SENT', 'COMPLETED', 'DONE', 'VALID', 'CONNECTED'].includes(status)) return 'paid';
-  if (['FAILED', 'ERROR', 'INVALID', 'CANCELLED', 'DISCONNECTED'].includes(status)) return 'lost';
+  if (['SENT', 'sent', 'COMPLETED', 'DONE', 'VALID', 'CONNECTED'].includes(status)) return 'paid';
+  if (['FAILED', 'failed', 'ERROR', 'INVALID', 'CANCELLED', 'canceled', 'DISCONNECTED'].includes(status)) return 'lost';
   if (status === 'RETRY') return 'contact-started';
   if (['PROCESSING', 'RUNNING', 'PARTIAL', 'CONNECTING', 'QR_REQUIRED'].includes(status)) return 'opportunity';
   return 'new';
@@ -1863,6 +1864,130 @@ export function chatView({
           <form method="post" action="/chat/label" class="chat-label-form">${csrfField(csrfToken)}<input type="hidden" name="instanceId" value="${esc(selectedInstanceId)}"><input type="hidden" name="chatId" value="${esc(selectedChat.id)}"><select name="labelId" required>${labelOptions}</select><select name="operation"><option value="apply">Aplicar</option><option value="remove">Remover</option></select><button type="submit" class="secondary">Alterar etiqueta</button></form>
         ` : '<p class="empty">Selecione uma conversa.</p>'}
       </div>
+    </section>
+  `, { csrfToken });
+}
+
+function campaignStatusLabel(status) {
+  return {
+    draft: 'Rascunho',
+    scheduled: 'Agendada',
+    running: 'Em execução',
+    paused: 'Pausada',
+    completed: 'Concluída',
+    canceled: 'Cancelada',
+  }[status] || status || '—';
+}
+
+function whatsappCampaignActions(campaign, instanceId, csrfToken) {
+  const action = (name, label, className = 'small') => `
+    <form method="post" action="/campanhas/${encodeURIComponent(campaign.id)}/${name}" data-confirm="Confirmar ação nesta campanha?">
+      ${csrfField(csrfToken)}<input type="hidden" name="instanceId" value="${esc(instanceId)}"><button class="${className}">${label}</button>
+    </form>`;
+  if (campaign.status === 'draft' || campaign.status === 'scheduled') return action('start', 'Iniciar');
+  if (campaign.status === 'running') return `${action('pause', 'Pausar', 'small secondary')}${action('cancel', 'Cancelar', 'small danger')}`;
+  if (campaign.status === 'paused') return `${action('resume', 'Retomar')}${action('cancel', 'Cancelar', 'small danger')}`;
+  return '';
+}
+
+export function whatsappContactsView({
+  instance = null,
+  contacts = [],
+  total = 0,
+  search = '',
+  error = '',
+  message = '',
+  csrfToken = '',
+}) {
+  const rows = contacts.map((contact) => `
+    <tr>
+      <td><strong>${esc(contact.name || contact.pushName || 'Sem nome')}</strong><small>${esc(contact.jid)}</small></td>
+      <td>${detailValue(contact.phone)}</td>
+      <td>${contact.labels?.map((label) => `<span class="wa2-tag">${esc(label.name)}</span>`).join('') || '<span class="muted">Sem etiqueta</span>'}</td>
+      <td>${formatDateTime(contact.lastMessageAt)}</td>
+      <td>${contact.chatId ? `<a class="small button-link" href="/chat?instanceId=${encodeURIComponent(instance.id)}&chatId=${encodeURIComponent(contact.chatId)}">Abrir conversa</a>` : '—'}</td>
+    </tr>`).join('');
+  return layout('Contatos WhatsApp', `
+    ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+    ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
+    <section class="hero"><div><h1>Contatos WhatsApp</h1><p>Contatos sincronizados, etiquetas e acesso rápido às conversas.</p></div>
+      <div class="meta-box ${instance ? 'ready' : 'pending'}"><strong>${esc(instance?.name || 'Sem instância')}</strong><span>${total} contato(s)</span></div>
+    </section>
+    <section class="panel"><form method="get" action="/contatos" class="filter-grid">
+      ${instance ? `<input type="hidden" name="instanceId" value="${esc(instance.id)}">` : ''}
+      <label>Buscar<input name="search" value="${esc(search)}" maxlength="120" placeholder="Nome, telefone ou JID"></label>
+      <button type="submit">Filtrar</button><a class="button-link secondary" href="/campanhas">Criar campanha</a>
+    </form></section>
+    <section class="panel"><div class="panel-title"><h2>Base WhatsApp</h2><span>${contacts.length} exibidos de ${total}</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Contato</th><th>Telefone</th><th>Etiquetas</th><th>Última mensagem</th><th>Ação</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="5" class="empty">Nenhum contato encontrado.</td></tr>'}</tbody></table></div>
+    </section>
+  `, { csrfToken });
+}
+
+export function whatsappCampaignsView({
+  instance = null,
+  labels = [],
+  campaigns = [],
+  error = '',
+  message = '',
+  csrfToken = '',
+}) {
+  const labelOptions = labels.map((label) => `<option value="${esc(label.id)}">${esc(label.name)}</option>`).join('');
+  const rows = campaigns.map((campaign) => `
+    <tr>
+      <td><strong>${esc(campaign.name)}</strong><small>${esc(campaign.targetLabelName || 'Público selecionado')}</small></td>
+      <td><span class="badge ${statusClass(campaign.status)}">${esc(campaignStatusLabel(campaign.status))}</span></td>
+      <td>${esc(campaign.recipientCount)}<small>${esc(campaign.pending)} pendentes</small></td>
+      <td>${esc(campaign.sent)} enviados · ${esc(campaign.failed)} falhas</td>
+      <td>${formatDateTime(campaign.createdAt)}</td>
+      <td><div class="actions">${whatsappCampaignActions(campaign, instance?.id || '', csrfToken)}</div></td>
+    </tr>`).join('');
+  return layout('Campanhas WhatsApp', `
+    ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+    ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
+    <section class="hero"><div><h1>Campanhas WhatsApp</h1><p>Crie um envio por etiqueta e acompanhe a fila no CRM.</p></div>
+      <div class="meta-box ${instance ? 'ready' : 'pending'}"><strong>${esc(instance?.name || 'Sem instância')}</strong><span>Worker privado ativo</span></div>
+    </section>
+    ${instance ? `<section class="panel"><h2>Nova campanha</h2><form method="post" action="/campanhas" class="filter-grid">
+      ${csrfField(csrfToken)}<input type="hidden" name="instanceId" value="${esc(instance.id)}">
+      <label>Nome<input name="name" required maxlength="200" placeholder="Ex: Retorno matrícula"></label>
+      <label>Etiqueta do público<select name="labelId" required><option value="">Selecione</option>${labelOptions}</select></label>
+      <label class="wide-field">Mensagem<textarea name="message" required maxlength="4000" placeholder="Mensagem para os contatos da etiqueta"></textarea></label>
+      <button type="submit">Criar campanha</button>
+    </form><small>A campanha começa como rascunho. O worker privado agenda os destinatários após Iniciar.</small></section>` : '<section class="panel"><p class="empty">Nenhuma instância WhatsApp habilitada.</p></section>'}
+    <section class="panel"><div class="panel-title"><h2>Campanhas</h2><span>${campaigns.length} exibidas</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Campanha</th><th>Status</th><th>Destinatários</th><th>Resultado</th><th>Criada</th><th>Ações</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="6" class="empty">Nenhuma campanha criada.</td></tr>'}</tbody></table></div>
+    </section>
+  `, { csrfToken });
+}
+
+export function whatsappSendsView({
+  instance = null,
+  campaigns = [],
+  sends = [],
+  selectedCampaignId = '',
+  error = '',
+  csrfToken = '',
+}) {
+  const campaignOptions = campaigns.map((campaign) => `<option value="${esc(campaign.id)}"${campaign.id === selectedCampaignId ? ' selected' : ''}>${esc(campaign.name)}</option>`).join('');
+  const rows = sends.map((send) => `
+    <tr><td><strong>${esc(send.displayName || 'Contato')}</strong><small>${esc(send.jid || 'JID não resolvido')}</small></td>
+      <td>${esc(send.campaignName)}</td><td><span class="badge ${statusClass(send.status)}">${esc(campaignStatusLabel(send.status))}</span></td>
+      <td>${esc(send.attemptCount)} tentativa(s)</td><td>${formatDateTime(send.sentAt || send.updatedAt)}</td>
+      <td>${detailValue(send.error || send.skippedReason)}</td></tr>`).join('');
+  const counts = sends.reduce((result, send) => { result[send.status] = (result[send.status] || 0) + 1; return result; }, {});
+  return layout('Envios WhatsApp', `
+    ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
+    <section class="hero"><div><h1>Envios WhatsApp</h1><p>Auditoria dos destinatários, status e falhas do worker privado.</p></div>
+      <div class="meta-box ${instance ? 'ready' : 'pending'}"><strong>${esc(instance?.name || 'Sem instância')}</strong><span>${sends.length} registros</span></div>
+    </section>
+    <section class="stats"><div class="stat"><span>Total</span><strong>${sends.length}</strong></div><div class="stat"><span>Enviados</span><strong>${counts.sent || 0}</strong></div><div class="stat"><span>Pendentes</span><strong>${(counts.pending || 0) + (counts.scheduled || 0) + (counts.sending || 0)}</strong></div><div class="stat risk"><span>Falhas</span><strong>${counts.failed || 0}</strong></div></section>
+    <section class="panel"><form method="get" action="/envios" class="filter-grid"><label>Campanha<select name="campaignId"><option value="">Todas</option>${campaignOptions}</select></label><button type="submit">Atualizar</button><a class="button-link secondary" href="/campanhas">Campanhas</a></form></section>
+    <section class="panel"><div class="panel-title"><h2>Destinatários</h2><span>máximo de 500 exibidos</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Contato</th><th>Campanha</th><th>Status</th><th>Tentativas</th><th>Atualizado</th><th>Detalhe</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="6" class="empty">Nenhum envio encontrado.</td></tr>'}</tbody></table></div>
     </section>
   `, { csrfToken });
 }

@@ -265,10 +265,21 @@ done
   exit 1
 }
 [[ "$APP_URL" == https://* ]] || { echo "APP_URL deve usar HTTPS" >&2; exit 1; }
-[[ "$WA2_INTERNAL_API_BASE_URL" == "https://wa2.supereducarbrasil.com.br" ]] || {
-  echo "WA2_INTERNAL_API_BASE_URL deve usar o dominio HTTPS oficial" >&2
+[[ "${WA2_INTERNAL_API_PRIVATE:-false}" =~ ^(true|false)$ ]] || {
+  echo "WA2_INTERNAL_API_PRIVATE invalido" >&2
   exit 1
 }
+if [[ "$WA2_INTERNAL_API_PRIVATE" == "true" ]]; then
+  [[ "$WA2_INTERNAL_API_BASE_URL" == "http://crm-meta-whatsapp_app:3000" ]] || {
+    echo "WA2_INTERNAL_API_BASE_URL privado invalido" >&2
+    exit 1
+  }
+else
+  [[ "$WA2_INTERNAL_API_BASE_URL" == "https://wa2.supereducarbrasil.com.br" ]] || {
+    echo "WA2_INTERNAL_API_BASE_URL deve usar o dominio HTTPS oficial" >&2
+    exit 1
+  }
+fi
 [[ "$ADMIN_PASSWORD_HASH" == scrypt\$* ]] || { echo "ADMIN_PASSWORD_HASH invalido" >&2; exit 1; }
 (( ${#SESSION_SECRET} >= 64 )) || { echo "SESSION_SECRET deve ter ao menos 64 caracteres" >&2; exit 1; }
 
@@ -292,12 +303,18 @@ export IMAGE_TAG
 echo "Git confirmado: branch=${branch} commit=${commit}"
 echo "Tag imutavel selecionada: ${IMAGE_TAG}"
 
-wa2_host="$(node -e 'console.log(new URL(process.env.WA2_INTERNAL_API_BASE_URL).hostname)')"
-getent hosts "$wa2_host" > /dev/null
-printf 'silent\nshow-error\nfail\nheader = "Authorization: Bearer %s"\n' "$WA2_INTERNAL_API_SECRET" |
-  curl --fail --silent --show-error --config - \
-    "${WA2_INTERNAL_API_BASE_URL%/}/api/internal/v1/health" > /dev/null
-echo "DNS e HTTPS CRM -> WA2 confirmados via Traefik"
+if [[ "$WA2_INTERNAL_API_PRIVATE" == "true" ]]; then
+  crm_app_container="$(get_one_running_container_id "${stack_name}_app")"
+  docker exec "$crm_app_container" node -e 'fetch(process.env.WA2_INTERNAL_API_BASE_URL + "/api/internal/v1/health", { headers: { authorization: "Bearer " + process.env.WA2_INTERNAL_API_SECRET } }).then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1))'
+  echo "HTTP interno CRM -> WA2 confirmado na rede privada"
+else
+  wa2_host="$(node -e 'console.log(new URL(process.env.WA2_INTERNAL_API_BASE_URL).hostname)')"
+  getent hosts "$wa2_host" > /dev/null
+  printf 'silent\nshow-error\nfail\nheader = "Authorization: Bearer %s"\n' "$WA2_INTERNAL_API_SECRET" |
+    curl --fail --silent --show-error --config - \
+      "${WA2_INTERNAL_API_BASE_URL%/}/api/internal/v1/health" > /dev/null
+  echo "DNS e HTTPS CRM -> WA2 confirmados via Traefik"
+fi
 
 wait_for_one_healthy_instance "${stack_name}_postgres"
 echo "PostgreSQL confirmado com uma replica, uma task Running e health healthy"

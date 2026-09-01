@@ -102,12 +102,17 @@ function appNavigation(csrfToken) {
         </details>
         <details class="nav-group">
           <summary>Integrações</summary>
-          <div class="nav-group-links"><a href="/meta/connections">Meta</a><a href="/wa2">WhatsApp</a>
-            <a href="/wa2/labels">Etiquetas</a><a href="/wa2/instance-replacement">Recuperar instância</a></div>
+          <div class="nav-group-links"><a href="/meta/connections">Meta</a></div>
+        </details>
+        <details class="nav-group">
+          <summary>WhatsApp</summary>
+          <div class="nav-group-links"><a href="/wa2">Visão geral e conexão</a>
+            <a href="/chat">Conversas</a><a href="/wa2/labels">Etiquetas</a><a href="/wa2/label-jobs">Sincronização</a>
+            <a href="/wa2/instance-replacement">Recuperar instância</a></div>
         </details>
         <details class="nav-group">
           <summary>Monitoramento</summary>
-          <div class="nav-group-links"><a href="/events">Eventos Meta</a><a href="/wa2/label-jobs">Jobs WA2</a>
+          <div class="nav-group-links"><a href="/events">Eventos Meta</a>
             <a href="/events?status=FAILED">Falhas</a></div>
         </details>
         <details class="nav-group">
@@ -690,7 +695,7 @@ function moreLeadActions(lead) {
         ${icon('details')}<span>Ver detalhes e histórico</span>
       </a>
       <a class="action-menu-item" href="/leads/${esc(lead.id)}/wa2">
-        ${icon('wa2')}<span>WA2 e etiquetas</span>
+        ${icon('wa2')}<span>WhatsApp e etiquetas</span>
       </a>
     </div>
   </details>`;
@@ -782,7 +787,7 @@ export function dashboardView({
     ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
 
     <section class="hero">
-      <div><h1>Leads e conversões</h1><p>Atendimento comercial, WhatsApp, WA2 e atribuição Meta por origem.</p></div>
+      <div><h1>Leads e conversões</h1><p>Atendimento comercial, WhatsApp e atribuição Meta por origem.</p></div>
       <div class="meta-box ${metaStatus.configured ? 'ready' : 'pending'}">
         <strong>${metaStatus.configured ? 'Meta configurada' : 'Meta pendente'}</strong>
         <span>Graph ${esc(metaStatus.graphVersion)} · ${metaStatus.testMode ? 'MODO TESTE' : 'PRODUÇÃO'}</span>
@@ -828,7 +833,7 @@ export function dashboardView({
         <label>Etapa<select name="stage"><option value="">Todas</option>${Object.entries(STAGE_LABELS).map(([value, label]) => `<option value="${value}"${filters.stage === value ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
         <label>Filtro comercial<select name="commercial"><option value="">Todos</option><option value="mql"${filters.commercial === 'mql' ? ' selected' : ''}>Qualificados — CRM 02 a CRM 04</option></select></label>
         <label>Motivo da perda<select name="lostReason"><option value="">Todos</option>${Object.entries(LOST_REASON_LABELS).map(([value, label]) => `<option value="${value}"${filters.lostReason === value ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
-        <label>Instância WA2<select name="instanceId"><option value="">Todas</option>${wa2Instances.map((instance) => `<option value="${esc(instance.id)}"${filters.instanceId === instance.id ? ' selected' : ''}>${detailValue(instance.name || instance.remote_instance_id)}</option>`).join('')}</select></label>
+        <label>Instância WhatsApp<select name="instanceId"><option value="">Todas</option>${wa2Instances.map((instance) => `<option value="${esc(instance.id)}"${filters.instanceId === instance.id ? ' selected' : ''}>${detailValue(instance.name || instance.remote_instance_id)}</option>`).join('')}</select></label>
         <label>Etiqueta WhatsApp<select name="labelId">${labelFilterOptions(wa2LabelCatalog, filters.labelId || '', filters.instanceId || '')}</select></label>
         <label>Conexão Meta<select name="metaConnectionId"><option value="">Todas</option>${metaConnections.map((connection) => `<option value="${esc(connection.id)}"${filters.metaConnectionId === connection.id ? ' selected' : ''}>${esc(connection.name)}</option>`).join('')}</select></label>
         <label>BM<input name="businessId" value="${esc(filters.businessId || '')}" inputmode="numeric"></label>
@@ -1260,15 +1265,15 @@ export function wa2DashboardView({
       </td>
     </tr>`).join('');
 
-  return layout('WA2', `
+  return layout('WhatsApp', `
     ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
     ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
     <section class="hero">
-      <div><h1>WA Sender 2</h1><p>Administração server-side de instâncias e sessão.</p></div>
+      <div><h1>WhatsApp</h1><p>Instâncias, conexão e sessão dentro do CRM.</p></div>
       <div class="meta-box ${configStatus.state === 'configured' ? 'ready' : 'pending'}">
         <strong>${esc(wa2StateLabel(configStatus))}</strong>
         <span>${health ? `Health: ${esc(health.status || (health.ok ? 'ok' : 'indisponível'))}` : 'Health não consultado'}</span>
-        ${unavailable ? '<small>O WA2 não respondeu. Tente novamente mais tarde.</small>' : ''}
+        ${unavailable ? '<small>O serviço WhatsApp não respondeu. Tente novamente mais tarde.</small>' : ''}
         ${configStatus.errors.length ? `<small>${esc(configStatus.errors.join('. '))}</small>` : ''}
       </div>
     </section>
@@ -1287,7 +1292,7 @@ export function wa2DashboardView({
         </select></label>
         <button>Criar e gerar QR</button>
       </form>
-      <small>A instância real é criada no WA2 e espelhada automaticamente no CRM.</small>
+      <small>A instância é criada e administrada pelo CRM.</small>
     </section>
     <div class="actions">
       <a class="button-link" href="/wa2/labels">Configurar etiquetas CRM</a>
@@ -1297,7 +1302,7 @@ export function wa2DashboardView({
       <div class="panel-title"><h2>Instâncias</h2><span>${instances.length} exibidas</span></div>
       <div class="admin-card-list mobile-admin-only">
         ${instances.map((instance) => `<article class="admin-card">
-          <header><div><span class="eyebrow">Instância WA2</span><h3>${detailValue(instance.name || instance.id)}</h3></div>
+          <header><div><span class="eyebrow">Instância WhatsApp</span><h3>${detailValue(instance.name || instance.id)}</h3></div>
             <span class="badge ${statusClass(instance.status)}">${esc(wa2RemoteStatusLabel(instance.status))}</span></header>
           <dl><div><dt>Telefone</dt><dd>${detailValue(instance.phone)}</dd></div>
             <div><dt>Função</dt><dd>${detailValue(instance.role)}</dd></div>
@@ -1420,11 +1425,11 @@ export function wa2LabelBindingsView({
     }).join('')
     : '';
 
-  return layout('Etiquetas WA2', `
+  return layout('Etiquetas WhatsApp', `
     ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
     ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
     <section class="hero">
-      <div><h1>Etapas CRM → etiquetas WA2</h1><p>Os IDs remotos são confirmados no servidor antes de serem salvos.</p></div>
+      <div><h1>Etapas CRM → etiquetas WhatsApp</h1><p>As etiquetas são confirmadas no servidor antes de serem salvas.</p></div>
       ${selectedInstance ? `<div class="meta-box ${incomplete ? 'pending' : 'ready'}"><strong>${incomplete} binding(s) incompleto(s)</strong><span>${detailValue(selectedInstance.name || selectedInstance.remote_instance_id)}</span></div>` : ''}
     </section>
     ${bindingWarnings.length ? `<div class="alert warning">Configuração de binding a revisar: ${bindingWarnings.map((stage) => `${esc(stage)} deve apontar para ${stage === 'NEGOTIATING' ? 'CRM 03' : 'CRM 04'}`).join('; ')}. Nenhuma alteração foi aplicada.</div>` : ''}
@@ -1487,7 +1492,7 @@ export function wa2LabelJobsView({
   return layout('Jobs de etiquetas WA2', `
     ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
     ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
-    <section class="hero"><div><h1>Fila de etiquetas WA2</h1><p>Processamento, retries e falhas da sincronização CRM → WA2.</p></div></section>
+    <section class="hero"><div><h1>Fila de etiquetas WhatsApp</h1><p>Processamento, retries e falhas da sincronização CRM → WhatsApp.</p></div></section>
     <section class="stats">
       ${stat('Pendentes', counts.pending || 0)}
       ${stat('Processando', counts.running || 0)}
@@ -1530,11 +1535,11 @@ export function wa2InstanceView({
   error = '',
   csrfToken = '',
 }) {
-  return layout('Instância WA2', `
+  return layout('Instância WhatsApp', `
     ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
     ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
     <section class="hero">
-      <div><h1>${detailValue(status.name || instanceId)}</h1><p>Estado atual da instância WA2.</p></div>
+      <div><h1>${detailValue(status.name || instanceId)}</h1><p>Estado atual da instância WhatsApp.</p></div>
       <span class="badge ${statusClass(status.status)}">${esc(wa2RemoteStatusLabel(status.status))}</span>
     </section>
     <section class="panel detail-grid">
@@ -1578,10 +1583,10 @@ export function wa2InstanceView({
 }
 
 export function wa2QrView({ instanceId, status, error = '', csrfToken = '' }) {
-  return layout('QR WA2', `
+  return layout('QR WhatsApp', `
     ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
     <section class="hero">
-      <div><h1>QR da instância</h1><p>O QR é consultado no WA2 e não é armazenado pelo CRM.</p></div>
+      <div><h1>QR da instância</h1><p>O QR é consultado pelo CRM e não é armazenado.</p></div>
       <span class="badge ${statusClass(status.status)}">${detailValue(status.status)}</span>
     </section>
     <section class="panel qr-panel" data-auto-refresh-ms="${['connecting', 'qr'].includes(String(status.status || '').toLowerCase()) ? '3000' : '0'}">
@@ -1589,7 +1594,7 @@ export function wa2QrView({ instanceId, status, error = '', csrfToken = '' }) {
         ? `<img class="qr-image" src="/wa2/instances/${encodeURIComponent(instanceId)}/qr/image" alt="QR temporário da instância WA2" referrerpolicy="no-referrer">`
         : `<p>${String(status.status || '').toLowerCase() === 'connected'
           ? 'WhatsApp conectado.'
-          : 'Preparando QR no worker do WA2...'}</p>`}
+          : 'Preparando QR no serviço WhatsApp...'}</p>`}
       <p class="muted">O QR pode expirar. Atualize esta página para consultar novamente o estado da instância.</p>
       <div class="actions">
         <a class="small button-link" href="/wa2/instances/${encodeURIComponent(instanceId)}/qr">Atualizar estado</a>
@@ -1638,6 +1643,7 @@ export function leadWa2View({
             <input type="hidden" name="confirmation" value="UNLINK_WA2">
             <button class="small danger">Desvincular</button>
           </form>
+          <a class="small button-link" href="/chat?instanceId=${encodeURIComponent(link.wa2_instance_id)}&chatId=${encodeURIComponent(link.remote_chat_id)}">Abrir conversa</a>
         </div>
       </td>
     </tr>`).join('');
@@ -1707,7 +1713,7 @@ export function leadWa2View({
     ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
     ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
     <section class="hero">
-      <div><h1>WhatsApp/WA2 · ${esc(lead.name)}</h1><p>Vínculo manual com contato e chat individual.</p></div>
+      <div><h1>WhatsApp · ${esc(lead.name)}</h1><p>Vínculo manual com contato e chat individual.</p></div>
     </section>
     <section class="panel detail-grid">
       <div><strong>Telefone bruto</strong><span>${detailValue(lead.phone)}</span></div>
@@ -1835,10 +1841,10 @@ export function chatView({
       <small>${item.fromMe ? 'Você' : 'Contato'} · ${formatDateTime(item.timestamp || item.createdAt)}</small>
     </article>`).join('');
   const labelOptions = labels.map((label) => `<option value="${esc(label.id)}">${esc(label.name)}</option>`).join('');
-  return layout('Chat', `
+  return layout('Conversas WhatsApp', `
     ${error ? `<div class="alert error">${esc(error)}</div>` : ''}
     ${message ? `<div class="alert success">${esc(message)}</div>` : ''}
-    <section class="hero"><div><h1>Chat</h1><p>Conversas carregadas do histórico persistido pelo Baileys.</p></div></section>
+    <section class="hero"><div><h1>Conversas WhatsApp</h1><p>Conversas e etiquetas disponíveis no CRM.</p></div></section>
     <section class="panel">
       <form method="get" action="/chat" class="filters-grid">
         <label>Instância<select name="instanceId" required>${instanceOptions}</select></label>

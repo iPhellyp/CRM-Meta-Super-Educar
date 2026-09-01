@@ -8,6 +8,7 @@ import {
   historicalOperationsView,
   wa2LabelJobsView,
   wa2QrView,
+  chatView,
 } from '../src/views.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -78,14 +79,29 @@ test('reconciliação não aparece na interface operacional', () => {
   assert.doesNotMatch(html, /\/operations\/reconciliations/);
 });
 
-test('menu remove Chat e reconciliação, mantendo a rota antiga protegida', () => {
+test('CRM concentra conversas e etiquetas WhatsApp, mantendo reconciliação fora do menu', () => {
   const source = read('src/views.js');
   const server = read('src/server.js');
-  assert.doesNotMatch(source, /href="\/chat"/);
+  assert.match(source, /href="\/chat">Conversas<\/a>/);
   assert.doesNotMatch(source, /href="\/operations#reconciliacoes"/);
-  assert.match(server, /app\.get\('\/chat',[\s\S]*?res\.redirect\(302, '\/'\)/);
+  assert.match(server, /app\.get\('\/chat', renderChatPage\)/);
   assert.match(server, /app\.post\('\/operations\/reconciliations',[\s\S]*?WA2_RECONCILIATION_DISABLED/);
-  assert.match(server, /app\.post\('\/chat\/send',[\s\S]*?CHAT_DISABLED/);
+  assert.doesNotMatch(server, /CHAT_DISABLED/);
+  const html = chatView({
+    instances: [],
+    selectedInstanceId: '11111111-1111-4111-8111-111111111111',
+    selectedChat: {
+      id: 'chat-1',
+      jid: '5511999999999@s.whatsapp.net',
+      name: 'Contato',
+      messageCount: 1,
+      labels: [{ id: 'label-1', name: 'Interessado' }],
+    },
+    labels: [{ id: 'label-1', name: 'Interessado' }],
+    csrfToken: 'csrf',
+  });
+  assert.match(html, /Conversas WhatsApp/);
+  assert.match(html, /Alterar etiqueta/);
 });
 
 test('eventos e jobs têm status textual, cards mobile e erro escapado', () => {

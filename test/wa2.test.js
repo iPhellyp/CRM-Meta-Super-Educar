@@ -114,6 +114,26 @@ test('exige HTTPS em produção', () => {
   }).state, 'invalid');
 });
 
+test('permite HTTP somente para o serviço WA2 privado na rede interna', () => {
+  assert.equal(wa2ConfigStatus({
+    ...VALID_ENV,
+    NODE_ENV: 'production',
+    WA2_INTERNAL_API_BASE_URL: 'http://crm-meta-whatsapp_app:3000',
+    WA2_INTERNAL_API_PRIVATE: 'true',
+  }).state, 'configured');
+  assert.equal(wa2ConfigStatus({
+    ...VALID_ENV,
+    NODE_ENV: 'production',
+    WA2_INTERNAL_API_BASE_URL: 'http://crm-meta-whatsapp_app:3000',
+  }).state, 'invalid');
+  assert.equal(wa2ConfigStatus({
+    ...VALID_ENV,
+    NODE_ENV: 'production',
+    WA2_INTERNAL_API_BASE_URL: 'http://evil.example:3000',
+    WA2_INTERNAL_API_PRIVATE: 'true',
+  }).state, 'invalid');
+});
+
 test('permite HTTP em localhost no ambiente de teste', () => {
   assert.equal(wa2ConfigStatus(VALID_ENV).state, 'configured');
 });

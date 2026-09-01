@@ -18,6 +18,12 @@ const SYNC_SCOPES = new Set(['quick', 'catalog', 'history']);
 const LABEL_EVENT_OPERATIONS = new Set(['APPLY', 'REMOVE']);
 const LABEL_EVENT_SOURCES = new Set(['INTERNAL_API', 'WHATSAPP', 'UNKNOWN']);
 const INSTANCE_ROLES = new Set(['SALES', 'SUPPORT', 'BILLING', 'POST_SALES', 'AFFILIATE', 'GENERAL']);
+const PRIVATE_HTTP_HOSTS = new Set([
+  'crm-meta-whatsapp_app',
+  'wa-sender-simple_app',
+  'whatsapp',
+  'wa2-engine',
+]);
 
 export class Wa2Error extends Error {
   constructor(message, {
@@ -60,7 +66,7 @@ function parseTimeout(value) {
     : null;
 }
 
-function parseBaseUrl(value, nodeEnv) {
+function parseBaseUrl(value, nodeEnv, allowPrivateHttp = false) {
   try {
     const url = new URL(String(value || ''));
     if (
@@ -72,11 +78,16 @@ function parseBaseUrl(value, nodeEnv) {
     ) {
       return null;
     }
-    if (nodeEnv === 'production' && url.protocol !== 'https:') return null;
+    if (
+      nodeEnv === 'production' &&
+      url.protocol !== 'https:' &&
+      !(allowPrivateHttp && url.protocol === 'http:' && PRIVATE_HTTP_HOSTS.has(url.hostname))
+    ) return null;
     if (
       url.protocol === 'http:' &&
       !['development', 'test'].includes(nodeEnv) &&
-      !['localhost', '127.0.0.1', '::1'].includes(url.hostname)
+      !['localhost', '127.0.0.1', '::1'].includes(url.hostname) &&
+      !(allowPrivateHttp && PRIVATE_HTTP_HOSTS.has(url.hostname))
     ) {
       return null;
     }
@@ -90,6 +101,7 @@ export function wa2ConfigStatus(env = process.env) {
   const hasBaseUrl = Boolean(String(env.WA2_INTERNAL_API_BASE_URL || '').trim());
   const hasSecret = Boolean(String(env.WA2_INTERNAL_API_SECRET || '').trim());
   const timeoutMs = parseTimeout(env.WA2_INTERNAL_API_TIMEOUT_MS);
+  const allowPrivateHttp = env.WA2_INTERNAL_API_PRIVATE === 'true';
 
   if (!hasBaseUrl && !hasSecret && timeoutMs) {
     return {
@@ -104,7 +116,7 @@ export function wa2ConfigStatus(env = process.env) {
   const errors = [];
   if (hasBaseUrl !== hasSecret) errors.push('Base URL e segredo devem ser configurados juntos');
   const baseUrl = hasBaseUrl
-    ? parseBaseUrl(env.WA2_INTERNAL_API_BASE_URL, env.NODE_ENV)
+    ? parseBaseUrl(env.WA2_INTERNAL_API_BASE_URL, env.NODE_ENV, allowPrivateHttp)
     : null;
   if (hasBaseUrl && !baseUrl) errors.push('Base URL inválida para o ambiente');
   if (!timeoutMs) errors.push('Timeout inválido');
@@ -931,7 +943,11 @@ export function createWa2Client({
   if (typeof fetchImpl !== 'function') {
     throw new Wa2Error('Cliente HTTP indisponível', { code: 'WA2_FETCH_UNAVAILABLE' });
   }
-  const baseUrl = parseBaseUrl(env.WA2_INTERNAL_API_BASE_URL, env.NODE_ENV);
+  const baseUrl = parseBaseUrl(
+    env.WA2_INTERNAL_API_BASE_URL,
+    env.NODE_ENV,
+    env.WA2_INTERNAL_API_PRIVATE === 'true',
+  );
   const secret = String(env.WA2_INTERNAL_API_SECRET);
 
   async function request(path, {

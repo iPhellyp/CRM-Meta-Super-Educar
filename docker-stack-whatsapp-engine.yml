@@ -1,0 +1,105 @@
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    networks:
+      - crm_meta_internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+
+  app:
+    image: wa-sender-simple:${WA2_APP_IMAGE_TAG:?WA2_APP_IMAGE_TAG obrigatoria}
+    environment:
+      NODE_ENV: production
+      ADMIN_PASSWORD: ${WA2_ADMIN_PASSWORD:?WA2_ADMIN_PASSWORD obrigatoria}
+      APP_URL: ${CRM_APP_URL:-https://crm.supereducarbrasil.com.br}
+      NEXT_PUBLIC_APP_URL: ${CRM_APP_URL:-https://crm.supereducarbrasil.com.br}
+      BAILEYS_SESSION_DIR: /app/data/baileys-session
+      BAILEYS_LOG_LEVEL: ${BAILEYS_LOG_LEVEL:-silent}
+      DATABASE_URL: ${CRM_DATABASE_URL:?CRM_DATABASE_URL obrigatoria}
+      REDIS_URL: redis://redis:6379
+      WA2_INTERNAL_API_SECRET: ${WA2_INTERNAL_API_SECRET:?WA2_INTERNAL_API_SECRET obrigatoria}
+      WA2_INTERNAL_API_PREVIOUS_SECRET: ${WA2_INTERNAL_API_PREVIOUS_SECRET:-}
+      WA2_INTERNAL_API_RATE_LIMIT: ${WA2_INTERNAL_API_RATE_LIMIT:-60}
+      WA2_INTERNAL_API_RATE_WINDOW_SECONDS: ${WA2_INTERNAL_API_RATE_WINDOW_SECONDS:-60}
+      WA2_INTERNAL_API_IDEMPOTENCY_TTL_SECONDS: ${WA2_INTERNAL_API_IDEMPOTENCY_TTL_SECONDS:-86400}
+    volumes:
+      - baileys_session:/app/data/baileys-session
+      - uploads:/app/uploads
+    networks:
+      - crm_meta_internal
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/internal/v1/health',{headers:{authorization:'Bearer '+process.env.WA2_INTERNAL_API_SECRET}}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+      update_config:
+        parallelism: 1
+        order: start-first
+        failure_action: rollback
+
+  worker:
+    image: wa-sender-simple:${WA2_WORKER_IMAGE_TAG:?WA2_WORKER_IMAGE_TAG obrigatoria}
+    command: npm run worker
+    environment:
+      NODE_ENV: production
+      ADMIN_PASSWORD: ${WA2_ADMIN_PASSWORD:?WA2_ADMIN_PASSWORD obrigatoria}
+      APP_URL: ${CRM_APP_URL:-https://crm.supereducarbrasil.com.br}
+      NEXT_PUBLIC_APP_URL: ${CRM_APP_URL:-https://crm.supereducarbrasil.com.br}
+      BAILEYS_SESSION_DIR: /app/data/baileys-session
+      BAILEYS_LOG_LEVEL: ${BAILEYS_LOG_LEVEL:-silent}
+      DATABASE_URL: ${CRM_DATABASE_URL:?CRM_DATABASE_URL obrigatoria}
+      REDIS_URL: redis://redis:6379
+    volumes:
+      - baileys_session:/app/data/baileys-session
+      - uploads:/app/uploads
+    networks:
+      - crm_meta_internal
+    healthcheck:
+      test: ["CMD", "npm", "run", "worker:health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+      update_config:
+        parallelism: 1
+        order: stop-first
+        failure_action: rollback
+
+networks:
+  crm_meta_internal:
+    external: true
+    name: crm-meta_internal
+
+volumes:
+  redis_data:
+    external: true
+    name: wa-sender-simple_redis_data
+
+  baileys_session:
+    external: true
+    name: wa-sender-simple_baileys_session
+
+  uploads:
+    external: true
+    name: wa-sender-simple_uploads

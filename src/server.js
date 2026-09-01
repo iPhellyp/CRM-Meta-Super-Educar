@@ -138,6 +138,7 @@ import {
   wa2LabelBindingsView,
   wa2LabelJobsView,
   wa2QrView,
+  chatView,
   renderLeadRow,
   renderLeadCard,
   wa2InstanceReplacementView,
@@ -1088,16 +1089,125 @@ app.post('/wa2/instance-replacement/dry-run', async (req, res) => {
   }
 });
 
-app.get('/chat', (_req, res) => {
-  return res.redirect(302, '/');
-});
+async function renderChatPage(req, res) {
+  const formatJson = String(req.query.format || '').toLowerCase() === 'json';
+  const search = String(req.query.search || '').trim().slice(0, 120);
+  const requestedInstanceId = String(req.query.instanceId || '');
+  const requestedChatId = String(req.query.chatId || '').trim().slice(0, 200);
+  let instances = [];
+  let selectedInstance = null;
+  let chats = [];
+  let selectedChat = null;
+  let messages = [];
+  let labels = [];
+  let error = '';
+
+  try {
+    instances = await listWa2InstancesLocal({ enabledOnly: true });
+    selectedInstance = instances.find((instance) => instance.id === requestedInstanceId)
+      || instances.find((instance) => instance.is_default)
+      || instances[0]
+      || null;
+
+    if (selectedInstance) {
+      const remoteInstanceId = selectedInstance.remote_instance_id;
+      const [chatPage, remoteLabels] = await Promise.all([
+        listWa2Chats(remoteInstanceId, { search, limit: 50 }),
+        listWa2Labels(remoteInstanceId),
+      ]);
+      chats = chatPage.chats;
+      labels = remoteLabels;
+      selectedChat = chats.find((chat) => chat.id === requestedChatId) || null;
+      if (selectedChat) {
+        const messagePage = await listWa2ChatMessages(remoteInstanceId, selectedChat.id, { limit: 100 });
+        messages = messagePage.messages;
+      }
+    }
+  } catch (remoteError) {
+    error = wa2UnavailableMessage(remoteError);
+    console.error(JSON.stringify({
+      level: 'warn',
+      msg: 'Falha ao carregar conversas WhatsApp no CRM',
+      code: remoteError?.code || remoteError?.remoteCode || 'WHATSAPP_CHAT_LOAD_FAILED',
+    }));
+  }
+
+  const payload = {
+    instances,
+    selectedInstanceId: selectedInstance?.id || '',
+    chats,
+    selectedChat,
+    messages,
+    labels,
+    search,
+  };
+  if (formatJson) {
+    return res.status(error ? 503 : 200).json(error ? { error: 'WHATSAPP_UNAVAILABLE' } : payload);
+  }
+  return res.send(chatView({
+    ...payload,
+    error,
+    message: String(req.query.message || '').slice(0, 300),
+    csrfToken: issueCsrfToken(req, res),
+  }));
+}
+
+app.get('/chat', renderChatPage);
 
 app.post('/chat/send', async (req, res) => {
-  return res.status(410).json({ error: 'CHAT_DISABLED' });
+  let instanceId = '';
+  try {
+    instanceId = z.string().uuid().parse(req.body.instanceId);
+    const chatId = z.string().trim().min(1).max(200).parse(req.body.chatId);
+    const text = z.string().trim().min(1).max(4000).parse(req.body.text);
+    const instance = await getWa2InstanceLocalById(instanceId);
+    if (!instance?.enabled) throw new Wa2DataError('Instância local está desabilitada', 'WA2_INSTANCE_DISABLED');
+    await sendWa2ChatMessage(instance.remote_instance_id, chatId, text);
+    return redirectWith(
+      res,
+      `/chat?instanceId=${encodeURIComponent(instanceId)}&chatId=${encodeURIComponent(chatId)}`,
+      'message',
+      'Mensagem enfileirada para envio.',
+    );
+  } catch (error) {
+    return redirectWith(
+      res,
+      instanceId ? `/chat?instanceId=${encodeURIComponent(instanceId)}` : '/chat',
+      'error',
+      error instanceof Wa2DataError ? wa2LinkErrorMessage(error) : wa2UnavailableMessage(error),
+    );
+  }
 });
 
 app.post('/chat/label', async (req, res) => {
-  return res.status(410).json({ error: 'CHAT_DISABLED' });
+  let instanceId = '';
+  try {
+    instanceId = z.string().uuid().parse(req.body.instanceId);
+    const chatId = z.string().trim().min(1).max(200).parse(req.body.chatId);
+    const labelId = z.string().trim().min(1).max(200).parse(req.body.labelId);
+    const operation = z.enum(['apply', 'remove']).parse(req.body.operation);
+    const instance = await getWa2InstanceLocalById(instanceId);
+    if (!instance?.enabled) throw new Wa2DataError('Instância local está desabilitada', 'WA2_INSTANCE_DISABLED');
+    const options = { idempotencyKey: crypto.randomUUID() };
+    if (operation === 'apply') {
+      await applyWa2ChatLabel(instance.remote_instance_id, chatId, labelId, options);
+    } else {
+      await removeWa2ChatLabel(instance.remote_instance_id, chatId, labelId, options);
+    }
+    return redirectWith(
+      res,
+      `/chat?instanceId=${encodeURIComponent(instanceId)}&chatId=${encodeURIComponent(chatId)}`,
+      'message',
+      operation === 'apply' ? 'Etiqueta aplicada.' : 'Etiqueta removida.',
+    );
+  } catch (error) {
+    return redirectWith(
+      res,
+      instanceId ? `/chat?instanceId=${encodeURIComponent(instanceId)}` : '/chat',
+      'error',
+      error instanceof Wa2DataError ? wa2LinkErrorMessage(error) : wa2UnavailableMessage(error),
+    );
+  }
 });
 
 app.post('/wa2/instances/create', async (req, res) => {

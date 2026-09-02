@@ -120,7 +120,13 @@ test('topbar desktop é horizontal e usa dropdowns sem manter o reset antigo', (
   const desktop = css.slice(desktopStart, desktopEnd);
   assert.doesNotMatch(desktop, /flex-direction:\s*column/);
   assert.match(read('src/views.js'), /class="nav-group"/);
-  assert.doesNotMatch(css, /premium-topbar-desktop-reset-v9/);
+  assert.match(read('src/views.js'), /data-nav-group/);
+  assert.match(read('src/views.js'), /name="app-nav-group"/);
+  assert.match(read('public/app.js'), /closeGroups\(group\)/);
+  assert.match(read('public/app.js'), /event\.key !== 'Escape'/);
+  assert.match(css, /\.nav-group\[open\] > summary/);
+  assert.doesNotMatch(css, /content:\s*'⌄'/);
+  assert.match(css, /max-height: min\(70vh, 440px\)/);
 });
 
 test('dashboard preserva ações agrupadas e cache versionado pela release', () => {

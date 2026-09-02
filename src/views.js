@@ -96,27 +96,27 @@ function appNavigation(csrfToken) {
       </div>
       <div class="nav-groups">
         <a class="nav-direct" href="/">Leads</a>
-        <details class="nav-group">
+        <details class="nav-group" data-nav-group name="app-nav-group">
           <summary>Operação</summary>
           <div class="nav-group-links"><a href="/operations">Importações</a></div>
         </details>
-        <details class="nav-group">
+        <details class="nav-group" data-nav-group name="app-nav-group">
           <summary>Integrações</summary>
           <div class="nav-group-links"><a href="/meta/connections">Meta</a></div>
         </details>
-        <details class="nav-group">
+        <details class="nav-group" data-nav-group name="app-nav-group">
           <summary>WhatsApp</summary>
           <div class="nav-group-links"><a href="/wa2">Visão geral e conexão</a>
             <a href="/contatos">Contatos</a><a href="/chat">Conversas</a><a href="/etiquetas">Etiquetas e contatos</a>
             <a href="/campanhas">Campanhas</a><a href="/envios">Envios</a><a href="/wa2/label-jobs">Sincronização</a>
             <a href="/wa2/instance-replacement">Recuperar instância</a></div>
         </details>
-        <details class="nav-group">
+        <details class="nav-group" data-nav-group name="app-nav-group">
           <summary>Monitoramento</summary>
           <div class="nav-group-links"><a href="/events">Eventos Meta</a>
             <a href="/events?status=FAILED">Falhas</a></div>
         </details>
-        <details class="nav-group">
+        <details class="nav-group" data-nav-group name="app-nav-group">
           <summary>Configurações</summary>
           <div class="nav-group-links"><a href="/#whatsapp-settings">Mensagens</a>
             <a href="/meta/connections">Conexões</a><a href="/#lead-tools">Preferências</a></div>

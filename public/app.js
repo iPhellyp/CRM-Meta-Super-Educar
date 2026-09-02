@@ -240,9 +240,16 @@ function setupNavigationDrawer() {
   if (!toggle || !drawer) return;
 
   const mobile = window.matchMedia('(max-width: 1099px)');
+  const groups = [...drawer.querySelectorAll('[data-nav-group]')];
+  const closeGroups = (except = null) => {
+    for (const group of groups) {
+      if (group !== except) group.removeAttribute('open');
+    }
+  };
   let open = false;
 
   const close = ({ restoreFocus = true } = {}) => {
+    closeGroups();
     if (!open) return;
     open = false;
     drawer.classList.remove('open');
@@ -284,6 +291,23 @@ function setupNavigationDrawer() {
       drawer.setAttribute('aria-hidden', 'true');
     }
   };
+
+  for (const group of groups) {
+    group.addEventListener('toggle', () => {
+      if (group.open) closeGroups(group);
+    });
+    group.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' || !group.open) return;
+      event.preventDefault();
+      event.stopPropagation();
+      group.removeAttribute('open');
+      group.querySelector('summary')?.focus();
+    });
+  }
+  document.addEventListener('click', (event) => {
+    if (!(event.target instanceof Element) || event.target.closest('[data-nav-group]')) return;
+    closeGroups();
+  });
 
   toggle.addEventListener('click', () => open ? close() : openDrawer());
   closeButton?.addEventListener('click', () => close());

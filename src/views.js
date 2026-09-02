@@ -1934,7 +1934,7 @@ export function whatsappLabelContactsView({
     <section class="panel"><form method="get" action="/etiquetas/${encodeURIComponent(label?.id || '')}" class="filter-grid">
       <input type="hidden" name="instanceId" value="${esc(instance?.id || '')}">
       <label>Buscar<input name="search" value="${esc(search)}" maxlength="120" placeholder="Nome ou telefone"></label>
-      <button type="submit">Filtrar</button><a class="button-link secondary" href="/etiquetas?instanceId=${encodeURIComponent(instance?.id || '')}">Voltar às etiquetas</a>
+      <button type="submit">Filtrar</button><a class="button-link secondary" href="/etiquetas/${encodeURIComponent(label?.id || '')}/export.csv?instanceId=${encodeURIComponent(instance?.id || '')}&search=${encodeURIComponent(search)}">Exportar CSV</a><a class="button-link secondary" href="/etiquetas?instanceId=${encodeURIComponent(instance?.id || '')}">Voltar às etiquetas</a>
     </form></section>
     <section class="panel"><div class="panel-title"><h2>Contatos</h2><span>${chats.length} exibidos</span></div>
       <div class="table-wrap"><table><thead><tr><th>Contato</th><th>Última mensagem</th><th>Data</th><th>Ação</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">Nenhum contato encontrado.</td></tr>'}</tbody></table></div>
@@ -1991,7 +1991,7 @@ export function whatsappContactsView({
     <section class="panel"><form method="get" action="/contatos" class="filter-grid">
       ${instance ? `<input type="hidden" name="instanceId" value="${esc(instance.id)}">` : ''}
       <label>Buscar<input name="search" value="${esc(search)}" maxlength="120" placeholder="Nome, telefone ou JID"></label>
-      <button type="submit">Filtrar</button><a class="button-link secondary" href="/campanhas">Criar campanha</a>
+      <button type="submit">Filtrar</button><a class="button-link secondary" href="/contatos/export.csv?instanceId=${encodeURIComponent(instance?.id || '')}&search=${encodeURIComponent(search)}">Exportar CSV</a><a class="button-link secondary" href="/campanhas">Criar campanha</a>
     </form></section>
     <section class="panel"><div class="panel-title"><h2>Base WhatsApp</h2><span>${contacts.length} exibidos de ${total}</span></div>
       <div class="table-wrap"><table><thead><tr><th>Contato</th><th>Telefone</th><th>Etiquetas</th><th>Última mensagem</th><th>Ação</th></tr></thead>

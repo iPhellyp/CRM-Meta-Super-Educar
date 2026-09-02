@@ -821,6 +821,44 @@ async function renderWhatsappContactsPage(req, res) {
 
 app.get(['/contatos', '/whatsapp/contatos'], renderWhatsappContactsPage);
 
+app.get(['/contatos/export.csv', '/whatsapp/contatos/export.csv'], async (req, res) => {
+  const instance = await requestedWhatsappInstance(req.query.instanceId);
+  const search = String(req.query.search || '').trim().slice(0, 120);
+  if (!instance) return res.status(503).send('Nenhuma instância WhatsApp habilitada.');
+
+  try {
+    res.set('content-type', 'text/csv; charset=utf-8');
+    res.set('content-disposition', 'attachment; filename="contatos-whatsapp.csv"');
+    res.write('\ufeffNome;Telefone;JID;Etiquetas;Última mensagem;Última mensagem em\n');
+
+    let offset = 0;
+    while (true) {
+      const page = await listWhatsappContacts(instance.remote_instance_id, {
+        search,
+        limit: 500,
+        offset,
+      });
+      for (const contact of page.contacts) {
+        res.write([
+          contact.name || contact.pushName || '',
+          contact.phone || '',
+          contact.jid || '',
+          (contact.labels || []).map((label) => label.name).join(', '),
+          contact.lastMessageText || '',
+          contact.lastMessageAt || '',
+        ].map(csvCell).join(';') + '\n');
+      }
+      offset += page.contacts.length;
+      if (!page.contacts.length || offset >= page.total) break;
+    }
+    return res.end();
+  } catch (error) {
+    console.error(JSON.stringify({ level: 'warn', msg: 'Falha ao exportar contatos WhatsApp', code: error?.code || 'WHATSAPP_CONTACTS_EXPORT_FAILED' }));
+    if (res.headersSent) return res.end();
+    return res.status(503).send('Não foi possível exportar os contatos WhatsApp.');
+  }
+});
+
 async function renderWhatsappLabelsPage(req, res) {
   const instance = await requestedWhatsappInstance(req.query.instanceId);
   if (!instance) {
@@ -895,6 +933,50 @@ async function renderWhatsappLabelContactsPage(req, res) {
     }));
   }
 }
+
+app.get('/etiquetas/:id/export.csv', async (req, res) => {
+  const instance = await requestedWhatsappInstance(req.query.instanceId);
+  const labelId = String(req.params.id || '').trim();
+  const search = String(req.query.search || '').trim().slice(0, 120);
+  if (!instance) return res.status(503).send('Nenhuma instância WhatsApp habilitada.');
+
+  try {
+    const labels = await listWa2Labels(instance.remote_instance_id);
+    const label = labels.find((item) => item.id === labelId);
+    if (!label) return res.status(404).send('Etiqueta WhatsApp não encontrada.');
+
+    res.set('content-type', 'text/csv; charset=utf-8');
+    res.set('content-disposition', 'attachment; filename="etiqueta-whatsapp.csv"');
+    res.write('\ufeffNome;Telefone;JID;Última mensagem;Última mensagem em\n');
+
+    let cursor = null;
+    do {
+      const page = await listWa2Chats(instance.remote_instance_id, {
+        search,
+        labelId,
+        cursor,
+        limit: 100,
+      });
+      for (const chat of page.chats) {
+        res.write([
+          chat.displayName || chat.name || '',
+          chat.displayPhone || '',
+          chat.jid || '',
+          chat.lastMessageText || '',
+          chat.lastMessageAt || '',
+        ].map(csvCell).join(';') + '\n');
+      }
+      if (page.nextCursor === cursor) throw new Error('Cursor de exportação repetido');
+      cursor = page.nextCursor || null;
+    } while (cursor);
+
+    return res.end();
+  } catch (error) {
+    console.error(JSON.stringify({ level: 'warn', msg: 'Falha ao exportar contatos da etiqueta WhatsApp', code: error?.code || 'WHATSAPP_LABEL_EXPORT_FAILED' }));
+    if (res.headersSent) return res.end();
+    return res.status(503).send('Não foi possível exportar os contatos desta etiqueta.');
+  }
+});
 
 app.get('/etiquetas/:id', renderWhatsappLabelContactsPage);
 
